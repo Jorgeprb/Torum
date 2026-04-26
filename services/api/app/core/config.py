@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str
 
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://100.124.49.118:5173,http://localhost:4173,http://127.0.0.1:4173,http://100.124.49.118:4173,https://pc-oficina.tail652fa7.ts.net"
 
     jwt_secret_key: SecretStr
     jwt_algorithm: str = "HS256"

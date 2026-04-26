@@ -62,6 +62,37 @@ function toChartCandle(candle: Candle): CandlestickData {
   };
 }
 
+function timeToNumber(time: Time): number {
+  if (typeof time === "number") {
+    return time;
+  }
+
+  if (typeof time === "string") {
+    const parsed = Date.parse(time);
+    return Number.isNaN(parsed) ? 0 : Math.floor(parsed / 1000);
+  }
+
+  return Math.floor(Date.UTC(time.year, time.month - 1, time.day) / 1000);
+}
+
+function sortCandlesByTimeAsc(candles: CandlestickData[]): CandlestickData[] {
+  return [...candles]
+    .filter((candle) => candle.time !== undefined && candle.time !== null)
+    .sort((a, b) => timeToNumber(a.time) - timeToNumber(b.time));
+}
+
+function sortMarkersByTimeAsc(markers: SeriesMarker<Time>[]): SeriesMarker<Time>[] {
+  return [...markers]
+    .filter((marker) => marker.time !== undefined && marker.time !== null)
+    .sort((a, b) => timeToNumber(a.time) - timeToNumber(b.time));
+}
+
+function sortLineDataByTimeAsc(data: LineData[]): LineData[] {
+  return [...data]
+    .filter((point) => point.time !== undefined && point.time !== null)
+    .sort((a, b) => timeToNumber(a.time) - timeToNumber(b.time));
+}
+
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -70,13 +101,16 @@ function chartTimeToUnix(time: Time | null): number | null {
   if (time === null) {
     return null;
   }
+
   if (typeof time === "number") {
     return Math.floor(time);
   }
+
   if (typeof time === "string") {
     const parsed = Date.parse(time);
     return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
   }
+
   return Math.floor(Date.UTC(time.year, time.month - 1, time.day) / 1000);
 }
 
@@ -102,6 +136,7 @@ export function MarketChart({
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lineSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
+
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
   const [drawingShapes, setDrawingShapes] = useState<DrawingShape[]>([]);
@@ -112,6 +147,7 @@ export function MarketChart({
     const chart = chartRef.current;
     const series = seriesRef.current;
     const container = containerRef.current;
+
     if (!chart || !series || !container) {
       setOverlays([]);
       setDrawingShapes([]);
@@ -121,23 +157,35 @@ export function MarketChart({
 
     const containerWidth = container.clientWidth;
     const containerHeight = container.clientHeight;
+
     const next = noTradeZones
       .map((zone) => {
         const start = Math.floor(new Date(zone.start_time).getTime() / 1000) as UTCTimestamp;
         const end = Math.floor(new Date(zone.end_time).getTime() / 1000) as UTCTimestamp;
+
         const startCoordinate = chart.timeScale().timeToCoordinate(start);
         const endCoordinate = chart.timeScale().timeToCoordinate(end);
+
         if (startCoordinate === null && endCoordinate === null) {
           return null;
         }
+
         const left = Math.max(0, startCoordinate ?? 0);
         const right = Math.min(containerWidth, endCoordinate ?? containerWidth);
+
         if (right <= left) {
           return null;
         }
-        return { id: zone.id, left, width: Math.max(2, right - left), zone };
+
+        return {
+          id: zone.id,
+          left,
+          width: Math.max(2, right - left),
+          zone
+        };
       })
       .filter((value): value is ZoneOverlay => value !== null);
+
     setOverlays(next);
 
     const shapes = drawings
@@ -147,59 +195,113 @@ export function MarketChart({
         const backgroundColor = styleValue(drawing.style, "backgroundColor", "rgba(245,197,66,0.15)");
         const textColor = styleValue(drawing.style, "textColor", "#edf2ef");
         const label = drawingLabel(drawing);
-        const base = { id: drawing.id, drawing, color, lineWidth, label };
+
+        const base = {
+          id: drawing.id,
+          drawing,
+          color,
+          lineWidth,
+          label
+        };
+
         const payload = drawing.payload;
 
         if (drawing.drawing_type === "horizontal_line") {
           const price = numberValue(payload.price);
           const y = price === null ? null : series.priceToCoordinate(price);
-          return y === null ? null : ({ ...base, kind: "horizontal_line", x1: 0, x2: containerWidth, y } satisfies DrawingShape);
+
+          return y === null
+            ? null
+            : ({
+                ...base,
+                kind: "horizontal_line",
+                x1: 0,
+                x2: containerWidth,
+                y
+              } satisfies DrawingShape);
         }
+
         if (drawing.drawing_type === "vertical_line") {
           const time = numberValue(payload.time);
+
           if (time === null) {
             return null;
           }
+
           const x = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
-          return x === null ? null : ({ ...base, kind: "vertical_line", x, y1: 0, y2: containerHeight } satisfies DrawingShape);
+
+          return x === null
+            ? null
+            : ({
+                ...base,
+                kind: "vertical_line",
+                x,
+                y1: 0,
+                y2: containerHeight
+              } satisfies DrawingShape);
         }
+
         if (drawing.drawing_type === "trend_line") {
           const points = Array.isArray(payload.points) ? payload.points : [];
-          if (points.length !== 2 || typeof points[0] !== "object" || points[0] === null || typeof points[1] !== "object" || points[1] === null) {
+
+          if (
+            points.length !== 2 ||
+            typeof points[0] !== "object" ||
+            points[0] === null ||
+            typeof points[1] !== "object" ||
+            points[1] === null
+          ) {
             return null;
           }
+
           const first = points[0] as Record<string, unknown>;
           const second = points[1] as Record<string, unknown>;
+
           const time1 = numberValue(first.time);
           const time2 = numberValue(second.time);
           const price1 = numberValue(first.price);
           const price2 = numberValue(second.price);
+
           if (time1 === null || time2 === null || price1 === null || price2 === null) {
             return null;
           }
+
           const x1 = chart.timeScale().timeToCoordinate(time1 as UTCTimestamp);
           const x2 = chart.timeScale().timeToCoordinate(time2 as UTCTimestamp);
           const y1 = series.priceToCoordinate(price1);
           const y2 = series.priceToCoordinate(price2);
+
           return x1 === null || x2 === null || y1 === null || y2 === null
             ? null
-            : ({ ...base, kind: "trend_line", x1, y1, x2, y2 } satisfies DrawingShape);
+            : ({
+                ...base,
+                kind: "trend_line",
+                x1,
+                y1,
+                x2,
+                y2
+              } satisfies DrawingShape);
         }
+
         if (drawing.drawing_type === "rectangle") {
           const time1 = numberValue(payload.time1);
           const time2 = numberValue(payload.time2);
           const price1 = numberValue(payload.price1);
           const price2 = numberValue(payload.price2);
+
           if (time1 === null || time2 === null || price1 === null || price2 === null) {
             return null;
           }
+
           const x1 = toChartX(chart, time1, 0);
           const x2 = toChartX(chart, time2, containerWidth);
           const y1 = series.priceToCoordinate(price1);
           const y2 = series.priceToCoordinate(price2);
+
           if (y1 === null || y2 === null) {
             return null;
           }
+
           return {
             ...base,
             kind: "rectangle",
@@ -210,21 +312,26 @@ export function MarketChart({
             backgroundColor
           } satisfies DrawingShape;
         }
+
         if (drawing.drawing_type === "manual_zone") {
           const time1 = numberValue(payload.time1);
           const time2 = numberValue(payload.time2);
           const priceMin = numberValue(payload.price_min);
           const priceMax = numberValue(payload.price_max);
+
           if (time1 === null || priceMin === null || priceMax === null) {
             return null;
           }
+
           const x1 = toChartX(chart, time1, 0);
           const x2 = time2 === null ? containerWidth : toChartX(chart, time2, containerWidth);
           const y1 = series.priceToCoordinate(priceMin);
           const y2 = series.priceToCoordinate(priceMax);
+
           if (y1 === null || y2 === null) {
             return null;
           }
+
           return {
             ...base,
             kind: "manual_zone",
@@ -236,20 +343,35 @@ export function MarketChart({
             direction: typeof payload.direction === "string" ? payload.direction : "NEUTRAL"
           } satisfies DrawingShape;
         }
+
         if (drawing.drawing_type === "text") {
           const time = numberValue(payload.time);
           const price = numberValue(payload.price);
           const text = typeof payload.text === "string" ? payload.text : drawingLabel(drawing);
+
           if (time === null || price === null) {
             return null;
           }
+
           const x = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
           const y = series.priceToCoordinate(price);
-          return x === null || y === null ? null : ({ ...base, kind: "text", x, y, text, textColor } satisfies DrawingShape);
+
+          return x === null || y === null
+            ? null
+            : ({
+                ...base,
+                kind: "text",
+                x,
+                y,
+                text,
+                textColor
+              } satisfies DrawingShape);
         }
+
         return null;
       })
       .filter((shape): shape is DrawingShape => shape !== null);
+
     setDrawingShapes(shapes);
 
     setTradeLineOverlays(
@@ -328,18 +450,25 @@ export function MarketChart({
       return;
     }
 
-    seriesRef.current.setData(candles.map(toChartCandle));
-    seriesRef.current.setMarkers(tradeMarkers);
+    const sortedCandles = sortCandlesByTimeAsc(candles.map(toChartCandle));
+    const sortedTradeMarkers = sortMarkersByTimeAsc(tradeMarkers);
+
+    seriesRef.current.setData(sortedCandles);
+    seriesRef.current.setMarkers(sortedTradeMarkers);
+
     chartRef.current?.timeScale().fitContent();
     window.setTimeout(recalculateOverlays, 0);
   }, [candles, recalculateOverlays, tradeMarkers]);
 
   useEffect(() => {
     const chart = chartRef.current;
+
     if (!chart) {
       return;
     }
+
     const activeNames = new Set(indicatorLines.map((line) => line.name));
+
     for (const [name, series] of lineSeriesRef.current) {
       if (!activeNames.has(name)) {
         chart.removeSeries(series);
@@ -349,14 +478,23 @@ export function MarketChart({
 
     for (const line of indicatorLines) {
       let lineSeries = lineSeriesRef.current.get(line.name);
+
       if (!lineSeries) {
         lineSeries = chart.addLineSeries({
           color: line.style.color ?? "#d6b25e",
           lineWidth: (line.style.lineWidth ?? 2) as 1 | 2 | 3 | 4
         });
+
         lineSeriesRef.current.set(line.name, lineSeries);
       }
-      const data: LineData[] = line.points.map((point) => ({ time: point.time as UTCTimestamp, value: point.value }));
+
+      const data: LineData[] = sortLineDataByTimeAsc(
+        line.points.map((point) => ({
+          time: point.time as UTCTimestamp,
+          value: point.value
+        }))
+      );
+
       lineSeries.setData(data);
     }
   }, [indicatorLines]);
@@ -365,17 +503,22 @@ export function MarketChart({
     const chart = chartRef.current;
     const series = seriesRef.current;
     const container = containerRef.current;
+
     if (!chart || !series || !container) {
       return null;
     }
+
     const bounds = container.getBoundingClientRect();
     const x = event.clientX - bounds.left;
     const y = event.clientY - bounds.top;
+
     const time = chartTimeToUnix(chart.timeScale().coordinateToTime(x));
     const price = series.coordinateToPrice(y);
+
     if (time === null || price === null) {
       return null;
     }
+
     return { time, price };
   }
 
@@ -383,24 +526,64 @@ export function MarketChart({
     if (drawingTool === "select" || !onCreateDrawing) {
       return;
     }
+
     const point = chartPointFromClick(event);
+
     if (!point) {
       return;
     }
 
     if (drawingTool === "horizontal_line") {
-      onCreateDrawing(createBaseDrawing(symbol, timeframe, "horizontal_line", { price: Number(point.price.toFixed(5)), label: "Horizontal" }, "Horizontal line"));
+      onCreateDrawing(
+        createBaseDrawing(
+          symbol,
+          timeframe,
+          "horizontal_line",
+          {
+            price: Number(point.price.toFixed(5)),
+            label: "Horizontal"
+          },
+          "Horizontal line"
+        )
+      );
       return;
     }
+
     if (drawingTool === "vertical_line") {
-      onCreateDrawing(createBaseDrawing(symbol, timeframe, "vertical_line", { time: point.time, label: "Vertical" }, "Vertical line"));
+      onCreateDrawing(
+        createBaseDrawing(
+          symbol,
+          timeframe,
+          "vertical_line",
+          {
+            time: point.time,
+            label: "Vertical"
+          },
+          "Vertical line"
+        )
+      );
       return;
     }
+
     if (drawingTool === "text") {
       const text = window.prompt("Texto del dibujo", "Nota");
+
       if (text?.trim()) {
-        onCreateDrawing(createBaseDrawing(symbol, timeframe, "text", { time: point.time, price: Number(point.price.toFixed(5)), text: text.trim() }, "Text"));
+        onCreateDrawing(
+          createBaseDrawing(
+            symbol,
+            timeframe,
+            "text",
+            {
+              time: point.time,
+              price: Number(point.price.toFixed(5)),
+              text: text.trim()
+            },
+            "Text"
+          )
+        );
       }
+
       return;
     }
 
@@ -417,8 +600,14 @@ export function MarketChart({
           "trend_line",
           {
             points: [
-              { time: pendingPoint.time, price: Number(pendingPoint.price.toFixed(5)) },
-              { time: point.time, price: Number(point.price.toFixed(5)) }
+              {
+                time: pendingPoint.time,
+                price: Number(pendingPoint.price.toFixed(5))
+              },
+              {
+                time: point.time,
+                price: Number(point.price.toFixed(5))
+              }
             ],
             label: "Trend"
           },
@@ -426,6 +615,7 @@ export function MarketChart({
         )
       );
     }
+
     if (drawingTool === "rectangle") {
       onCreateDrawing(
         createBaseDrawing(
@@ -443,6 +633,7 @@ export function MarketChart({
         )
       );
     }
+
     if (drawingTool === "manual_zone") {
       onCreateDrawing(
         createBaseDrawing(
@@ -463,18 +654,22 @@ export function MarketChart({
         )
       );
     }
+
     setPendingPoint(null);
     setPendingCoordinate(null);
   }
 
   useEffect(() => {
     const chart = chartRef.current;
+
     if (!chart) {
       return;
     }
+
     chart.timeScale().subscribeVisibleTimeRangeChange(recalculateOverlays);
     window.addEventListener("resize", recalculateOverlays);
     recalculateOverlays();
+
     return () => {
       chart.timeScale().unsubscribeVisibleTimeRangeChange(recalculateOverlays);
       window.removeEventListener("resize", recalculateOverlays);
@@ -482,13 +677,28 @@ export function MarketChart({
   }, [recalculateOverlays]);
 
   return (
-    <div className={drawingTool === "select" ? "market-chart market-chart-frame" : "market-chart market-chart-frame market-chart-frame--drawing"} ref={containerRef} onClick={handleDrawingClick}>
+    <div
+      className={
+        drawingTool === "select"
+          ? "market-chart market-chart-frame"
+          : "market-chart market-chart-frame market-chart-frame--drawing"
+      }
+      ref={containerRef}
+      onClick={handleDrawingClick}
+    >
       <div className="news-zone-layer" aria-hidden="true">
         {overlays.map((overlay) => (
           <div
-            className={overlay.zone.blocks_trading ? "news-zone-overlay news-zone-overlay--blocking" : "news-zone-overlay"}
+            className={
+              overlay.zone.blocks_trading
+                ? "news-zone-overlay news-zone-overlay--blocking"
+                : "news-zone-overlay"
+            }
             key={overlay.id}
-            style={{ left: overlay.left, width: overlay.width }}
+            style={{
+              left: overlay.left,
+              width: overlay.width
+            }}
             title={overlay.zone.reason}
           >
             <span className="news-zone-line news-zone-line--start" />
@@ -496,15 +706,21 @@ export function MarketChart({
           </div>
         ))}
       </div>
+
       <DrawingLayer
         onSelect={(drawingId) => onSelectDrawing?.(drawingId)}
         pendingPoint={pendingCoordinate}
         selectedDrawingId={selectedDrawingId}
         shapes={drawingShapes}
       />
+
       <div className="trade-line-layer" aria-hidden="true">
         {tradeLineOverlays.map((line) => (
-          <div className={`trade-line trade-line--${line.tone}`} key={line.id} style={{ top: line.y }}>
+          <div
+            className={`trade-line trade-line--${line.tone}`}
+            key={line.id}
+            style={{ top: line.y }}
+          >
             <span>{line.label}</span>
           </div>
         ))}

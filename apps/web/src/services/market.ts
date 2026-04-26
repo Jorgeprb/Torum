@@ -1,8 +1,15 @@
 import { getAuthToken } from "../stores/authStore";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
-const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL ?? "ws://localhost:8000";
-
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  (window.location.protocol === "https:"
+    ? window.location.origin
+    : "http://localhost:8000");
+const WS_BASE_URL =
+  import.meta.env.VITE_WS_BASE_URL ||
+  (window.location.protocol === "https:"
+    ? window.location.origin.replace(/^https:/, "wss:")
+    : "ws://localhost:8000");
 export type Timeframe = "M1" | "M5" | "H1" | "H2" | "H4" | "D1" | "W1";
 
 export interface SymbolMapping {
