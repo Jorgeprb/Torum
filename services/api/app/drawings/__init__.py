@@ -1,0 +1,1 @@
+"""Persistent chart drawings domain."""

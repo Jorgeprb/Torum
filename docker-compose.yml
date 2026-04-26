@@ -1,0 +1,56 @@
+name: torum
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: torum-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-torum}
+      POSTGRES_USER: ${POSTGRES_USER:-torum}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-postgres-password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - torum_timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-torum} -d ${POSTGRES_DB:-torum}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: torum-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - torum_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./services/api
+    container_name: torum-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+    ports:
+      - "${API_BIND_HOST:-0.0.0.0}:${API_PORT:-8000}:8000"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  torum_timescaledb_data:
+  torum_redis_data:

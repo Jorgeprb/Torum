@@ -1,0 +1,55 @@
+{
+  "source": "manual_example",
+  "events": [
+    {
+      "country": "United States",
+      "currency": "USD",
+      "impact": "HIGH",
+      "title": "Nonfarm Payrolls",
+      "event_time": "2026-05-01T12:30:00Z",
+      "previous_value": "150K",
+      "forecast_value": "180K",
+      "actual_value": null
+    },
+    {
+      "country": "United States",
+      "currency": "USD",
+      "impact": "HIGH",
+      "title": "Consumer Price Index",
+      "event_time": "2026-05-12T12:30:00Z",
+      "previous_value": "0.3%",
+      "forecast_value": "0.2%",
+      "actual_value": null
+    },
+    {
+      "country": "United States",
+      "currency": "USD",
+      "impact": "HIGH",
+      "title": "FOMC Statement",
+      "event_time": "2026-05-20T18:00:00Z",
+      "previous_value": null,
+      "forecast_value": null,
+      "actual_value": null
+    },
+    {
+      "country": "United States",
+      "currency": "USD",
+      "impact": "HIGH",
+      "title": "Fed Interest Rate Decision",
+      "event_time": "2026-05-20T18:00:00Z",
+      "previous_value": "4.50%",
+      "forecast_value": "4.50%",
+      "actual_value": null
+    },
+    {
+      "country": "United States",
+      "currency": "USD",
+      "impact": "HIGH",
+      "title": "Unemployment Rate",
+      "event_time": "2026-06-05T12:30:00Z",
+      "previous_value": "4.1%",
+      "forecast_value": "4.0%",
+      "actual_value": null
+    }
+  ]
+}

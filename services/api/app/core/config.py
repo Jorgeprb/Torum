@@ -1,0 +1,53 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    project_name: str = "Torum"
+    environment: str = "local"
+    tailscale_enabled: bool = False
+    public_host: str = "localhost"
+    api_v1_prefix: str = "/api/v1"
+
+    database_url: str
+    redis_url: str
+
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    jwt_secret_key: SecretStr
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 720
+
+    initial_admin_username: str
+    initial_admin_email: str
+    initial_admin_password: SecretStr
+    initial_trader_username: str
+    initial_trader_email: str
+    initial_trader_password: SecretStr
+
+    trading_mode: Literal["PAPER", "DEMO", "LIVE"] = "PAPER"
+    mt5_bridge_base_url: str | None = "http://host.docker.internal:9100"
+    price_stale_after_seconds: int = 30
+    candle_price_source: Literal["last_or_mid", "mid"] = "last_or_mid"
+    mock_market_tick_interval_seconds: float = 1.0
+    live_trading_enabled: bool = False
+    default_magic_number: int = 260426
+    default_deviation_points: int = 20
+
+    news_block_enabled: bool = False
+    news_block_minutes_before: int = 60
+    news_block_minutes_after: int = 60
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
