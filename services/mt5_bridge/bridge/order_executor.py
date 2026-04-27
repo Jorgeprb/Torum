@@ -1,5 +1,7 @@
 import logging
 import math
+import re
+import unicodedata
 from typing import Any
 
 from bridge.account_state import AccountState
@@ -9,6 +11,7 @@ from bridge.order_models import BridgeOrderResponse, ClosePositionRequest, Marke
 
 logger = logging.getLogger(__name__)
 
+MT5_COMMENT_MAX_LEN = 20
 
 class OrderExecutor:
     def __init__(self, settings: BridgeSettings, mt5_client: MT5Client) -> None:
@@ -288,10 +291,40 @@ class OrderExecutor:
         except (TypeError, ValueError):
             return float(price)
 
-    def _comment(self, comment: str | None) -> str:
-        prefix = self.settings.mt5_order_comment_prefix.strip()
-        suffix = (comment or "manual").strip()
-        return f"{prefix} {suffix}"[:31]
+    def _comment(self, comment: str | None, side: str | None = None) -> str:
+        prefix = self.settings.mt5_order_comment_prefix.strip() or "Torum"
+
+        if comment:
+            raw = f"{prefix} {comment}"
+        elif side:
+            raw = f"{prefix} {side}"
+        else:
+            raw = prefix
+
+        safe = _sanitize_mt5_comment(raw, max_len=MT5_COMMENT_MAX_LEN)
+
+        if not safe:
+            safe = "Torum"
+
+        return safe
+
+
+def _sanitize_mt5_comment(value: str | None, max_len: int = MT5_COMMENT_MAX_LEN) -> str:
+    if value is None:
+        return "Torum"
+
+    text = str(value)
+
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+
+    text = re.sub(r"[^A-Za-z0-9 _.\-]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if not text:
+        return "Torum"
+
+    return text[:max_len].strip()
 
 
 def _tick_price_for_side(tick: Any, side: str) -> float | None:
