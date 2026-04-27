@@ -42,6 +42,7 @@ export interface Candle {
 
 export interface Tick {
   time: string;
+  time_msc: number;
   internal_symbol: string;
   broker_symbol: string;
   bid: number | null;
@@ -114,6 +115,7 @@ export type MarketMessage =
       symbol: string;
       broker_symbol: string | null;
       time: string;
+      time_msc: number | null;
       bid: number | null;
       ask: number | null;
       last: number | null;

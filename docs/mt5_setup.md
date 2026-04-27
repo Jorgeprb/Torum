@@ -70,6 +70,17 @@ MT5_ALLOWED_ACCOUNT_MODES=DEMO
 MT5_ENABLE_REAL_TRADING=false
 ```
 
+Para permitir que el mismo bridge pueda enviar ordenes tanto con cuenta DEMO como con cuenta REAL, configura:
+
+```text
+MT5_ALLOW_ORDER_EXECUTION=true
+MT5_ALLOWED_ACCOUNT_MODES=DEMO,REAL
+MT5_ENABLE_REAL_TRADING=true
+MT5_MARKET_DATA_ONLY=false
+```
+
+El modo seleccionado en Torum debe seguir coincidiendo con la cuenta activa: `DEMO` con cuenta demo y `LIVE` con cuenta real. Torum no salta el risk manager ni la confirmacion fuerte de LIVE.
+
 Desde la app tambien puedes activar/desactivar la ejecucion en Ajustes. Torum guarda `mt5_order_execution_enabled` en backend y llama al servidor HTTP local del bridge:
 
 ```text

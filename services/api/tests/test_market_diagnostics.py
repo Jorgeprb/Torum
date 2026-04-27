@@ -36,8 +36,8 @@ def test_latest_tick_read_returns_latest_bid_ask_and_age() -> None:
     new_time = datetime.now(UTC)
     db.add_all(
         [
-            Tick(id=1, time=old_time, internal_symbol="XAUUSD", broker_symbol="XAUUSD", bid=4700.0, ask=4700.2, last=None, volume=0, source="MT5"),
-            Tick(id=2, time=new_time, internal_symbol="XAUUSD", broker_symbol="XAUUSD", bid=4705.6, ask=4705.82, last=None, volume=0, source="MT5"),
+            Tick(id=1, time=old_time, time_msc=1000, internal_symbol="XAUUSD", broker_symbol="XAUUSD", bid=4700.0, ask=4700.2, last=None, volume=0, source="MT5"),
+            Tick(id=2, time=new_time, time_msc=2000, internal_symbol="XAUUSD", broker_symbol="XAUUSD", bid=4705.6, ask=4705.82, last=None, volume=0, source="MT5"),
         ]
     )
     db.commit()
@@ -52,6 +52,25 @@ def test_latest_tick_read_returns_latest_bid_ask_and_age() -> None:
     assert payload.mid == 4705.71
     assert payload.spread == pytest.approx(0.22)
     assert payload.source == "MT5"
+
+
+def test_latest_tick_prefers_time_msc_over_time_when_same_second() -> None:
+    _, db = _client_with_db()
+    tick_time = datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC)
+    db.add_all(
+        [
+            Tick(id=1, time=tick_time, time_msc=1777291200900, internal_symbol="XAUUSD", broker_symbol="XAUUSD", bid=4698.59, ask=4698.80, last=None, volume=0, source="MT5"),
+            Tick(id=2, time=tick_time, time_msc=1777291200100, internal_symbol="XAUUSD", broker_symbol="XAUUSD", bid=4702.28, ask=4702.45, last=None, volume=0, source="MT5"),
+        ]
+    )
+    db.commit()
+
+    tick = latest_tick_for_symbol(db, "XAUUSD")
+    assert tick is not None
+    payload = latest_tick_to_read(tick)
+
+    assert payload.bid == 4698.59
+    assert payload.time_msc == 1777291200900
 
 
 def test_tick_batch_ignores_mock_when_market_source_is_mt5_and_mt5_connected() -> None:

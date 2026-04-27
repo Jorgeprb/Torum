@@ -7,6 +7,7 @@ from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.positions.models import Position
 from app.positions.repository import get_position, list_positions
 from app.ticks.models import Tick
+from app.ticks.service import latest_tick_order_by
 
 
 class PositionService:
@@ -80,7 +81,7 @@ class PositionService:
         latest_tick = self.db.scalar(
             select(Tick)
             .where(Tick.internal_symbol == position.internal_symbol)
-            .order_by(Tick.time.desc(), Tick.id.desc())
+            .order_by(*latest_tick_order_by())
             .limit(1)
         )
         if latest_tick is None:

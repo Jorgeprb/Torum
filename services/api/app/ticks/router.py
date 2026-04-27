@@ -8,6 +8,7 @@ from app.alerts.evaluator import PriceAlertEvaluator
 from app.alerts.push import PushNotificationService
 from app.db.session import get_db
 from app.mt5.status_store import mt5_status_store
+from app.market_data.tick_time import tick_time_msc_from_datetime
 from app.settings.trading_service import get_global_trading_settings
 from app.ticks.schemas import TickBatchRequest, TickBatchResponse, TickInput, TickRead
 from app.ticks.service import TickIngestionError, get_recent_ticks, ingest_tick_batch
@@ -90,7 +91,8 @@ def ingest_ticks_batch(
     duplicates = received_ticks - inserted_ticks
     min_time = min((row["time"] for row in inserted_rows), default=None)
     max_time = max((row["time"] for row in inserted_rows), default=None)
-    latest_row = max(inserted_rows, key=lambda row: row["time"], default=None)
+    max_time_msc = max((int(row["time_msc"]) for row in inserted_rows if row.get("time_msc") is not None), default=None)
+    latest_row = max(inserted_rows, key=lambda row: (int(row.get("time_msc") or 0), row["time"]), default=None)
     return TickBatchResponse(
         received=received_ticks,
         inserted=inserted_ticks,
@@ -101,6 +103,7 @@ def ingest_ticks_batch(
         source=payload.source,
         min_time=min_time,
         max_time=max_time,
+        max_time_msc=max_time_msc,
         last_bid=float(latest_row["bid"]) if latest_row and latest_row.get("bid") is not None else None,
         last_ask=float(latest_row["ask"]) if latest_row and latest_row.get("ask") is not None else None,
         last_broker_symbol=str(latest_row["broker_symbol"]) if latest_row else None,
@@ -116,6 +119,7 @@ def get_ticks(
     return [
         TickRead(
             time=tick.time,
+            time_msc=tick.time_msc or tick_time_msc_from_datetime(tick.time),
             internal_symbol=tick.internal_symbol,
             broker_symbol=tick.broker_symbol,
             bid=tick.bid,

@@ -182,6 +182,15 @@ MT5_ALLOWED_ACCOUNT_MODES=DEMO
 MT5_ENABLE_REAL_TRADING=false
 ```
 
+Para permitir DEMO y REAL desde el mismo bridge:
+
+```text
+MT5_ALLOW_ORDER_EXECUTION=true
+MT5_ALLOWED_ACCOUNT_MODES=DEMO,REAL
+MT5_ENABLE_REAL_TRADING=true
+MT5_MARKET_DATA_ONLY=false
+```
+
 Tambien existe control runtime desde el servidor HTTP local del bridge:
 
 ```text
@@ -189,9 +198,19 @@ GET /settings/order-execution
 PATCH /settings/order-execution
 ```
 
+Payload runtime para permitir ambas cuentas:
+
+```json
+{
+  "enabled": true,
+  "allowed_account_modes": ["DEMO", "REAL"],
+  "enable_real_trading": true
+}
+```
+
 La PWA no llama al bridge directamente. Desde Ajustes, el frontend llama al backend; el backend guarda `mt5_order_execution_enabled` y sincroniza este endpoint del bridge. Si el bridge se reinicia, vuelve al valor de `.env`, asi que puedes volver a guardar el ajuste o fijar `MT5_ALLOW_ORDER_EXECUTION=true` conscientemente para sesiones DEMO.
 
-Para LIVE futuro deben cambiarse conscientemente tambien los controles del backend y de la PWA. No se recomienda activarlo hasta completar hardening de riesgo.
+Para LIVE deben cambiarse conscientemente tambien los controles del backend y de la PWA. La confirmacion fuerte de LIVE sigue siendo obligatoria.
 
 ## Contrato de orden manual
 

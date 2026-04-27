@@ -32,7 +32,11 @@ def patch_trading_settings(
 ) -> TradingSettingsRead:
     if payload.mt5_order_execution_enabled is True:
         try:
-            MT5BridgeClient().set_order_execution_enabled(True)
+            MT5BridgeClient().set_order_execution_enabled(
+                True,
+                allowed_account_modes=["DEMO", "REAL"],
+                enable_real_trading=True,
+            )
         except MT5BridgeClientError as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

@@ -113,6 +113,8 @@ Desde esta fase, `CANDLE_PRICE_SOURCE=BID` por defecto. Una diferencia grande co
 
 Para diagnostico de ejecucion MT5 y errores `order_send=None`, ver [mt5_trading.md](docs/mt5_trading.md).
 
+Los ticks guardan `time_msc` y Torum resuelve el ultimo precio por `time_msc DESC`. El precio visible principal debe ser `latestTick.bid`; `candle.close` queda para velas/historico.
+
 Para push se usan variables VAPID en `.env`:
 
 ```text

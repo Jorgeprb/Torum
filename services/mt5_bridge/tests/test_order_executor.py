@@ -51,9 +51,18 @@ class FakeMT5:
 
 
 class FakeMT5Client:
-    def __init__(self, account_mode: str = "DEMO") -> None:
+    def __init__(
+        self,
+        account_mode: str = "DEMO",
+        terminal_trade_allowed: bool = True,
+        tradeapi_disabled: bool = False,
+        account_trade_allowed: bool = True,
+    ) -> None:
         self.mt5 = FakeMT5()
         self.account_mode = account_mode
+        self.terminal_trade_allowed = terminal_trade_allowed
+        self.tradeapi_disabled = tradeapi_disabled
+        self.account_trade_allowed = account_trade_allowed
 
     def initialize(self) -> None:
         return None
@@ -62,10 +71,14 @@ class FakeMT5Client:
         return AccountState(login=123456, server="Broker-Demo", trade_mode=self.account_mode)  # type: ignore[arg-type]
 
     def get_account_info(self) -> SimpleNamespace:
-        return SimpleNamespace(trade_allowed=True)
+        return SimpleNamespace(trade_allowed=self.account_trade_allowed)
 
     def get_terminal_info(self) -> SimpleNamespace:
-        return SimpleNamespace(connected=True, trade_allowed=True, tradeapi_disabled=False)
+        return SimpleNamespace(
+            connected=True,
+            trade_allowed=self.terminal_trade_allowed,
+            tradeapi_disabled=self.tradeapi_disabled,
+        )
 
     def is_connected(self) -> bool:
         return True
@@ -135,6 +148,15 @@ def test_order_executor_logs_last_error_when_order_send_returns_none() -> None:
     assert response.raw["last_error_code"] == 1
     assert response.raw["last_error_message"] == "fake mt5 error"
     assert response.raw["request"]["symbol"] == "XAUUSD"
+
+
+def test_order_executor_attempts_order_send_when_terminal_reports_trading_disabled() -> None:
+    client = FakeMT5Client(terminal_trade_allowed=False, tradeapi_disabled=True, account_trade_allowed=False)
+
+    response = OrderExecutor(_settings(enabled=True), client).execute_market_order(_order("BUY"))
+
+    assert response.ok is True
+    assert len(client.mt5.sent_requests) == 1
 
 
 def test_order_executor_blocks_live_when_real_trading_disabled() -> None:

@@ -1,7 +1,7 @@
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import case, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,7 @@ from app.candles.models import Candle
 from app.candles.schemas import CandleRead, CandleRow
 from app.core.config import get_settings
 from app.market_data.timeframes import SUPPORTED_TIMEFRAMES, Timeframe, bucket_start, ensure_utc
+from app.market_data.tick_time import tick_time_msc_from_datetime
 
 TickPriceSource = str
 
@@ -50,7 +51,7 @@ def build_candle_rows_from_ticks(
 ) -> list[dict[str, object]]:
     buckets: dict[tuple[str, Timeframe, datetime], dict[str, object]] = {}
 
-    sorted_ticks = sorted(ticks, key=lambda tick: ensure_utc(tick["time"]))  # type: ignore[arg-type]
+    sorted_ticks = sorted(ticks, key=_tick_sort_key)
     for tick in sorted_ticks:
         price = select_tick_price(tick, price_source)
         if price is None:
@@ -58,6 +59,7 @@ def build_candle_rows_from_ticks(
 
         symbol = str(tick["internal_symbol"])
         tick_time = ensure_utc(tick["time"])  # type: ignore[arg-type]
+        tick_time_msc = _tick_time_msc(tick)
         volume = tick.get("volume")
         tick_volume = float(volume) if isinstance(volume, (int, float)) else 0.0
 
@@ -76,17 +78,46 @@ def build_candle_rows_from_ticks(
                     "close": price,
                     "volume": tick_volume,
                     "tick_count": 1,
+                    "first_tick_time_msc": tick_time_msc,
+                    "last_tick_time_msc": tick_time_msc,
                     "source": "TICK_AGGREGATOR",
                 }
                 continue
 
             candle["high"] = max(float(candle["high"]), price)
             candle["low"] = min(float(candle["low"]), price)
-            candle["close"] = price
+            if _int_or_none(candle.get("first_tick_time_msc")) is None or tick_time_msc < int(candle["first_tick_time_msc"]):
+                candle["open"] = price
+                candle["first_tick_time_msc"] = tick_time_msc
+            if _int_or_none(candle.get("last_tick_time_msc")) is None or tick_time_msc >= int(candle["last_tick_time_msc"]):
+                candle["close"] = price
+                candle["last_tick_time_msc"] = tick_time_msc
             candle["volume"] = float(candle["volume"]) + tick_volume
             candle["tick_count"] = int(candle["tick_count"]) + 1
 
     return [CandleRow.model_validate(row).model_dump() for row in buckets.values()]
+
+
+def _tick_time_msc(tick: dict[str, object]) -> int:
+    raw_time_msc = tick.get("time_msc")
+    parsed = _int_or_none(raw_time_msc)
+    if parsed is not None:
+        return parsed
+    return tick_time_msc_from_datetime(ensure_utc(tick["time"]))  # type: ignore[arg-type]
+
+
+def _tick_sort_key(tick: dict[str, object]) -> tuple[int, datetime]:
+    tick_time = ensure_utc(tick["time"])  # type: ignore[arg-type]
+    return (_tick_time_msc(tick), tick_time)
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def merge_candle_values(existing: dict[str, object], update: dict[str, object]) -> dict[str, object]:
@@ -138,9 +169,32 @@ class CandleAggregator:
             set_={
                 "high": func.greatest(Candle.high, excluded.high),
                 "low": func.least(Candle.low, excluded.low),
-                "close": excluded.close,
+                "open": case(
+                    (
+                        (Candle.first_tick_time_msc.is_(None))
+                        | (excluded.first_tick_time_msc <= Candle.first_tick_time_msc),
+                        excluded.open,
+                    ),
+                    else_=Candle.open,
+                ),
+                "close": case(
+                    (
+                        (Candle.last_tick_time_msc.is_(None))
+                        | (excluded.last_tick_time_msc >= Candle.last_tick_time_msc),
+                        excluded.close,
+                    ),
+                    else_=Candle.close,
+                ),
                 "volume": func.coalesce(Candle.volume, 0.0) + func.coalesce(excluded.volume, 0.0),
                 "tick_count": func.coalesce(Candle.tick_count, 0) + func.coalesce(excluded.tick_count, 0),
+                "first_tick_time_msc": func.least(
+                    func.coalesce(Candle.first_tick_time_msc, excluded.first_tick_time_msc),
+                    excluded.first_tick_time_msc,
+                ),
+                "last_tick_time_msc": func.greatest(
+                    func.coalesce(Candle.last_tick_time_msc, excluded.last_tick_time_msc),
+                    excluded.last_tick_time_msc,
+                ),
                 "source": excluded.source,
                 "updated_at": func.now(),
             },

@@ -65,7 +65,19 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
     @app.patch("/settings/order-execution", response_model=OrderExecutionSettingsResponse)
     def patch_order_execution_settings(payload: OrderExecutionSettingsRequest) -> OrderExecutionSettingsResponse:
         settings.mt5_allow_order_execution = payload.enabled
-        logger.warning("MT5 order execution runtime setting changed to %s", payload.enabled)
+        if payload.allowed_account_modes is not None:
+            normalized_modes = sorted(
+                {mode.strip().upper() for mode in payload.allowed_account_modes if mode.strip()}
+            )
+            settings.mt5_allowed_account_modes = ",".join(normalized_modes)
+        if payload.enable_real_trading is not None:
+            settings.mt5_enable_real_trading = payload.enable_real_trading
+        logger.warning(
+            "MT5 order execution runtime setting changed: enabled=%s allowed_account_modes=%s enable_real_trading=%s",
+            settings.mt5_allow_order_execution,
+            sorted(settings.allowed_account_modes),
+            settings.mt5_enable_real_trading,
+        )
         return OrderExecutionSettingsResponse(
             enabled=settings.mt5_allow_order_execution,
             allowed_account_modes=sorted(settings.allowed_account_modes),

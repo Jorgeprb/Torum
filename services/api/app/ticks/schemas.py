@@ -10,6 +10,7 @@ class TickInput(BaseModel):
     symbol: str | None = Field(default=None, min_length=3, max_length=32)
     broker_symbol: str = Field(min_length=1, max_length=64)
     time: datetime
+    time_msc: int | None = Field(default=None, ge=0)
     bid: float | None = Field(default=None, gt=0)
     ask: float | None = Field(default=None, gt=0)
     last: float | None = Field(default=None, gt=0)
@@ -37,6 +38,7 @@ class TickBatchRequest(BaseModel):
 
 class TickRead(BaseModel):
     time: datetime
+    time_msc: int
     internal_symbol: str
     broker_symbol: str
     bid: float | None = None
@@ -57,6 +59,7 @@ class TickBatchResponse(BaseModel):
     source: str | None = None
     min_time: datetime | None = None
     max_time: datetime | None = None
+    max_time_msc: int | None = None
     last_bid: float | None = None
     last_ask: float | None = None
     last_broker_symbol: str | None = None

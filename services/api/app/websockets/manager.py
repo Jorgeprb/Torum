@@ -4,6 +4,8 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from app.market_data.tick_time import tick_time_msc_from_datetime
+
 
 class MarketWebSocketManager:
     def __init__(self) -> None:
@@ -50,6 +52,9 @@ class MarketWebSocketManager:
     async def broadcast_market_tick(self, tick: dict[str, Any]) -> None:
         symbol = str(tick["internal_symbol"])
         tick_time = tick.get("time")
+        time_msc = tick.get("time_msc")
+        if time_msc is None and isinstance(tick_time, datetime):
+            time_msc = tick_time_msc_from_datetime(tick_time)
         bid = tick.get("bid")
         ask = tick.get("ask")
         mid = (float(bid) + float(ask)) / 2 if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) else None
@@ -59,6 +64,7 @@ class MarketWebSocketManager:
             "symbol": symbol,
             "broker_symbol": tick.get("broker_symbol"),
             "time": tick_time.isoformat() if isinstance(tick_time, datetime) else tick_time,
+            "time_msc": time_msc,
             "bid": bid,
             "ask": ask,
             "last": tick.get("last"),

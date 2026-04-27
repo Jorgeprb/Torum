@@ -9,6 +9,7 @@ from app.no_trade_zones.service import NoTradeZoneService
 from app.settings.trading_settings import TradingSettings
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
+from app.ticks.service import latest_tick_order_by
 from app.trading.schemas import ManualOrderRequest
 from app.risk.schemas import RiskDecision
 
@@ -131,7 +132,7 @@ class RiskManager:
         return self.db.scalar(
             select(Tick)
             .where(Tick.internal_symbol == internal_symbol)
-            .order_by(Tick.time.desc(), Tick.id.desc())
+            .order_by(*latest_tick_order_by())
             .limit(1)
         )
 

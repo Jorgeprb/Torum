@@ -29,6 +29,35 @@ def test_candle_close_uses_bid_when_price_source_bid() -> None:
     assert candles[0]["close"] == 4705.60
 
 
+def test_candle_close_uses_latest_time_msc_not_input_order() -> None:
+    tick_time = datetime(2026, 4, 26, 12, 0, 1, tzinfo=UTC)
+    ticks = [
+        {
+            "time": tick_time,
+            "time_msc": 1777204801500,
+            "internal_symbol": "XAUUSD",
+            "bid": 4702.28,
+            "ask": 4702.45,
+            "last": None,
+            "volume": 0.0,
+        },
+        {
+            "time": tick_time,
+            "time_msc": 1777204801999,
+            "internal_symbol": "XAUUSD",
+            "bid": 4698.59,
+            "ask": 4698.80,
+            "last": None,
+            "volume": 0.0,
+        },
+    ]
+
+    candles = build_candle_rows_from_ticks(list(reversed(ticks)), timeframes=("M1",), price_source="BID")
+
+    assert candles[0]["close"] == 4698.59
+    assert candles[0]["last_tick_time_msc"] == 1777204801999
+
+
 def test_build_candle_ohlc_from_ticks() -> None:
     ticks = [
         {
@@ -120,6 +149,7 @@ def test_tick_batch_contract_accepts_mt5_payload() -> None:
                     "internal_symbol": "XAUUSD",
                     "broker_symbol": "XAUUSD",
                     "time": "2026-04-26T12:34:56.123Z",
+                    "time_msc": 1777206896123,
                     "bid": 2325.12,
                     "ask": 2325.34,
                     "last": None,
@@ -131,6 +161,7 @@ def test_tick_batch_contract_accepts_mt5_payload() -> None:
 
     assert payload.source == "MT5"
     assert payload.ticks[0].resolved_internal_symbol == "XAUUSD"
+    assert payload.ticks[0].time_msc == 1777206896123
 
 
 def test_tick_batch_contract_accepts_optional_account_payload() -> None:

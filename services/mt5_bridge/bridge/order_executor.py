@@ -145,9 +145,13 @@ class OrderExecutor:
             account.trade_mode,
         )
         if hasattr(terminal_info, "trade_allowed") and not bool(getattr(terminal_info, "trade_allowed")):
-            return BridgeOrderResponse(ok=False, comment="MT5 terminal trading is disabled")
+            logger.warning(
+                "MT5 terminal reports trade_allowed=false; Torum will still call order_send so MT5 can return the real retcode/last_error."
+            )
         if bool(getattr(terminal_info, "tradeapi_disabled", False)):
-            return BridgeOrderResponse(ok=False, comment="MT5 Python trading API is disabled")
+            logger.warning(
+                "MT5 terminal reports tradeapi_disabled=true; Torum will still call order_send so MT5 can return the real retcode/last_error."
+            )
         raw_account_getter = getattr(self.mt5_client, "get_account_info", None)
         if callable(raw_account_getter):
             try:
@@ -155,7 +159,9 @@ class OrderExecutor:
             except MT5ClientError as exc:
                 return BridgeOrderResponse(ok=False, comment=str(exc))
             if hasattr(raw_account, "trade_allowed") and not bool(getattr(raw_account, "trade_allowed")):
-                return BridgeOrderResponse(ok=False, comment="MT5 account trading is disabled")
+                logger.warning(
+                    "MT5 account reports trade_allowed=false; Torum will still call order_send so MT5 can return the real retcode/last_error."
+                )
         if account.trade_mode not in self.settings.allowed_account_modes and account.trade_mode != "UNKNOWN":
             return BridgeOrderResponse(
                 ok=False,

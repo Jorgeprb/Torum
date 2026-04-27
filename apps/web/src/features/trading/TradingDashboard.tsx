@@ -123,9 +123,8 @@ export function TradingDashboard() {
   const currentCandle = candles.length > 0 ? candles[candles.length - 1] : undefined;
   const latestBid = latestTick?.bid ?? null;
   const latestAsk = latestTick?.ask ?? null;
-  const latestMid = typeof latestBid === "number" && typeof latestAsk === "number" ? (latestBid + latestAsk) / 2 : null;
-  const lastPrice = latestTick?.last ?? latestMid ?? latestAsk ?? latestBid ?? currentCandle?.close;
-  const frontendTickAgeMs = latestTick ? Math.max(0, Date.now() - Date.parse(latestTick.time)) : null;
+  const lastPrice = latestBid ?? undefined;
+  const frontendTickAgeMs = latestTick ? Math.max(0, Date.now() - latestTick.time_msc) : null;
   const sourceLabel = mt5Status?.connected_to_mt5 ? "MT5" : mockStatus?.running ? "MOCK" : streamSource;
   const accountMode = mt5Status?.account_trade_mode ?? "UNKNOWN";
   const mt5LastTickTime = mt5Status?.last_tick_time_by_symbol[selectedSymbol] ?? null;
@@ -288,15 +287,23 @@ export function TradingDashboard() {
         const now = Date.now();
         tickTimestampsRef.current = [...tickTimestampsRef.current, now].filter((timestamp) => now - timestamp <= 5000);
         setTicksPerSecond(Number((tickTimestampsRef.current.length / 5).toFixed(2)));
-        setLatestTick({
-          time: message.time,
-          internal_symbol: message.symbol,
-          broker_symbol: message.broker_symbol ?? "",
-          bid: message.bid,
-          ask: message.ask,
-          last: message.last,
-          volume: message.volume,
-          source: message.source ?? "UNKNOWN"
+        const parsedMessageTime = Date.parse(message.time);
+        const messageTimeMsc = message.time_msc ?? (Number.isFinite(parsedMessageTime) ? parsedMessageTime : Date.now());
+        setLatestTick((current) => {
+          if (current && messageTimeMsc < current.time_msc) {
+            return current;
+          }
+          return {
+            time: message.time,
+            time_msc: messageTimeMsc,
+            internal_symbol: message.symbol,
+            broker_symbol: message.broker_symbol ?? "",
+            bid: message.bid,
+            ask: message.ask,
+            last: message.last,
+            volume: message.volume,
+            source: message.source ?? "UNKNOWN"
+          };
         });
         setStreamSource(message.source ?? "UNKNOWN");
         setLastTickTime(message.time);
@@ -345,7 +352,14 @@ export function TradingDashboard() {
 
   async function refreshMarketDiagnostics() {
     try {
-      setBackendLatestTick(await getLatestTick(selectedSymbol));
+      const tick = await getLatestTick(selectedSymbol);
+      setBackendLatestTick(tick);
+      setLatestTick((current) => {
+        if (current && current.internal_symbol === tick.internal_symbol && current.time_msc > tick.time_msc) {
+          return current;
+        }
+        return tick;
+      });
     } catch {
       setBackendLatestTick(null);
     }
@@ -545,8 +559,16 @@ export function TradingDashboard() {
             <dd>{backendLatestTick ? `${backendLatestTick.age_ms} ms` : "--"}</dd>
           </div>
           <div>
+            <dt>Backend time_msc</dt>
+            <dd>{backendLatestTick?.time_msc ?? "--"}</dd>
+          </div>
+          <div>
             <dt>Frontend latest</dt>
             <dd>{latestTick ? `${latestTick.source} ${latestTick.bid?.toFixed(2) ?? "--"} / ${latestTick.ask?.toFixed(2) ?? "--"}` : "--"}</dd>
+          </div>
+          <div>
+            <dt>Frontend time_msc</dt>
+            <dd>{latestTick?.time_msc ?? "--"}</dd>
           </div>
           <div>
             <dt>Frontend age</dt>
@@ -722,7 +744,7 @@ export function TradingDashboard() {
             <h2>{selectedMapping?.display_name ?? selectedSymbol}</h2>
           </div>
           <div className="price-cluster">
-            <span className="price-value">{typeof lastPrice === "number" ? lastPrice.toFixed(2) : "--"}</span>
+            <span className="price-value">{typeof lastPrice === "number" ? `BID ${lastPrice.toFixed(2)}` : "BID --"}</span>
             <StatusPill
               label={streamConnected ? "Stream conectado" : "Stream desconectado"}
               tone={streamConnected ? "success" : "warning"}

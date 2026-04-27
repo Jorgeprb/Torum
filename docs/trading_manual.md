@@ -179,7 +179,7 @@ Para que una orden LIVE pueda salir en el futuro deben estar alineados todos est
 - PWA: confirmacion fuerte con checkbox y texto `CONFIRM LIVE`.
 - Bridge: `MT5_ALLOW_ORDER_EXECUTION=true`.
 - Bridge: `MT5_ENABLE_REAL_TRADING=true`.
-- Bridge: `MT5_ALLOWED_ACCOUNT_MODES=REAL`.
+- Bridge: `MT5_ALLOWED_ACCOUNT_MODES=DEMO,REAL` o `REAL`.
 - MT5: cuenta detectada como `REAL`.
 
 No actives esos valores por accidente. Una cuenta real puede producir perdidas reales.
@@ -201,6 +201,7 @@ docker compose exec -T timescaledb psql -U torum -d torum -c "select id, interna
 ## Errores MT5 comunes
 
 - `MT5 order execution is disabled`: revisa dos capas. En Ajustes activa `Habilitar ejecucion MT5`; el backend intentara activar tambien el bridge en runtime. Si el bridge acaba de reiniciarse y vuelve a `MT5_ALLOW_ORDER_EXECUTION=false`, guarda el ajuste otra vez o configura `.env` y reinicia el bridge.
+- `MT5 terminal trading is disabled`: el bridge ya no bloquea con este mensaje antes de enviar. Ahora lo registra como advertencia y llama a `order_send` para obtener el `retcode` o `last_error` real de MT5.
 - `MT5 order_send returned None`: revisa el log del bridge. Ahora imprime `MT5 order_send FAILED` con `last_error_code`, `last_error_message` y el request exacto enviado a MT5.
 - `Requested DEMO but MT5 account is REAL`: cambia a cuenta demo o vuelve a `PAPER`.
 - `Unsupported filling mode`: el bridge prueba IOC, FOK y RETURN; revisa el simbolo y el broker.

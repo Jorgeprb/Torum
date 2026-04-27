@@ -11,6 +11,7 @@ class Tick(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
     time: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    time_msc: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     internal_symbol: Mapped[str] = mapped_column(Text, nullable=False)
     broker_symbol: Mapped[str] = mapped_column(Text, nullable=False)
     bid: Mapped[float | None] = mapped_column(Float, nullable=True)

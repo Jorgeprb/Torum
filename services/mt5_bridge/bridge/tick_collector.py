@@ -27,6 +27,7 @@ class TickDeduplicator:
         key = (
             tick["internal_symbol"],
             tick["broker_symbol"],
+            tick.get("time_msc"),
             tick["time"],
             tick.get("bid"),
             tick.get("ask"),
@@ -147,15 +148,21 @@ class TickCollector:
                 continue
             converted_ticks.append(tick)
 
+        latest_raw_tick = self.mt5_client.get_latest_tick(mapping.broker_symbol)
+        latest_tick = mt5_tick_to_torum(latest_raw_tick, mapping) if latest_raw_tick is not None else None
+        if latest_tick is not None and self.deduplicator.is_new(latest_tick):
+            converted_ticks.append(latest_tick)
+
         if not converted_ticks:
             return
 
         self.tick_buffer.add_many(converted_ticks)
-        latest_time = max(parse_iso_time(tick["time"]) for tick in converted_ticks)
+        latest_tick = max(converted_ticks, key=lambda tick: int(tick.get("time_msc") or 0))
+        latest_time = parse_iso_time(latest_tick["time"])
         self._last_seen_by_symbol[mapping.internal_symbol] = latest_time
         self.health.last_tick_time_by_symbol[mapping.internal_symbol] = latest_time
         self._diagnostic_sent_counts[mapping.internal_symbol] = self._diagnostic_sent_counts.get(mapping.internal_symbol, 0) + len(converted_ticks)
-        self._diagnostic_latest_ticks[mapping.internal_symbol] = max(converted_ticks, key=lambda tick: parse_iso_time(tick["time"]))
+        self._diagnostic_latest_ticks[mapping.internal_symbol] = latest_tick
         logger.debug("Collected %s ticks for %s", len(converted_ticks), mapping.internal_symbol)
 
     def _flush(self, account: AccountState | None, force: bool) -> None:
@@ -187,7 +194,7 @@ class TickCollector:
                 mapping.broker_symbol,
                 tick.get("bid"),
                 tick.get("ask"),
-                int(parse_iso_time(tick["time"]).timestamp() * 1000),
+                tick.get("time_msc") or int(parse_iso_time(tick["time"]).timestamp() * 1000),
                 self._diagnostic_sent_counts.get(mapping.internal_symbol, 0),
             )
             self._diagnostic_sent_counts[mapping.internal_symbol] = 0
@@ -220,9 +227,11 @@ def mt5_tick_to_torum(raw_tick: Any, mapping: SymbolMapping) -> dict[str, Any] |
     time_value = _get_tick_field(raw_tick, "time")
     time_msc = _get_tick_field(raw_tick, "time_msc")
     if time_msc:
-        tick_time = datetime.fromtimestamp(float(time_msc) / 1000, UTC)
+        parsed_time_msc = int(float(time_msc))
+        tick_time = datetime.fromtimestamp(parsed_time_msc / 1000, UTC)
     elif time_value:
         tick_time = datetime.fromtimestamp(float(time_value), UTC)
+        parsed_time_msc = int(tick_time.timestamp() * 1000)
     else:
         return None
 
@@ -240,6 +249,7 @@ def mt5_tick_to_torum(raw_tick: Any, mapping: SymbolMapping) -> dict[str, Any] |
         "internal_symbol": mapping.internal_symbol,
         "broker_symbol": mapping.broker_symbol,
         "time": tick_time.isoformat().replace("+00:00", "Z"),
+        "time_msc": parsed_time_msc,
         "bid": bid,
         "ask": ask,
         "last": last,

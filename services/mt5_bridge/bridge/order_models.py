@@ -44,6 +44,8 @@ class ClosePositionRequest(BaseModel):
 
 class OrderExecutionSettingsRequest(BaseModel):
     enabled: bool
+    allowed_account_modes: list[str] | None = None
+    enable_real_trading: bool | None = None
 
 
 class OrderExecutionSettingsResponse(BaseModel):

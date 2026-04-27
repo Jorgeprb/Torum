@@ -32,6 +32,7 @@ Fields to compare with MT5:
 - `broker_symbol`
 - `source`
 - `time`
+- `time_msc`
 - `bid`
 - `ask`
 - `mid`
@@ -54,7 +55,8 @@ Fields to compare with MT5:
 - MT5 chart was opened on a different broker symbol than `symbol_mappings.broker_symbol`;
 - the tick was stale;
 - the chart value was candle `CLOSE` or `MID` instead of latest `BID`;
-- frontend state cached the previous symbol or timeframe.
+- frontend state cached the previous symbol or timeframe;
+- ticks were ordered only by `time` instead of MT5 `time_msc`.
 
 ## Source guard
 

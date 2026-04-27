@@ -38,3 +38,29 @@ def test_order_execution_setting_can_be_changed_at_runtime() -> None:
     assert response.status_code == 200
     assert response.json()["enabled"] is True
     assert settings.mt5_allow_order_execution is True
+
+
+def test_order_execution_setting_can_allow_demo_and_real_at_runtime() -> None:
+    settings = BridgeSettings(
+        mt5_allow_order_execution=False,
+        mt5_allowed_account_modes="DEMO",
+        mt5_enable_real_trading=False,
+    )
+    client = TestClient(create_order_app(settings, FakeMT5Client()))  # type: ignore[arg-type]
+
+    response = client.patch(
+        "/settings/order-execution",
+        json={
+            "enabled": True,
+            "allowed_account_modes": ["DEMO", "REAL"],
+            "enable_real_trading": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is True
+    assert payload["allowed_account_modes"] == ["DEMO", "REAL"]
+    assert payload["enable_real_trading"] is True
+    assert settings.mt5_allowed_account_modes == "DEMO,REAL"
+    assert settings.mt5_enable_real_trading is True

@@ -39,13 +39,24 @@ class MT5BridgeClient:
             logger.warning("MT5 bridge order execution settings request failed: %s", exc)
             raise MT5BridgeClientError(str(exc)) from exc
 
-    def set_order_execution_enabled(self, enabled: bool) -> dict[str, Any]:
+    def set_order_execution_enabled(
+        self,
+        enabled: bool,
+        *,
+        allowed_account_modes: list[str] | None = None,
+        enable_real_trading: bool | None = None,
+    ) -> dict[str, Any]:
         if not self.is_configured():
             raise MT5BridgeClientError("MT5 bridge base URL is not configured")
+        payload: dict[str, Any] = {"enabled": enabled}
+        if allowed_account_modes is not None:
+            payload["allowed_account_modes"] = allowed_account_modes
+        if enable_real_trading is not None:
+            payload["enable_real_trading"] = enable_real_trading
         try:
             response = requests.patch(
                 f"{self.base_url}/settings/order-execution",
-                json={"enabled": enabled},
+                json=payload,
                 timeout=self.timeout,
             )
             response.raise_for_status()

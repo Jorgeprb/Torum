@@ -36,4 +36,6 @@ class CandleRow(BaseModel):
     close: float
     volume: float = 0
     tick_count: int = Field(default=0, ge=0)
+    first_tick_time_msc: int | None = None
+    last_tick_time_msc: int | None = None
     source: str = "TICK_AGGREGATOR"

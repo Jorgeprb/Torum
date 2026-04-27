@@ -11,6 +11,7 @@ from app.positions.models import Position
 from app.strategies.context import StrategyContext
 from app.strategies.models import StrategyConfig
 from app.ticks.models import Tick
+from app.ticks.service import latest_tick_order_by
 
 
 class StrategyContextBuilder:
@@ -50,7 +51,7 @@ class StrategyContextBuilder:
         return rows
 
     def _latest_tick(self, symbol: str) -> Tick | None:
-        return self.db.scalar(select(Tick).where(Tick.internal_symbol == symbol).order_by(Tick.time.desc(), Tick.id.desc()).limit(1))
+        return self.db.scalar(select(Tick).where(Tick.internal_symbol == symbol).order_by(*latest_tick_order_by()).limit(1))
 
     def _load_indicators(self) -> dict[str, object]:
         dxy_rows = self._load_candles("DXY", "D1", 300)
