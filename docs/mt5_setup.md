@@ -114,6 +114,28 @@ Si `order_send` devuelve error, revisa:
 - volumen minimo/lote permitido por el broker;
 - modo de llenado aceptado por el broker.
 
+## Sincronizacion de posiciones
+
+El bridge arranca tambien un sincronizador de posiciones. Cada pocos segundos llama `positions_get()` y publica el estado al backend:
+
+```text
+POST /api/mt5/positions/sync
+```
+
+Configura el intervalo:
+
+```text
+MT5_POSITION_SYNC_INTERVAL_SECONDS=3
+```
+
+`positions_get()` manda las posiciones abiertas reales. Ademas, el bridge consulta `history_deals_get()` en una ventana configurable y manda al backend los deals de cierre con `DEAL_ENTRY_OUT`, `DEAL_ENTRY_INOUT` y `DEAL_ENTRY_OUT_BY`.
+
+```text
+MT5_DEALS_HISTORY_LOOKBACK_DAYS=14
+```
+
+Si cierras una posicion manualmente desde MT5, en el siguiente ciclo Torum detecta que el ticket ya no esta en `positions_get()`, busca el cierre por `deal.position_id`, marca la posicion como `CLOSED`, guarda precio/hora/profit/swap/commission/ticket de deal y la mueve al historial. Si `positions_get()` falla, el bridge no envia una lista vacia para evitar cerrar posiciones por error.
+
 LIVE no debe activarse por accidente. Requiere cambiar controles en backend, PWA y bridge.
 
 ## DXY

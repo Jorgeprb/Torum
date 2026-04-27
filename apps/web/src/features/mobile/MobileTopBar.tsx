@@ -1,12 +1,14 @@
 import { Bell, Menu, PencilLine, Signal } from "lucide-react";
 
 import type { Timeframe } from "../../services/market";
+import type { MarketSocketStatus } from "../../services/marketSocket";
 import type { DrawingTool } from "../../services/drawings";
 
 interface MobileTopBarProps {
   alertToolActive: boolean;
   chartSymbols: string[];
   connected: boolean;
+  connectionStatus: MarketSocketStatus;
   drawingTool: DrawingTool;
   drawingMenuOpen: boolean;
   onAlertClick: () => void;
@@ -23,6 +25,7 @@ export function MobileTopBar({
   alertToolActive,
   chartSymbols,
   connected,
+  connectionStatus,
   drawingTool,
   drawingMenuOpen,
   onAlertClick,
@@ -34,6 +37,25 @@ export function MobileTopBar({
   selectedTimeframe,
   timeframes
 }: MobileTopBarProps) {
+  const statusClass =
+    connectionStatus === "connected"
+      ? "mobile-status mobile-status--ok"
+      : connectionStatus === "connecting" || connectionStatus === "reconnecting" || connectionStatus === "stale"
+        ? "mobile-status mobile-status--warning"
+        : "mobile-status mobile-status--error";
+  const statusTitle =
+    connectionStatus === "connected"
+      ? "Stream conectado"
+      : connectionStatus === "connecting"
+        ? "Conectando"
+        : connectionStatus === "reconnecting"
+          ? "Reconectando"
+          : connectionStatus === "stale"
+            ? "Datos desactualizados"
+            : connected
+              ? "Stream pendiente"
+              : "Stream desconectado";
+
   return (
     <header className="mobile-topbar">
       <button aria-label="Abrir menu" className="mobile-icon-button" type="button" onClick={onMenuClick}>
@@ -69,7 +91,7 @@ export function MobileTopBar({
       >
         <Bell size={22} />
       </button>
-      <span className={connected ? "mobile-status mobile-status--ok" : "mobile-status"} title={connected ? "Stream conectado" : "Stream desconectado"}>
+      <span className={statusClass} title={statusTitle}>
         <Signal size={18} />
       </span>
     </header>

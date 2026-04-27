@@ -13,6 +13,8 @@ from app.indicators.service import IndicatorService
 from app.market_data.timeframes import Timeframe
 from app.no_trade_zones.schemas import NoTradeZoneRead
 from app.no_trade_zones.service import NoTradeZoneService
+from app.positions.schemas import PositionRead
+from app.positions.service import PositionService
 from app.users.models import User
 
 router = APIRouter(prefix="/chart", tags=["chart"])
@@ -46,6 +48,10 @@ def chart_overlays(
             alert_service.to_read(alert).model_dump(mode="json")
             for alert in alert_service.list_for_user(user=current_user, symbol=symbol, status_filter="ACTIVE")
         ]
+    positions = [
+        PositionRead.model_validate(position).model_dump(mode="json")
+        for position in PositionService(db).list_with_prices(symbol=symbol, limit=200)
+    ]
     return ChartOverlaysResponse(
         symbol=symbol.upper(),
         timeframe=timeframe,
@@ -53,4 +59,5 @@ def chart_overlays(
         no_trade_zones=no_trade_zones,
         drawings=drawings,
         price_alerts=price_alerts,
+        positions=positions,
     )

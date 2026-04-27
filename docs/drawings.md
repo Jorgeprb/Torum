@@ -118,6 +118,21 @@ El panel `Dibujos` permite:
 
 - seleccionar;
 - editar nombre;
+- mover objetos directamente sobre el grafico;
+- ajustar extremos/bordes cuando el objeto tiene handles;
+- borrar el objeto seleccionado desde el boton `Eliminar` sobre el grafico o desde el panel;
+
+## Mover y ajustar
+
+La PWA no guarda pixeles. Cuando arrastras un dibujo, calcula de nuevo `time` y `price` con las escalas actuales:
+
+- `horizontal_line`: arrastre vertical cambia `price`.
+- `vertical_line`: arrastre horizontal cambia `time`.
+- `trend_line`: arrastre mueve la linea completa; handles permiten ajustar punto 1 o punto 2.
+- `rectangle` y `manual_zone`: arrastre mueve la zona; handles de esquina ajustan tiempo/precio.
+- `text`: arrastre mueve el punto `time/price`.
+
+Al soltar, se hace `PATCH /api/drawings/{id}`. Si el dibujo esta `locked=true`, no se modifica.
 - cambiar color;
 - ocultar/mostrar;
 - eliminar.

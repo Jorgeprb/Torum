@@ -2,6 +2,8 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
+import logging
+
 from fastapi import WebSocket
 
 from app.market_data.tick_time import tick_time_msc_from_datetime
@@ -95,13 +97,19 @@ class MarketWebSocketManager:
             if key[0] == symbol:
                 await self._send_to_channel(key[0], key[1], message)
 
+    async def broadcast_position_event(self, message: dict[str, Any]) -> None:
+        for key in list(self._connections):
+            await self._send_to_channel(key[0], key[1], message)
+
     async def _send_to_channel(self, symbol: str, timeframe: str, message: dict[str, Any]) -> None:
         connections = list(self._connections.get((symbol, timeframe), set()))
         for websocket in connections:
             try:
                 await websocket.send_json(message)
-            except RuntimeError:
+            except Exception as exc:
+                logger.debug("Removing dead websocket for %s/%s: %s", symbol, timeframe, exc)
                 self.disconnect(websocket, symbol, timeframe)
 
 
 market_ws_manager = MarketWebSocketManager()
+logger = logging.getLogger(__name__)

@@ -3,11 +3,12 @@ from types import SimpleNamespace
 from bridge.account_state import AccountState
 from bridge.config import BridgeSettings
 from bridge.order_executor import OrderExecutor
-from bridge.order_models import MarketOrderRequest
+from bridge.order_models import MarketOrderRequest, ModifyPositionTpRequest
 
 
 class FakeMT5:
     TRADE_ACTION_DEAL = 1
+    TRADE_ACTION_SLTP = 6
     ORDER_TYPE_BUY = 0
     ORDER_TYPE_SELL = 1
     ORDER_TIME_GTC = 0
@@ -42,8 +43,8 @@ class FakeMT5:
             order=123,
             deal=456,
             position=789,
-            price=request["price"],
-            volume=request["volume"],
+            price=request.get("price") or request.get("tp"),
+            volume=request.get("volume") or 0,
         )
 
     def last_error(self) -> tuple[int, str]:
@@ -135,6 +136,7 @@ def test_order_executor_builds_buy_market_request_with_ask_price() -> None:
     assert request["symbol"] == "XAUUSD"
     assert request["magic"] == 260426
     assert request["volume"] == 0.01
+    assert len(str(request["comment"])) <= 20
 
 
 def test_order_executor_logs_last_error_when_order_send_returns_none() -> None:
@@ -157,6 +159,40 @@ def test_order_executor_attempts_order_send_when_terminal_reports_trading_disabl
 
     assert response.ok is True
     assert len(client.mt5.sent_requests) == 1
+
+
+def test_order_executor_sanitizes_long_mt5_comment() -> None:
+    client = FakeMT5Client()
+    order = _order("BUY").model_copy(update={"comment": "Manual BUY from Torum mobile con acento ñ"})
+
+    response = OrderExecutor(_settings(enabled=True), client).execute_market_order(order)
+
+    assert response.ok is True
+    comment = str(client.mt5.sent_requests[0]["comment"])
+    assert len(comment) <= 20
+    assert comment.isascii()
+
+
+def test_order_executor_modifies_position_tp_with_sltp_action() -> None:
+    client = FakeMT5Client()
+    payload = ModifyPositionTpRequest(
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        side="BUY",
+        mode="DEMO",
+        tp=2330.55,
+        sl=0,
+        magic_number=260426,
+    )
+
+    response = OrderExecutor(_settings(enabled=True), client).modify_position_tp(789, payload)
+
+    assert response.ok is True
+    request = client.mt5.sent_requests[0]
+    assert request["action"] == client.mt5.TRADE_ACTION_SLTP
+    assert request["position"] == 789
+    assert request["tp"] == 2330.55
+    assert request["sl"] == 0.0
 
 
 def test_order_executor_blocks_live_when_real_trading_disabled() -> None:

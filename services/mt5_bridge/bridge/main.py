@@ -7,6 +7,7 @@ from bridge.config import get_settings
 from bridge.logging_config import configure_logging
 from bridge.mt5_client import MT5Client
 from bridge.order_server import start_order_server
+from bridge.position_syncer import PositionSyncer
 from bridge.tick_buffer import TickBuffer
 from bridge.tick_collector import TickCollector
 
@@ -48,6 +49,7 @@ def main() -> None:
     )
     if not args.once:
         start_order_server(settings, mt5_client)
+        PositionSyncer(settings=settings, mt5_client=mt5_client, backend_client=backend_client).start()
 
     def stop_bridge(_signum: int, _frame: object) -> None:
         logger.info("Stop requested")

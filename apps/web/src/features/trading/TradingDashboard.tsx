@@ -24,7 +24,6 @@ import {
   type SymbolMapping,
   type Tick,
   type Timeframe,
-  createMarketWebSocket,
   getCandles,
   getLatestTick,
   getMockMarketStatus,
@@ -34,6 +33,7 @@ import {
   startMockMarket,
   stopMockMarket
 } from "../../services/market";
+import { MarketSocketManager, type MarketSocketStatus } from "../../services/marketSocket";
 import {
   type ChartDrawingCreate,
   type ChartDrawingRead,
@@ -48,11 +48,14 @@ import {
   type ManualOrderResponse,
   type OrderRead,
   type PositionRead,
+  type TradeHistoryItem,
   type TradingSettings,
   closePosition,
+  getTradeHistory,
   getOrders,
   getPositions,
-  getTradingSettings
+  getTradingSettings,
+  modifyPositionTp
 } from "../../services/trading";
 import { type IndicatorLineOutput, getChartOverlays, isLineOutput } from "../../services/indicators";
 import { type NoTradeZone } from "../../services/news";
@@ -86,6 +89,7 @@ export function TradingDashboard() {
   const [mockStatus, setMockStatus] = useState<MockMarketStatus | null>(null);
   const [mt5Status, setMt5Status] = useState<MT5Status | null>(null);
   const [streamConnected, setStreamConnected] = useState(false);
+  const [socketStatus, setSocketStatus] = useState<MarketSocketStatus>("disconnected");
   const [streamSource, setStreamSource] = useState("MOCK");
   const [lastTickTime, setLastTickTime] = useState<string | null>(null);
   const [latestTick, setLatestTick] = useState<Tick | null>(null);
@@ -96,6 +100,8 @@ export function TradingDashboard() {
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
   const [orders, setOrders] = useState<OrderRead[]>([]);
   const [positions, setPositions] = useState<PositionRead[]>([]);
+  const [tradeHistory, setTradeHistory] = useState<TradeHistoryItem[]>([]);
+  const [selectedPositionId, setSelectedPositionId] = useState<number | null>(null);
   const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
   const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
   const [drawings, setDrawings] = useState<ChartDrawingRead[]>([]);
@@ -107,9 +113,11 @@ export function TradingDashboard() {
   const [alertToolActive, setAlertToolActive] = useState(false);
   const [drawingMenuOpen, setDrawingMenuOpen] = useState(false);
   const [chartAutoFollowEnabled, setChartAutoFollowEnabled] = useState(true);
+  const [chartRecenterToken, setChartRecenterToken] = useState(0);
   const [priceAlerts, setPriceAlerts] = useState<PriceAlertRead[]>([]);
   const [priceAlertHistory, setPriceAlertHistory] = useState<PriceAlertRead[]>([]);
   const tickTimestampsRef = useRef<number[]>([]);
+  const socketManagerRef = useRef<MarketSocketManager | null>(null);
   const [ticksPerSecond, setTicksPerSecond] = useState(0);
 
   const selectedMapping = useMemo(
@@ -125,7 +133,21 @@ export function TradingDashboard() {
   const latestAsk = latestTick?.ask ?? null;
   const lastPrice = latestBid ?? undefined;
   const frontendTickAgeMs = latestTick ? Math.max(0, Date.now() - latestTick.time_msc) : null;
+  const marketDataStale = socketStatus === "stale" || socketStatus === "reconnecting" || socketStatus === "disconnected" || (frontendTickAgeMs !== null && frontendTickAgeMs > 30000);
+  const marketConnectionHealthy = socketStatus === "connected" && !marketDataStale;
+  const staleTradingReason = "Datos desconectados o desactualizados. Reconectando...";
   const sourceLabel = mt5Status?.connected_to_mt5 ? "MT5" : mockStatus?.running ? "MOCK" : streamSource;
+  const streamStatusLabel =
+    socketStatus === "connected"
+      ? "Stream conectado"
+      : socketStatus === "reconnecting"
+        ? "Reconectando"
+        : socketStatus === "stale"
+          ? "Datos stale"
+          : socketStatus === "connecting"
+            ? "Conectando"
+            : "Stream desconectado";
+  const streamStatusTone = socketStatus === "connected" ? "success" : socketStatus === "reconnecting" || socketStatus === "stale" || socketStatus === "connecting" ? "warning" : "danger";
   const accountMode = mt5Status?.account_trade_mode ?? "UNKNOWN";
   const mt5LastTickTime = mt5Status?.last_tick_time_by_symbol[selectedSymbol] ?? null;
   const symbolTradable = selectedMapping ? selectedMapping.tradable && !selectedMapping.analysis_only : true;
@@ -161,23 +183,41 @@ export function TradingDashboard() {
           const lines: TradeLine[] = [
             {
               id: `entry-${position.id}`,
+              positionId: position.id,
               price: position.open_price,
-              label: `BUY ${position.volume.toFixed(2)} @ ${position.open_price.toFixed(2)}`,
-              tone: "entry" as const
+              label: `BUY ${position.volume.toFixed(2)}, ${(position.profit ?? 0).toFixed(2)} EUR`,
+              tone: "entry" as const,
+              selected: selectedPositionId === position.id
             }
           ];
           if (position.tp) {
+            const tpPercent = position.tp_percent ?? ((position.tp - position.open_price) / position.open_price) * 100;
+            const tpProfit = (position.tp - position.open_price) * position.volume;
+            const selected = selectedPositionId === position.id;
             lines.push({
               id: `tp-${position.id}`,
+              positionId: position.id,
               price: position.tp,
-              label: `TP ${position.tp.toFixed(2)}`,
-              tone: "tp" as const
+              label: `TP, +${tpProfit.toFixed(2)} EUR, ${tpPercent.toFixed(2)}%`,
+              tone: "tp" as const,
+              editable: selected,
+              muted: !selected
             });
           }
           return lines;
         }),
-    [positions, selectedSymbol]
+    [positions, selectedPositionId, selectedSymbol]
   );
+  const selectedPosition = useMemo(
+    () => positions.find((position) => position.id === selectedPositionId) ?? null,
+    [positions, selectedPositionId]
+  );
+
+  useEffect(() => {
+    if (selectedPositionId && !positions.some((position) => position.id === selectedPositionId && position.status === "OPEN")) {
+      setSelectedPositionId(null);
+    }
+  }, [positions, selectedPositionId]);
 
   useEffect(() => {
     void getSymbols()
@@ -202,7 +242,7 @@ export function TradingDashboard() {
     void refreshTradingData();
     const intervalId = window.setInterval(() => void refreshTradingData(), 5000);
     return () => window.clearInterval(intervalId);
-  }, []);
+  }, [selectedSymbol]);
 
   useEffect(() => {
     void refreshTradingSettings();
@@ -235,25 +275,12 @@ export function TradingDashboard() {
   }, []);
 
   useEffect(() => {
-    setLoadingCandles(true);
-    setError(null);
     setChartAutoFollowEnabled(true);
     setLatestTick(null);
     setCandles([]);
     tickTimestampsRef.current = [];
     setTicksPerSecond(0);
-
-    void getCandles(selectedSymbol, selectedTimeframe)
-      .then(setCandles)
-      .catch((requestError) => {
-        setCandles([]);
-        setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar las velas");
-      })
-      .finally(() => setLoadingCandles(false));
-
-    void getTicks(selectedSymbol, 1)
-      .then((ticks) => setLatestTick(ticks[ticks.length - 1] ?? null))
-      .catch(() => undefined);
+    void refreshCandlesAndLatestTick();
   }, [selectedSymbol, selectedTimeframe]);
 
   useEffect(() => {
@@ -264,61 +291,55 @@ export function TradingDashboard() {
   }, [selectedSymbol, selectedTimeframe]);
 
   useEffect(() => {
-    const socket = createMarketWebSocket(selectedSymbol, selectedTimeframe);
+    socketManagerRef.current?.disconnect();
+    const manager = new MarketSocketManager({
+      onMessage: handleMarketMessage,
+      onStatusChange: (status) => {
+        setSocketStatus(status);
+        setStreamConnected(status === "connected");
+      },
+      onReconnect: () => {
+        void resyncAfterReconnect();
+      }
+    });
+    socketManagerRef.current = manager;
+    manager.connect(selectedSymbol, selectedTimeframe);
 
-    socket.onopen = () => setStreamConnected(true);
-    socket.onclose = () => setStreamConnected(false);
-    socket.onerror = () => setStreamConnected(false);
-    socket.onmessage = (event) => {
-      const message = JSON.parse(event.data) as MarketMessage;
-      if (message.type === "candle_update") {
-        if (message.symbol !== selectedSymbol || message.timeframe !== selectedTimeframe) {
-          return;
-        }
-        setCandles((current) => upsertCandle(current, message.candle));
-        setStreamSource(message.candle.source);
-      }
-      if (message.type === "market_status") {
-        setStreamConnected(message.connected);
-        setStreamSource(message.source);
-        setLastTickTime(message.last_tick_time);
-      }
-      if ((message.type === "latest_tick_update" || message.type === "market_tick") && message.symbol === selectedSymbol) {
-        const now = Date.now();
-        tickTimestampsRef.current = [...tickTimestampsRef.current, now].filter((timestamp) => now - timestamp <= 5000);
-        setTicksPerSecond(Number((tickTimestampsRef.current.length / 5).toFixed(2)));
-        const parsedMessageTime = Date.parse(message.time);
-        const messageTimeMsc = message.time_msc ?? (Number.isFinite(parsedMessageTime) ? parsedMessageTime : Date.now());
-        setLatestTick((current) => {
-          if (current && messageTimeMsc < current.time_msc) {
-            return current;
-          }
-          return {
-            time: message.time,
-            time_msc: messageTimeMsc,
-            internal_symbol: message.symbol,
-            broker_symbol: message.broker_symbol ?? "",
-            bid: message.bid,
-            ask: message.ask,
-            last: message.last,
-            volume: message.volume,
-            source: message.source ?? "UNKNOWN"
-          };
-        });
-        setStreamSource(message.source ?? "UNKNOWN");
-        setLastTickTime(message.time);
-      }
-      if (message.type === "price_alert_triggered") {
-        setPriceAlerts((current) => current.filter((alert) => alert.id !== message.alert_id));
-        setTradeMessage(`Alerta ${message.symbol} disparada en ${message.triggered_price.toFixed(2)}`);
-        void refreshPriceAlertHistory();
-      }
-      if (message.type === "price_alert_updated") {
-        void refreshPriceAlerts();
+    return () => {
+      manager.disconnect();
+      if (socketManagerRef.current === manager) {
+        socketManagerRef.current = null;
       }
     };
+  }, [selectedSymbol, selectedTimeframe]);
 
-    return () => socket.close();
+  useEffect(() => {
+    function resumeAndResync() {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      socketManagerRef.current?.ensureFresh("foreground");
+      void resyncAfterReconnect();
+    }
+
+    function handleOffline() {
+      socketManagerRef.current?.markOffline();
+      setSocketStatus("disconnected");
+      setStreamConnected(false);
+    }
+
+    document.addEventListener("visibilitychange", resumeAndResync);
+    window.addEventListener("focus", resumeAndResync);
+    window.addEventListener("online", resumeAndResync);
+    window.addEventListener("pageshow", resumeAndResync);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      document.removeEventListener("visibilitychange", resumeAndResync);
+      window.removeEventListener("focus", resumeAndResync);
+      window.removeEventListener("online", resumeAndResync);
+      window.removeEventListener("pageshow", resumeAndResync);
+      window.removeEventListener("offline", handleOffline);
+    };
   }, [selectedSymbol, selectedTimeframe]);
 
   async function handleMockToggle() {
@@ -332,11 +353,99 @@ export function TradingDashboard() {
     }
   }
 
+  function handleMarketMessage(message: MarketMessage) {
+    if (message.type === "candle_update") {
+      if (message.symbol !== selectedSymbol || message.timeframe !== selectedTimeframe) {
+        return;
+      }
+      setCandles((current) => upsertCandle(current, message.candle));
+      setStreamSource(message.candle.source);
+    }
+    if (message.type === "market_status") {
+      setStreamConnected(message.connected);
+      setStreamSource(message.source);
+      setLastTickTime(message.last_tick_time);
+    }
+    if ((message.type === "latest_tick_update" || message.type === "market_tick") && message.symbol === selectedSymbol) {
+      const now = Date.now();
+      tickTimestampsRef.current = [...tickTimestampsRef.current, now].filter((timestamp) => now - timestamp <= 5000);
+      setTicksPerSecond(Number((tickTimestampsRef.current.length / 5).toFixed(2)));
+      const parsedMessageTime = Date.parse(message.time);
+      const messageTimeMsc = message.time_msc ?? (Number.isFinite(parsedMessageTime) ? parsedMessageTime : Date.now());
+      setLatestTick((current) => {
+        if (current && messageTimeMsc < current.time_msc) {
+          return current;
+        }
+        return {
+          time: message.time,
+          time_msc: messageTimeMsc,
+          internal_symbol: message.symbol,
+          broker_symbol: message.broker_symbol ?? "",
+          bid: message.bid,
+          ask: message.ask,
+          last: message.last,
+          volume: message.volume,
+          source: message.source ?? "UNKNOWN"
+        };
+      });
+      setStreamSource(message.source ?? "UNKNOWN");
+      setLastTickTime(message.time);
+    }
+    if (message.type === "price_alert_triggered") {
+      setPriceAlerts((current) => current.filter((alert) => alert.id !== message.alert_id));
+      setTradeMessage(`Alerta ${message.symbol} disparada en ${message.triggered_price.toFixed(2)}`);
+      void refreshPriceAlertHistory();
+    }
+    if (message.type === "price_alert_updated") {
+      void refreshPriceAlerts();
+    }
+    if (message.type === "position_closed" || message.type === "position_updated") {
+      void refreshTradingData();
+    }
+  }
+
+  async function refreshCandlesAndLatestTick() {
+    setLoadingCandles(true);
+    setError(null);
+    try {
+      const [nextCandles, ticks] = await Promise.all([
+        getCandles(selectedSymbol, selectedTimeframe),
+        getTicks(selectedSymbol, 1).catch(() => [])
+      ]);
+      setCandles(nextCandles);
+      setLatestTick(ticks[ticks.length - 1] ?? null);
+    } catch (requestError) {
+      setCandles([]);
+      setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar las velas");
+    } finally {
+      setLoadingCandles(false);
+    }
+  }
+
+  async function resyncAfterReconnect() {
+    await Promise.allSettled([
+      refreshCandlesAndLatestTick(),
+      refreshTradingData(),
+      refreshTradingSettings(),
+      refreshMarketDiagnostics(),
+      refreshChartOverlays(),
+      refreshDrawings(),
+      refreshPriceAlerts(),
+      getMockMarketStatus().then(setMockStatus),
+      getMt5Status().then(setMt5Status)
+    ]);
+  }
+
   async function refreshTradingData() {
     try {
-      const [ordersResponse, positionsResponse] = await Promise.all([getOrders(), getPositions()]);
+      const [ordersResponse, positionsResponse, historyResponse] = await Promise.all([
+        getOrders(),
+        getPositions(),
+        getTradeHistory({ symbol: selectedSymbol })
+      ]);
       setOrders(ordersResponse);
       setPositions(positionsResponse);
+      setTradeHistory(historyResponse);
     } catch {
       // Auth refresh errors are already surfaced by order submission; keep market chart usable.
     }
@@ -373,6 +482,9 @@ export function TradingDashboard() {
       setNoTradeZones(response.no_trade_zones);
       setIndicatorLines(response.indicators.filter(isLineOutput));
       setPriceAlerts(response.price_alerts ?? []);
+      if (response.positions?.length) {
+        setPositions(response.positions);
+      }
     } catch {
       setNoTradeZones([]);
       setIndicatorLines([]);
@@ -499,13 +611,57 @@ export function TradingDashboard() {
   }
 
   async function handleClosePosition(positionId: number) {
+    const position = positions.find((item) => item.id === positionId);
+    if (position?.status !== "OPEN") {
+      setTradeMessage("La posicion ya no esta abierta");
+      void refreshTradingData();
+      return;
+    }
+    if (position.mode !== "PAPER" && !marketConnectionHealthy) {
+      setTradeMessage(staleTradingReason);
+      void resyncAfterReconnect();
+      return;
+    }
+    const pnl = position?.profit ?? 0;
+    const label = pnl >= 0 ? `beneficio ${pnl.toFixed(2)}` : `perdida ${Math.abs(pnl).toFixed(2)}`;
+    if (!window.confirm(`Cerrar posicion ${position?.internal_symbol ?? ""} con ${label}?`)) {
+      return;
+    }
     setTradeMessage(null);
     try {
       await closePosition(positionId);
-      setTradeMessage("Posicion cerrada en PAPER");
+      setTradeMessage("Posicion cerrada");
+      setSelectedPositionId(null);
       void refreshTradingData();
     } catch (requestError) {
       setTradeMessage(requestError instanceof Error ? requestError.message : "No se pudo cerrar la posicion");
+    }
+  }
+
+  async function handleModifyPositionTp(positionId: number, tp: number) {
+    const position = positions.find((item) => item.id === positionId);
+    if (!position || position.status !== "OPEN") {
+      setTradeMessage("No se puede modificar TP: la posicion no esta abierta");
+      void refreshTradingData();
+      return;
+    }
+    if (selectedPositionId !== positionId) {
+      setTradeMessage("Selecciona primero la linea BUY para modificar su TP");
+      return;
+    }
+    if (position.mode !== "PAPER" && !marketConnectionHealthy) {
+      setTradeMessage(staleTradingReason);
+      void resyncAfterReconnect();
+      return;
+    }
+    try {
+      const updated = await modifyPositionTp(positionId, tp);
+      setPositions((current) => current.map((position) => (position.id === updated.id ? updated : position)));
+      setTradeMessage(`TP actualizado a ${tp.toFixed(2)}`);
+      void refreshTradingData();
+    } catch (requestError) {
+      setTradeMessage(requestError instanceof Error ? requestError.message : "No se pudo modificar el TP");
+      void refreshTradingData();
     }
   }
 
@@ -613,12 +769,97 @@ export function TradingDashboard() {
     );
   }
 
+  function renderTradeHistoryPanel() {
+    return (
+      <section className="panel trade-history-page">
+        <div className="panel-title">Historial de operaciones</div>
+        <div className="history-filter-strip">
+          <span>{selectedSymbol}</span>
+          <span>{tradeHistory.length} registros</span>
+        </div>
+        <div className="trade-history-list">
+          {tradeHistory.length === 0 ? <div className="table-empty">Sin historial</div> : null}
+          {tradeHistory.map((item) => (
+            <article className="trade-history-card" key={item.id}>
+              <div>
+                <strong>{item.internal_symbol} {item.side}</strong>
+                <span>{item.status} / {item.mode}</span>
+              </div>
+              <dl>
+                <div>
+                  <dt>Apertura</dt>
+                  <dd>{new Date(item.opened_at).toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>Cierre</dt>
+                  <dd>{item.closed_at ? new Date(item.closed_at).toLocaleString() : "--"}</dd>
+                </div>
+                <div>
+                  <dt>Volumen</dt>
+                  <dd>{item.volume.toFixed(2)}</dd>
+                </div>
+                <div>
+                  <dt>Entrada</dt>
+                  <dd>{item.open_price.toFixed(2)}</dd>
+                </div>
+                <div>
+                  <dt>Cierre</dt>
+                  <dd>{item.close_price?.toFixed(2) ?? "--"}</dd>
+                </div>
+                <div>
+                  <dt>TP</dt>
+                  <dd>{item.tp?.toFixed(2) ?? "--"}</dd>
+                </div>
+                <div>
+                  <dt>Resultado</dt>
+                  <dd className={(item.profit ?? 0) >= 0 ? "profit-positive" : "profit-negative"}>{item.profit?.toFixed(2) ?? "--"}</dd>
+                </div>
+                <div>
+                  <dt>Ticket</dt>
+                  <dd>{item.mt5_position_ticket ?? "--"}</dd>
+                </div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  function renderPositionBottomSheet() {
+    if (!selectedPosition || selectedPosition.status !== "OPEN") {
+      return null;
+    }
+    const profit = selectedPosition.profit ?? 0;
+    const closeLabel = profit >= 0 ? `CERRAR CON BENEFICIO ${profit.toFixed(2)}` : `CERRAR CON PERDIDA ${Math.abs(profit).toFixed(2)}`;
+    const tpPercent = selectedPosition.tp_percent ?? (selectedPosition.tp ? ((selectedPosition.tp - selectedPosition.open_price) / selectedPosition.open_price) * 100 : null);
+    return (
+      <section className="position-bottom-sheet">
+        <div className="position-bottom-sheet__header">
+          <div>
+            <strong>{selectedPosition.internal_symbol} BUY {selectedPosition.volume.toFixed(2)}</strong>
+            <span>Entrada {selectedPosition.open_price.toFixed(2)} / TP {selectedPosition.tp?.toFixed(2) ?? "--"} {tpPercent !== null ? `(${tpPercent.toFixed(2)}%)` : ""}</span>
+          </div>
+          <button className="mobile-icon-button" type="button" onClick={() => setSelectedPositionId(null)}>x</button>
+        </div>
+        <button
+          className={profit >= 0 ? "position-close-button position-close-button--profit" : "position-close-button position-close-button--loss"}
+          type="button"
+          onClick={() => void handleClosePosition(selectedPosition.id)}
+        >
+          {closeLabel}
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section className={`trading-grid trading-grid--view-${activeMobileView}`}>
       <MobileTopBar
         alertToolActive={alertToolActive}
         chartSymbols={chartSymbols}
         connected={streamConnected}
+        connectionStatus={socketStatus}
         drawingTool={drawingTool}
         drawingMenuOpen={drawingMenuOpen}
         onAlertClick={toggleAlertTool}
@@ -671,6 +912,7 @@ export function TradingDashboard() {
             {renderMarketDiagnosticPanel()}
           </>
         ) : null}
+        {activeMobileView === "history" ? renderTradeHistoryPanel() : null}
       </div>
 
       <div className="market-toolbar">
@@ -730,6 +972,8 @@ export function TradingDashboard() {
         accountMode={accountMode}
         disabledReason={symbolTradingNotice}
         lastPrice={lastPrice}
+        marketConnectionHealthy={marketConnectionHealthy}
+        marketStaleReason={staleTradingReason}
         mt5Connected={mt5Status?.connected_to_mt5 ?? false}
         mt5Status={mt5Status}
         onOrderCompleted={handleOrderCompleted}
@@ -746,8 +990,8 @@ export function TradingDashboard() {
           <div className="price-cluster">
             <span className="price-value">{typeof lastPrice === "number" ? `BID ${lastPrice.toFixed(2)}` : "BID --"}</span>
             <StatusPill
-              label={streamConnected ? "Stream conectado" : "Stream desconectado"}
-              tone={streamConnected ? "success" : "warning"}
+              label={streamStatusLabel}
+              tone={streamStatusTone}
             />
             <StatusPill label={sourceLabel} tone={sourceLabel === "MT5" ? "success" : "neutral"} />
           </div>
@@ -763,12 +1007,18 @@ export function TradingDashboard() {
             alertToolActive={alertToolActive}
             onCreateDrawing={(drawing) => void handleCreateDrawing(drawing)}
             onCreatePriceAlert={(price) => void handleCreatePriceAlert(price)}
+            onDeleteDrawing={(drawingId) => void handleDeleteDrawing(drawingId)}
             onSelectDrawing={setSelectedDrawingId}
+            onSelectPosition={setSelectedPositionId}
+            onCancelPriceAlert={(alertId) => void handleCancelPriceAlert(alertId)}
+            onUpdateDrawing={(drawing, patch) => void handleUpdateDrawing(drawing, patch)}
             onUpdatePriceAlert={(alert, price) => void handleUpdatePriceAlert(alert, price)}
+            onUpdatePositionTp={(positionId, tp) => void handleModifyPositionTp(positionId, tp)}
             askPrice={latestAsk}
             autoFollowEnabled={chartAutoFollowEnabled}
             bidPrice={latestBid}
             onAutoFollowChange={setChartAutoFollowEnabled}
+            recenterToken={chartRecenterToken}
             priceAlerts={priceAlerts}
             resetKey={`${selectedSymbol}:${selectedTimeframe}`}
             selectedDrawingId={selectedDrawingId}
@@ -780,8 +1030,15 @@ export function TradingDashboard() {
             tradeMarkers={tradeMarkers}
           />
           {!chartAutoFollowEnabled ? (
-            <button className="chart-follow-button" type="button" onClick={() => setChartAutoFollowEnabled(true)}>
-              Seguir precio
+            <button
+              className="chart-follow-button"
+              type="button"
+              onClick={() => {
+                setChartAutoFollowEnabled(true);
+                setChartRecenterToken((current) => current + 1);
+              }}
+            >
+              Centrar precio
             </button>
           ) : null}
           {candles.length === 0 ? (
@@ -806,7 +1063,7 @@ export function TradingDashboard() {
             </div>
             <div>
               <dt>Stream</dt>
-              <dd>{streamConnected ? "Conectado" : "Desconectado"}</dd>
+              <dd>{streamStatusLabel}</dd>
             </div>
             <div>
               <dt>Fuente</dt>
@@ -838,6 +1095,8 @@ export function TradingDashboard() {
           accountMode={accountMode}
           disabledReason={symbolTradingNotice}
           lastPrice={lastPrice}
+          marketConnectionHealthy={marketConnectionHealthy}
+          marketStaleReason={staleTradingReason}
           mt5Connected={mt5Status?.connected_to_mt5 ?? false}
           mt5Status={mt5Status}
           onOrderCompleted={handleOrderCompleted}
@@ -894,6 +1153,8 @@ export function TradingDashboard() {
       </aside>
 
       <OrdersPositionsPanel orders={orders} positions={positions} onClosePosition={(id) => void handleClosePosition(id)} />
+
+      {renderPositionBottomSheet()}
 
       <IndicatorsPanel
         indicatorLines={indicatorLines}

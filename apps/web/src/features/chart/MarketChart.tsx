@@ -16,9 +16,9 @@ import type { Candle } from "../../services/market";
 import type { PriceAlertRead } from "../../services/alerts";
 import type { NoTradeZone } from "../../services/news";
 import { type IndicatorLineOutput } from "../../services/indicators";
-import type { ChartDrawingCreate, ChartDrawingRead, DrawingTool } from "../../services/drawings";
+import type { ChartDrawingCreate, ChartDrawingRead, ChartDrawingUpdate, DrawingTool } from "../../services/drawings";
 import { DrawingLayer } from "../drawings/DrawingLayer";
-import type { DrawingCoordinate, DrawingPoint, DrawingShape } from "../drawings/drawingTypes";
+import type { DrawingCoordinate, DrawingDragAction, DrawingPoint, DrawingShape } from "../drawings/drawingTypes";
 import { createBaseDrawing, drawingLabel, numericStyleValue, styleValue } from "../drawings/drawingUtils";
 
 interface MarketChartProps {
@@ -31,19 +31,25 @@ interface MarketChartProps {
   symbol: string;
   timeframe: string;
   onCreateDrawing?: (drawing: ChartDrawingCreate) => void;
+  onUpdateDrawing?: (drawing: ChartDrawingRead, patch: ChartDrawingUpdate) => void;
+  onDeleteDrawing?: (drawingId: string) => void;
   onSelectDrawing?: (drawingId: string | null) => void;
   tradeLines?: TradeLine[];
   tradeMarkers?: SeriesMarker<Time>[];
+  onSelectPosition?: (positionId: number) => void;
+  onUpdatePositionTp?: (positionId: number, tp: number) => void;
   alertToolActive?: boolean;
   priceAlerts?: PriceAlertRead[];
   onCreatePriceAlert?: (price: number) => void;
   onUpdatePriceAlert?: (alert: PriceAlertRead, targetPrice: number) => void;
+  onCancelPriceAlert?: (alertId: string) => void;
   bidPrice?: number | null;
   askPrice?: number | null;
   showBidLine?: boolean;
   showAskLine?: boolean;
   autoFollowEnabled?: boolean;
   onAutoFollowChange?: (enabled: boolean) => void;
+  recenterToken?: number;
   resetKey?: string;
 }
 
@@ -56,9 +62,13 @@ interface ZoneOverlay {
 
 export interface TradeLine {
   id: string;
+  positionId?: number;
   price: number;
   label: string;
   tone: "entry" | "tp" | "close";
+  editable?: boolean;
+  muted?: boolean;
+  selected?: boolean;
 }
 
 interface TradeLineOverlay extends TradeLine {
@@ -137,6 +147,26 @@ function toChartX(chart: IChartApi, time: number, fallback: number): number {
   return chart.timeScale().timeToCoordinate(time as UTCTimestamp) ?? fallback;
 }
 
+const visibleBarsByTimeframe: Record<string, number> = {
+  M1: 120,
+  M5: 150,
+  H1: 160,
+  H2: 160,
+  H4: 160,
+  D1: 180,
+  W1: 220
+};
+
+function centerRecentBars(chart: IChartApi, candleCount: number, timeframe: string) {
+  if (candleCount <= 0) {
+    return;
+  }
+  const bars = visibleBarsByTimeframe[timeframe] ?? 160;
+  const from = Math.max(0, candleCount - bars);
+  const to = candleCount + 8;
+  chart.timeScale().setVisibleLogicalRange({ from, to });
+}
+
 export function MarketChart({
   candles,
   noTradeZones = [],
@@ -147,19 +177,25 @@ export function MarketChart({
   symbol,
   timeframe,
   onCreateDrawing,
+  onUpdateDrawing,
+  onDeleteDrawing,
   onSelectDrawing,
   tradeLines = [],
   tradeMarkers = [],
+  onSelectPosition,
+  onUpdatePositionTp,
   alertToolActive = false,
   priceAlerts = [],
   onCreatePriceAlert,
   onUpdatePriceAlert,
+  onCancelPriceAlert,
   bidPrice = null,
   askPrice = null,
   showBidLine = true,
   showAskLine = true,
   autoFollowEnabled = true,
   onAutoFollowChange,
+  recenterToken = 0,
   resetKey
 }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -176,9 +212,13 @@ export function MarketChart({
   const [priceAlertOverlays, setPriceAlertOverlays] = useState<PriceAlertOverlay[]>([]);
   const [draggingAlertId, setDraggingAlertId] = useState<string | null>(null);
   const [draftAlertPrices, setDraftAlertPrices] = useState<Record<string, number>>({});
+  const [draggingTpLineId, setDraggingTpLineId] = useState<string | null>(null);
+  const [draftTradeLinePrices, setDraftTradeLinePrices] = useState<Record<string, number>>({});
   const [drawingShapes, setDrawingShapes] = useState<DrawingShape[]>([]);
+  const [draftDrawingPayloads, setDraftDrawingPayloads] = useState<Record<string, Record<string, unknown>>>({});
   const [pendingPoint, setPendingPoint] = useState<DrawingPoint | null>(null);
   const [pendingCoordinate, setPendingCoordinate] = useState<DrawingCoordinate | null>(null);
+  const suppressNextChartPointRef = useRef(false);
 
   const recalculateOverlays = useCallback(() => {
     const chart = chartRef.current;
@@ -242,7 +282,7 @@ export function MarketChart({
           label
         };
 
-        const payload = drawing.payload;
+        const payload = draftDrawingPayloads[drawing.id] ?? drawing.payload;
 
         if (drawing.drawing_type === "horizontal_line") {
           const price = numberValue(payload.price);
@@ -415,8 +455,9 @@ export function MarketChart({
     setTradeLineOverlays(
       tradeLines
         .map((line): TradeLineOverlay | null => {
-          const y = series.priceToCoordinate(line.price);
-          return y === null ? null : { ...line, y };
+          const price = draftTradeLinePrices[line.id] ?? line.price;
+          const y = series.priceToCoordinate(price);
+          return y === null ? null : { ...line, price, y };
         })
         .filter((line): line is TradeLineOverlay => line !== null)
     );
@@ -439,7 +480,7 @@ export function MarketChart({
     } else {
       setPendingCoordinate(null);
     }
-  }, [drawings, draftAlertPrices, noTradeZones, pendingPoint, priceAlerts, tradeLines]);
+  }, [drawings, draftAlertPrices, draftDrawingPayloads, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, tradeLines]);
 
   useEffect(() => {
     setPendingPoint(null);
@@ -462,12 +503,30 @@ export function MarketChart({
         horzLines: { color: "#24303a", style: LineStyle.Dashed }
       },
       rightPriceScale: {
-        borderColor: "#3a434a"
+        borderColor: "#3a434a",
+        scaleMargins: {
+          top: 0.18,
+          bottom: 0.18
+        }
       },
       timeScale: {
         borderColor: "#293033",
         timeVisible: true,
         secondsVisible: false
+      },
+      handleScale: {
+        axisPressedMouseMove: {
+          time: true,
+          price: true
+        },
+        mouseWheel: true,
+        pinch: true
+      },
+      handleScroll: {
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+        mouseWheel: true,
+        pressedMouseMove: true
       },
       crosshair: {
         mode: 1
@@ -509,7 +568,7 @@ export function MarketChart({
     if (shouldReset || !hasFullDataRef.current) {
       series.setData(sortedCandles);
       if (sortedCandles.length > 0) {
-        chart.timeScale().fitContent();
+        centerRecentBars(chart, sortedCandles.length, timeframe);
         loadedResetKeyRef.current = nextResetKey;
         hasFullDataRef.current = true;
       }
@@ -526,6 +585,15 @@ export function MarketChart({
     series.setMarkers(sortedTradeMarkers);
     window.setTimeout(recalculateOverlays, 0);
   }, [autoFollowEnabled, candles, recalculateOverlays, resetKey, symbol, timeframe, tradeMarkers]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || candles.length === 0) {
+      return;
+    }
+    centerRecentBars(chart, candles.length, timeframe);
+    window.setTimeout(recalculateOverlays, 0);
+  }, [recenterToken]);
 
   useEffect(() => {
     const series = seriesRef.current;
@@ -764,6 +832,10 @@ export function MarketChart({
   }
 
   function handleChartPointerUp(event: PointerEvent<HTMLDivElement>) {
+    if (suppressNextChartPointRef.current) {
+      suppressNextChartPointRef.current = false;
+      return;
+    }
     if (draggingAlertId || (!alertToolActive && drawingTool === "select")) {
       return;
     }
@@ -788,6 +860,136 @@ export function MarketChart({
     return price === null ? null : Number(price.toFixed(5));
   }
 
+  function startDrawingDrag(event: PointerEvent<SVGElement>, shape: DrawingShape, action: DrawingDragAction) {
+    if (!onUpdateDrawing || shape.drawing.locked) {
+      return;
+    }
+    const updateDrawing = onUpdateDrawing;
+    suppressNextChartPointRef.current = true;
+    const startPoint = chartPointFromClient(event.clientX, event.clientY);
+    if (!startPoint) {
+      return;
+    }
+    const dragStartPoint = startPoint;
+    const originalPayload = { ...shape.drawing.payload };
+    const drawing = shape.drawing;
+
+    function handleMove(moveEvent: globalThis.PointerEvent) {
+      const nextPoint = chartPointFromClient(moveEvent.clientX, moveEvent.clientY);
+      if (!nextPoint) {
+        return;
+      }
+      const nextPayload = transformDrawingPayload(drawing, originalPayload, dragStartPoint, nextPoint, action);
+      setDraftDrawingPayloads((current) => ({ ...current, [drawing.id]: nextPayload }));
+    }
+
+    function handleUp(upEvent: globalThis.PointerEvent) {
+      window.removeEventListener("pointermove", handleMove);
+      const nextPoint = chartPointFromClient(upEvent.clientX, upEvent.clientY);
+      if (nextPoint) {
+        const nextPayload = transformDrawingPayload(drawing, originalPayload, dragStartPoint, nextPoint, action);
+        updateDrawing(drawing, { payload: nextPayload });
+      }
+      setDraftDrawingPayloads((current) => {
+        const next = { ...current };
+        delete next[drawing.id];
+        return next;
+      });
+      window.setTimeout(() => {
+        suppressNextChartPointRef.current = false;
+      }, 0);
+    }
+
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp, { once: true });
+  }
+
+  function transformDrawingPayload(
+    drawing: ChartDrawingRead,
+    payload: Record<string, unknown>,
+    startPoint: DrawingPoint,
+    nextPoint: DrawingPoint,
+    action: DrawingDragAction
+  ): Record<string, unknown> {
+    const timeDelta = nextPoint.time - startPoint.time;
+    const priceDelta = nextPoint.price - startPoint.price;
+    const withNumber = (value: unknown, delta: number) => Number(((numberValue(value) ?? 0) + delta).toFixed(5));
+    const withTime = (value: unknown, delta: number) => Math.max(0, Math.floor((numberValue(value) ?? 0) + delta));
+
+    if (drawing.drawing_type === "horizontal_line") {
+      return { ...payload, price: Number(nextPoint.price.toFixed(5)) };
+    }
+
+    if (drawing.drawing_type === "vertical_line") {
+      return { ...payload, time: nextPoint.time };
+    }
+
+    if (drawing.drawing_type === "text") {
+      return {
+        ...payload,
+        time: action === "move" ? withTime(payload.time, timeDelta) : nextPoint.time,
+        price: action === "move" ? withNumber(payload.price, priceDelta) : Number(nextPoint.price.toFixed(5))
+      };
+    }
+
+    if (drawing.drawing_type === "trend_line") {
+      const points = Array.isArray(payload.points) ? payload.points : [];
+      const first = typeof points[0] === "object" && points[0] !== null ? { ...(points[0] as Record<string, unknown>) } : {};
+      const second = typeof points[1] === "object" && points[1] !== null ? { ...(points[1] as Record<string, unknown>) } : {};
+      if (action === "p1") {
+        first.time = nextPoint.time;
+        first.price = Number(nextPoint.price.toFixed(5));
+      } else if (action === "p2") {
+        second.time = nextPoint.time;
+        second.price = Number(nextPoint.price.toFixed(5));
+      } else {
+        first.time = withTime(first.time, timeDelta);
+        first.price = withNumber(first.price, priceDelta);
+        second.time = withTime(second.time, timeDelta);
+        second.price = withNumber(second.price, priceDelta);
+      }
+      return { ...payload, points: [first, second] };
+    }
+
+    if (drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone") {
+      const isManualZone = drawing.drawing_type === "manual_zone";
+      const time1Key = "time1";
+      const time2Key = "time2";
+      const lowKey = isManualZone ? "price_min" : "price1";
+      const highKey = isManualZone ? "price_max" : "price2";
+      let time1 = numberValue(payload[time1Key]) ?? startPoint.time;
+      let time2 = numberValue(payload[time2Key]) ?? nextPoint.time;
+      let price1 = numberValue(payload[lowKey]) ?? startPoint.price;
+      let price2 = numberValue(payload[highKey]) ?? nextPoint.price;
+
+      if (action === "move") {
+        time1 += timeDelta;
+        time2 += timeDelta;
+        price1 += priceDelta;
+        price2 += priceDelta;
+      } else {
+        if (action.includes("left")) time1 = nextPoint.time;
+        if (action.includes("right")) time2 = nextPoint.time;
+        if (action.includes("top")) price2 = nextPoint.price;
+        if (action.includes("bottom")) price1 = nextPoint.price;
+      }
+
+      const normalizedTime1 = Math.floor(Math.min(time1, time2));
+      const normalizedTime2 = Math.floor(Math.max(time1, time2));
+      const low = Number(Math.min(price1, price2).toFixed(5));
+      const high = Number(Math.max(price1, price2).toFixed(5));
+      return {
+        ...payload,
+        [time1Key]: normalizedTime1,
+        [time2Key]: normalizedTime2,
+        [lowKey]: low,
+        [highKey]: high
+      };
+    }
+
+    return payload;
+  }
+
   function startAlertDrag(event: PointerEvent<HTMLDivElement>, alert: PriceAlertRead) {
     event.preventDefault();
     event.stopPropagation();
@@ -795,6 +997,19 @@ export function MarketChart({
     const price = priceFromPointer(event);
     if (price !== null) {
       setDraftAlertPrices((current) => ({ ...current, [alert.id]: price }));
+    }
+  }
+
+  function startTpDrag(event: PointerEvent<HTMLDivElement>, line: TradeLineOverlay) {
+    if (line.tone !== "tp" || !line.positionId || !line.editable || !onUpdatePositionTp) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setDraggingTpLineId(line.id);
+    const price = priceFromPointer(event);
+    if (price !== null) {
+      setDraftTradeLinePrices((current) => ({ ...current, [line.id]: price }));
     }
   }
 
@@ -832,6 +1047,41 @@ export function MarketChart({
       window.removeEventListener("pointerup", handleUp);
     };
   }, [draggingAlertId, onUpdatePriceAlert, priceAlerts]);
+
+  useEffect(() => {
+    if (!draggingTpLineId) {
+      return;
+    }
+    const activeLineId = draggingTpLineId;
+
+    function handleMove(event: globalThis.PointerEvent) {
+      const price = priceFromPointer(event);
+      if (price !== null) {
+        setDraftTradeLinePrices((current) => ({ ...current, [activeLineId]: price }));
+      }
+    }
+
+    function handleUp(event: globalThis.PointerEvent) {
+      const line = tradeLines.find((item) => item.id === activeLineId);
+      const price = priceFromPointer(event);
+      if (line?.positionId && price !== null) {
+        onUpdatePositionTp?.(line.positionId, price);
+      }
+      setDraggingTpLineId(null);
+      setDraftTradeLinePrices((current) => {
+        const next = { ...current };
+        delete next[activeLineId];
+        return next;
+      });
+    }
+
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+  }, [draggingTpLineId, onUpdatePositionTp, tradeLines]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -895,18 +1145,39 @@ export function MarketChart({
       </div>
 
       <DrawingLayer
+        onDragStart={startDrawingDrag}
         onSelect={(drawingId) => onSelectDrawing?.(drawingId)}
         pendingPoint={pendingCoordinate}
         selectedDrawingId={selectedDrawingId}
         shapes={drawingShapes}
       />
 
-      <div className="trade-line-layer" aria-hidden="true">
+      {selectedDrawingId && onDeleteDrawing ? (
+        <button className="chart-object-action chart-object-action--danger" type="button" onClick={() => onDeleteDrawing(selectedDrawingId)}>
+          Eliminar
+        </button>
+      ) : null}
+
+      <div className="trade-line-layer">
         {tradeLineOverlays.map((line) => (
           <div
-            className={`trade-line trade-line--${line.tone}`}
+            className={[
+              "trade-line",
+              `trade-line--${line.tone}`,
+              line.selected ? "trade-line--selected" : "",
+              line.muted ? "trade-line--muted" : "",
+              line.editable ? "trade-line--editable" : ""
+            ].filter(Boolean).join(" ")}
             key={line.id}
             style={{ top: line.y }}
+            onPointerDown={(event) => {
+              if (line.tone === "tp") {
+                startTpDrag(event, line);
+              } else if (line.positionId) {
+                event.stopPropagation();
+                onSelectPosition?.(line.positionId);
+              }
+            }}
           >
             <span>{line.label}</span>
           </div>
@@ -921,7 +1192,23 @@ export function MarketChart({
             style={{ top: overlay.y }}
             onPointerDown={(event) => startAlertDrag(event, overlay.alert)}
           >
-            <span>ALERTA &lt;= {overlay.targetPrice.toFixed(2)}</span>
+            <span>
+              ALERTA &lt;= {overlay.targetPrice.toFixed(2)}
+              {onCancelPriceAlert ? (
+                <button
+                  aria-label="Cancelar alerta"
+                  className="inline-delete"
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCancelPriceAlert(overlay.alert.id);
+                  }}
+                >
+                  x
+                </button>
+              ) : null}
+            </span>
           </div>
         ))}
       </div>

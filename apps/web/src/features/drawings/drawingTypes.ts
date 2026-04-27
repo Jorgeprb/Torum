@@ -20,6 +20,19 @@ export interface DrawingShapeBase {
   label?: string;
 }
 
+export type DrawingDragAction =
+  | "move"
+  | "p1"
+  | "p2"
+  | "top"
+  | "bottom"
+  | "left"
+  | "right"
+  | "top-left"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-right";
+
 export type DrawingShape =
   | (DrawingShapeBase & { kind: "horizontal_line"; x1: number; x2: number; y: number })
   | (DrawingShapeBase & { kind: "vertical_line"; x: number; y1: number; y2: number })

@@ -17,7 +17,7 @@ Torum usa una interfaz mobile-first para que el grafico sea la superficie princi
 - Panel BUY compacto solo con lotaje, botones `+` / `-` y `BUY`.
 - El precio se ve en el eje y en las lineas dinamicas `BID`/`ASK`, no dentro del panel de compra.
 - Grafico Lightweight Charts ocupando casi todo el viewport.
-- Drawer lateral para cuenta, grafico, estrategias, indicadores y ajustes.
+- Drawer lateral para cuenta, grafico, estrategias, indicadores, ajustes e historial.
 
 Se usa `100dvh` y `safe-area-inset` para PWA movil, evitando que barras del navegador tapen el grafico.
 
@@ -29,7 +29,7 @@ El drawer muestra:
 - modo `DEMO` / `REAL` / `UNKNOWN`;
 - balance, equity y margen libre;
 - estado MT5/backend/fuente de mercado;
-- navegacion a Grafico, Estrategias, Indicadores y Ajustes.
+- navegacion a Grafico, Estrategias, Indicadores, Ajustes e Historial.
 
 ## Tailscale
 
@@ -68,7 +68,19 @@ Desde el navegador movil, instala Torum como app. El layout esta pensado para us
 
 ## Zoom y seguimiento
 
-Torum ya no hace `fitContent()` con cada tick. Al cargar datos iniciales, cambiar simbolo o timeframe se autoajusta el grafico. Si haces pan o zoom manual, se desactiva el seguimiento automatico y aparece el boton `Seguir precio`.
+Torum ya no hace `fitContent()` con cada tick. Al cargar datos iniciales, cambiar simbolo o timeframe se centra un rango reciente por timeframe y se deja margen vertical. Si haces pan o zoom manual, se desactiva el seguimiento automatico y aparece el boton `Centrar precio`.
+
+La escala inferior de tiempo permanece visible. Los overlays usan `pointer-events` solo en objetos editables para no bloquear el pan horizontal del grafico ni la interaccion con el eje temporal.
+
+## Reconexion movil
+
+El indicador superior distingue conectado, reconectando, desconectado y datos desactualizados. Al volver de segundo plano, volver a tener red o reabrir la PWA desde `pageshow`, Torum reconstruye el WebSocket si hace falta y recarga velas, BID/ASK, posiciones, historial, alertas y overlays.
+
+En `DEMO` y `LIVE`, el panel BUY y las acciones de cerrar/modificar posicion se bloquean si el stream esta stale o reconectando. Ver [reconnection.md](reconnection.md).
+
+## Posiciones moviles
+
+Tocar la linea azul de entrada abre un panel inferior. Desde ahi puedes cerrar la posicion con confirmacion. La linea verde de TP solo se arrastra cuando esa posicion esta seleccionada; si no, se ve mas apagada. Al soltar se guarda el nuevo TP y se recalcula el porcentaje.
 
 ## Lineas BID/ASK
 

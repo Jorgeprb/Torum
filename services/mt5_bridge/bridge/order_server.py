@@ -12,6 +12,7 @@ from bridge.order_models import (
     BridgeOrderResponse,
     ClosePositionRequest,
     MarketOrderRequest,
+    ModifyPositionTpRequest,
     OrderExecutionSettingsRequest,
     OrderExecutionSettingsResponse,
 )
@@ -92,6 +93,10 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
     @app.post("/positions/{ticket}/close", response_model=BridgeOrderResponse)
     def close_position(ticket: int, payload: ClosePositionRequest) -> BridgeOrderResponse:
         return executor.close_position(ticket, payload)
+
+    @app.patch("/positions/{ticket}/tp", response_model=BridgeOrderResponse)
+    def modify_position_tp(ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
+        return executor.modify_position_tp(ticket, payload)
 
     return app
 

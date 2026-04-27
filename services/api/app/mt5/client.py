@@ -86,3 +86,14 @@ class MT5BridgeClient:
         except requests.RequestException as exc:
             logger.warning("MT5 bridge close position failed: %s", exc)
             raise MT5BridgeClientError(str(exc)) from exc
+
+    def modify_position_tp(self, ticket: int, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.is_configured():
+            raise MT5BridgeClientError("MT5 bridge base URL is not configured")
+        try:
+            response = requests.patch(f"{self.base_url}/positions/{ticket}/tp", json=payload, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            logger.warning("MT5 bridge modify TP failed: %s", exc)
+            raise MT5BridgeClientError(str(exc)) from exc

@@ -12,6 +12,7 @@ class BridgeSettings(BaseSettings):
     torum_health_endpoint: str = "/api/health"
     torum_symbols_endpoint: str = "/api/symbols"
     torum_mt5_status_endpoint: str = "/api/mt5/status"
+    torum_mt5_positions_sync_endpoint: str = "/api/mt5/positions/sync"
     torum_http_timeout_seconds: float = 10.0
     torum_http_max_retries: int = 3
 
@@ -36,6 +37,8 @@ class BridgeSettings(BaseSettings):
     mt5_default_deviation_points: int = 20
     mt5_order_comment_prefix: str = "Torum"
     mt5_diagnostic_log_interval_seconds: int = 5
+    mt5_position_sync_interval_seconds: int = 3
+    mt5_deals_history_lookback_days: int = 14
 
     log_level: str = "INFO"
 

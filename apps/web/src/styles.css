@@ -547,6 +547,33 @@ h2 {
   stroke-width: 2px;
 }
 
+.drawing-handle {
+  pointer-events: auto;
+  fill: #f5c542;
+  stroke: #050607;
+  stroke-width: 2px;
+  cursor: grab;
+}
+
+.chart-object-action {
+  position: absolute;
+  z-index: 14;
+  top: 10px;
+  right: 10px;
+  border: 1px solid #3a434a;
+  border-radius: 999px;
+  background: rgba(3, 8, 12, 0.88);
+  color: #edf2ef;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  font-weight: 950;
+}
+
+.chart-object-action--danger {
+  border-color: rgba(244, 93, 93, 0.72);
+  color: #ff8a8a;
+}
+
 .chart-empty-state {
   position: absolute;
   inset: 0;
@@ -1014,7 +1041,10 @@ h2 {
   position: absolute;
   left: 0;
   width: 100%;
-  border-top: 1px solid #2be0d0;
+  border-top: 1px solid #2f8cff;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: pointer;
 }
 
 .trade-line span {
@@ -1030,11 +1060,139 @@ h2 {
 }
 
 .trade-line--tp {
-  border-top-color: #d6b25e;
+  border-top-color: #2ee66b;
+  cursor: default;
+  opacity: 0.45;
 }
 
 .trade-line--close {
   border-top-color: #f45d5d;
+}
+
+.trade-line--selected {
+  filter: drop-shadow(0 0 5px rgba(47, 140, 255, 0.8));
+}
+
+.trade-line--editable {
+  cursor: ns-resize;
+  opacity: 1;
+}
+
+.trade-line--muted {
+  opacity: 0.36;
+}
+
+.inline-delete {
+  margin-left: 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 950;
+}
+
+.position-bottom-sheet {
+  position: fixed;
+  z-index: 24;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  left: 12px;
+  display: grid;
+  gap: 10px;
+  border: 1px solid #24303a;
+  border-radius: 8px;
+  background: rgba(4, 7, 9, 0.96);
+  padding: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+}
+
+.position-bottom-sheet__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.position-bottom-sheet__header div {
+  display: grid;
+  gap: 3px;
+}
+
+.position-bottom-sheet__header span {
+  color: #9aa7a3;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.position-close-button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 5px;
+  color: #050607;
+  font-weight: 950;
+}
+
+.position-close-button--profit {
+  background: #2ee66b;
+}
+
+.position-close-button--loss {
+  background: #ff795c;
+}
+
+.trade-history-page,
+.trade-history-list {
+  display: grid;
+  gap: 10px;
+}
+
+.history-filter-strip {
+  display: flex;
+  justify-content: space-between;
+  color: #95a09d;
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.trade-history-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #263033;
+  background: #0b0f14;
+  padding: 10px;
+}
+
+.trade-history-card > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.trade-history-card span,
+.trade-history-card dt {
+  color: #95a09d;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.trade-history-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.trade-history-card dd {
+  margin: 0;
+  color: #edf2ef;
+  font-weight: 850;
+}
+
+.profit-positive {
+  color: #2ee66b !important;
+}
+
+.profit-negative {
+  color: #ff795c !important;
 }
 
 .settings-form-grid,
@@ -1486,11 +1644,19 @@ h2 {
   .mobile-status {
     display: inline-grid;
     place-items: center;
-    color: #f45d5d;
+    color: #7d8990;
   }
 
   .mobile-status--ok {
     color: #2be0d0;
+  }
+
+  .mobile-status--warning {
+    color: #f0cd78;
+  }
+
+  .mobile-status--error {
+    color: #f45d5d;
   }
 
   .mobile-symbol-strip {
@@ -1642,7 +1808,8 @@ h2 {
 
   .trading-grid--view-strategies,
   .trading-grid--view-indicators,
-  .trading-grid--view-settings {
+  .trading-grid--view-settings,
+  .trading-grid--view-history {
     grid-template-rows: auto minmax(0, 1fr);
   }
 
@@ -1651,19 +1818,23 @@ h2 {
   .trading-grid--view-indicators > .buy-panel,
   .trading-grid--view-indicators .chart-panel,
   .trading-grid--view-settings > .buy-panel,
-  .trading-grid--view-settings .chart-panel {
+  .trading-grid--view-settings .chart-panel,
+  .trading-grid--view-history > .buy-panel,
+  .trading-grid--view-history .chart-panel {
     display: none;
   }
 
   .trading-grid--view-strategies .mobile-view-panel,
   .trading-grid--view-indicators .mobile-view-panel,
-  .trading-grid--view-settings .mobile-view-panel {
+  .trading-grid--view-settings .mobile-view-panel,
+  .trading-grid--view-history .mobile-view-panel {
     display: block;
   }
 
   .trading-grid--view-strategies .strategy-workbench,
   .trading-grid--view-indicators .panel,
-  .trading-grid--view-settings .mobile-settings-page {
+  .trading-grid--view-settings .mobile-settings-page,
+  .trading-grid--view-history .trade-history-page {
     display: grid;
   }
 

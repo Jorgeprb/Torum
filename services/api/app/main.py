@@ -30,6 +30,7 @@ from app.strategies.service import seed_strategy_engine_defaults
 from app.symbols.router import router as symbols_router
 from app.symbols.service import seed_default_symbols
 from app.ticks.router import router as ticks_router
+from app.trade_history.routes import router as trade_history_router
 from app.trading.routes import router as trading_router
 from app.users.service import seed_initial_users
 from app.websockets.router import router as websocket_router
@@ -87,6 +88,7 @@ def create_app() -> FastAPI:
     app.include_router(trading_router, prefix="/api")
     app.include_router(orders_router, prefix="/api")
     app.include_router(positions_router, prefix="/api")
+    app.include_router(trade_history_router, prefix="/api")
     app.include_router(websocket_router)
 
     @app.get("/health", tags=["health"])

@@ -113,7 +113,29 @@ Desde esta fase, `CANDLE_PRICE_SOURCE=BID` por defecto. Una diferencia grande co
 
 Para diagnostico de ejecucion MT5 y errores `order_send=None`, ver [mt5_trading.md](docs/mt5_trading.md).
 
+## Grafico, posiciones e historial
+
+La fase actual mejora el grafico movil:
+
+- dibujos y alertas seleccionables, movibles y borrables;
+- autoescala/recentrado por simbolo y timeframe sin resetear zoom en cada tick;
+- lineas de posicion abiertas: entrada BUY azul y TP verde;
+- modificacion de TP arrastrando la linea verde;
+- cierre de posicion desde panel inferior con confirmacion;
+- sincronizacion basica de posiciones abiertas/cerradas desde MT5;
+- historial en burger menu y endpoint `/api/trade-history`.
+
+Ver [positions.md](docs/positions.md), [trade_history.md](docs/trade_history.md) y [drawings.md](docs/drawings.md).
+
 Los ticks guardan `time_msc` y Torum resuelve el ultimo precio por `time_msc DESC`. El precio visible principal debe ser `latestTick.bid`; `candle.close` queda para velas/historico.
+
+## Reconexion y resync
+
+La PWA usa un WebSocket manager centralizado con heartbeat `ping/pong`, backoff y deteccion de datos `stale`. Al volver de segundo plano, recuperar red o reconectar el socket, Torum recarga velas, ultimo tick, estado MT5, posiciones, historial, alertas y overlays.
+
+En `DEMO` y `LIVE`, las acciones de compra, cierre y modificacion de TP se bloquean si el stream esta desconectado, reconectando o desactualizado. Ver [reconnection.md](docs/reconnection.md).
+
+La sincronizacion de cierres MT5 usa `positions_get()` como verdad de posiciones abiertas y `history_deals_get()` para completar cierres por `deal.position_id`, guardando `close_price`, `closed_at`, `profit`, `swap`, `commission` y `closing_deal_ticket`.
 
 Para push se usan variables VAPID en `.env`:
 

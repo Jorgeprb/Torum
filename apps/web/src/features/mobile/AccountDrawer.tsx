@@ -1,8 +1,8 @@
-import { Activity, BarChart3, Gauge, Settings, Shield, X, type LucideIcon } from "lucide-react";
+import { Activity, BarChart3, Gauge, History, Settings, Shield, X, type LucideIcon } from "lucide-react";
 
 import type { MT5Status } from "../../services/market";
 
-export type MobileView = "chart" | "strategies" | "indicators" | "settings";
+export type MobileView = "chart" | "strategies" | "indicators" | "settings" | "history";
 
 interface AccountDrawerProps {
   activeView: MobileView;
@@ -18,7 +18,8 @@ const navItems: Array<{ id: MobileView; label: string; icon: LucideIcon }> = [
   { id: "chart", label: "Grafico", icon: BarChart3 },
   { id: "strategies", label: "Estrategias", icon: Activity },
   { id: "indicators", label: "Indicadores", icon: Gauge },
-  { id: "settings", label: "Ajustes", icon: Settings }
+  { id: "settings", label: "Ajustes", icon: Settings },
+  { id: "history", label: "Historial", icon: History }
 ];
 
 export function AccountDrawer({ activeView, backendOk, marketSource, mt5Status, onClose, onNavigate, open }: AccountDrawerProps) {

@@ -99,13 +99,40 @@ export interface PositionRead {
   volume: number;
   open_price: number;
   current_price: number | null;
+  close_price: number | null;
   sl: number | null;
   tp: number | null;
   profit: number | null;
+  swap: number | null;
+  commission: number | null;
   status: "OPEN" | "CLOSED";
   mt5_position_ticket: number | null;
+  closing_deal_ticket: number | null;
   opened_at: string;
   closed_at: string | null;
+  tp_percent: number | null;
+}
+
+export interface TradeHistoryItem {
+  id: number;
+  position_id: number;
+  order_id: number | null;
+  opened_at: string;
+  closed_at: string | null;
+  internal_symbol: string;
+  broker_symbol: string;
+  side: OrderSide;
+  volume: number;
+  open_price: number;
+  close_price: number | null;
+  tp: number | null;
+  profit: number | null;
+  swap: number | null;
+  commission: number | null;
+  mode: TradingMode;
+  mt5_position_ticket: number | null;
+  closing_deal_ticket: number | null;
+  status: "OPEN" | "CLOSED";
 }
 
 export interface LotSizeResponse {
@@ -175,5 +202,24 @@ export function getPositions(): Promise<PositionRead[]> {
 }
 
 export function closePosition(id: number): Promise<PositionRead> {
-  return request<PositionRead>(`/api/positions/${id}/close`, { method: "POST" });
+  return request<PositionRead>(`/api/positions/${id}/close`, {
+    method: "POST",
+    body: JSON.stringify({ client_confirmation: { confirmed: true } })
+  });
+}
+
+export function modifyPositionTp(id: number, tp: number): Promise<PositionRead> {
+  return request<PositionRead>(`/api/positions/${id}/tp`, {
+    method: "PATCH",
+    body: JSON.stringify({ tp })
+  });
+}
+
+export function getTradeHistory(params: { symbol?: string; status?: "OPEN" | "CLOSED"; mode?: TradingMode } = {}): Promise<TradeHistoryItem[]> {
+  const query = new URLSearchParams();
+  if (params.symbol) query.set("symbol", params.symbol);
+  if (params.status) query.set("status", params.status);
+  if (params.mode) query.set("mode", params.mode);
+  query.set("limit", "300");
+  return request<TradeHistoryItem[]>(`/api/trade-history?${query.toString()}`);
 }

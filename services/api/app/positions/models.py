@@ -21,11 +21,15 @@ class Position(Base):
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     open_price: Mapped[float] = mapped_column(Float, nullable=False)
     current_price: Mapped[float | None] = mapped_column(Float)
+    close_price: Mapped[float | None] = mapped_column(Float)
     sl: Mapped[float | None] = mapped_column(Float)
     tp: Mapped[float | None] = mapped_column(Float)
     profit: Mapped[float | None] = mapped_column(Float)
+    swap: Mapped[float | None] = mapped_column(Float)
+    commission: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     mt5_position_ticket: Mapped[int | None] = mapped_column(BigInteger)
+    closing_deal_ticket: Mapped[int | None] = mapped_column(BigInteger)
     magic_number: Mapped[int | None] = mapped_column(Integer)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -36,3 +40,11 @@ class Position(Base):
         nullable=False,
     )
     raw_payload_json: Mapped[dict | None] = mapped_column(JSON)
+    close_payload_json: Mapped[dict | None] = mapped_column(JSON)
+
+    @property
+    def tp_percent(self) -> float | None:
+        if self.tp is None or self.open_price <= 0:
+            return None
+        direction = 1 if self.side == "BUY" else -1
+        return ((self.tp - self.open_price) / self.open_price) * 100 * direction

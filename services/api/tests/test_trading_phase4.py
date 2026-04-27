@@ -14,10 +14,13 @@ from app.orders.models import Order
 from app.orders.router import router as orders_router
 from app.orders.service import OrderManager
 from app.positions.models import Position
+from app.positions.router import router as positions_router
+from app.positions.service import PositionService
 from app.risk.manager import RiskManager
 from app.settings.trading_settings import TradingSettings
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
+from app.trade_history.routes import router as trade_history_router
 from app.trading.schemas import ManualOrderRequest
 from app.users.models import User, UserRole
 
@@ -228,3 +231,231 @@ def test_orders_manual_endpoint_accepts_valid_paper_payload() -> None:
 
     assert response.status_code == 201
     assert response.json()["status"] == "EXECUTED"
+
+
+def test_position_service_modifies_paper_buy_tp_and_percent() -> None:
+    db = _session()
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="PAPER",
+        account_login=None,
+        account_server=None,
+        side="BUY",
+        volume=0.04,
+        open_price=100.0,
+        current_price=100.0,
+        sl=None,
+        tp=100.09,
+        profit=0.0,
+        status="OPEN",
+        mt5_position_ticket=None,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+
+    ok, message, updated = PositionService(db).modify_take_profit(position.id, 101.0)
+
+    assert ok is True
+    assert message == "Paper TP updated"
+    assert updated is not None
+    assert updated.tp == 101.0
+    assert round(updated.tp_percent or 0, 2) == 1.0
+
+
+def test_position_service_rejects_buy_tp_below_entry() -> None:
+    db = _session()
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="PAPER",
+        account_login=None,
+        account_server=None,
+        side="BUY",
+        volume=0.04,
+        open_price=100.0,
+        current_price=100.0,
+        sl=None,
+        tp=None,
+        profit=0.0,
+        status="OPEN",
+        mt5_position_ticket=None,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+
+    ok, message, _ = PositionService(db).modify_take_profit(position.id, 99.0)
+
+    assert ok is False
+    assert "above entry" in message
+
+
+def test_mt5_position_sync_closes_missing_ticket() -> None:
+    db = _session()
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=123456,
+        account_server="Broker-Demo",
+        side="BUY",
+        volume=0.04,
+        open_price=100.0,
+        current_price=100.0,
+        sl=None,
+        tp=101.0,
+        profit=0.0,
+        status="OPEN",
+        mt5_position_ticket=789,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+
+    result = PositionService(db).sync_mt5_positions(
+        positions=[],
+        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+    )
+
+    assert result["closed"] == 1
+    assert db.get(Position, position.id).status == "CLOSED"
+
+
+def test_mt5_position_sync_closes_missing_ticket_with_unknown_local_account() -> None:
+    db = _session()
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUEUR",
+        broker_symbol="XAUEUR",
+        mode="DEMO",
+        account_login=None,
+        account_server=None,
+        side="BUY",
+        volume=0.03,
+        open_price=100.0,
+        current_price=100.0,
+        sl=None,
+        tp=101.0,
+        profit=0.0,
+        status="OPEN",
+        mt5_position_ticket=987,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+
+    result = PositionService(db).sync_mt5_positions(
+        positions=[],
+        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+    )
+
+    assert result["closed"] == 1
+    assert db.get(Position, position.id).status == "CLOSED"
+
+
+def test_mt5_position_sync_uses_history_deal_for_closed_position() -> None:
+    db = _session()
+    closed_time = datetime(2026, 4, 27, 12, 30, tzinfo=UTC)
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=123456,
+        account_server="Broker-Demo",
+        side="BUY",
+        volume=0.04,
+        open_price=100.0,
+        current_price=100.0,
+        sl=None,
+        tp=101.0,
+        profit=0.0,
+        status="OPEN",
+        mt5_position_ticket=789,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+
+    result = PositionService(db).sync_mt5_positions(
+        positions=[],
+        closed_deals=[
+            {
+                "position_id": 789,
+                "ticket": 555,
+                "time_msc": int(closed_time.timestamp() * 1000),
+                "price": 99.5,
+                "profit": -12.3,
+                "swap": -0.4,
+                "commission": -0.2,
+                "raw": {"ticket": 555, "position_id": 789},
+            }
+        ],
+        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+    )
+
+    saved = db.get(Position, position.id)
+    assert result["closed"] == 1
+    assert result["deals_received"] == 1
+    assert saved.status == "CLOSED"
+    assert saved.closed_at == closed_time
+    assert saved.close_price == 99.5
+    assert saved.current_price == 99.5
+    assert saved.profit == -12.3
+    assert saved.swap == -0.4
+    assert saved.commission == -0.2
+    assert saved.closing_deal_ticket == 555
+    assert saved.close_payload_json == {"ticket": 555, "position_id": 789}
+
+
+def test_trade_history_endpoint_lists_closed_positions() -> None:
+    db = _session()
+    user = db.get(User, 1)
+    assert user is not None
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="PAPER",
+        account_login=None,
+        account_server=None,
+        side="BUY",
+        volume=0.04,
+        open_price=100.0,
+        current_price=101.0,
+        sl=None,
+        tp=101.0,
+        profit=1.0,
+        status="CLOSED",
+        mt5_position_ticket=None,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+    app = FastAPI()
+    app.include_router(trade_history_router, prefix="/api")
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    response = TestClient(app).get("/api/trade-history?symbol=XAUUSD&status=CLOSED")
+
+    assert response.status_code == 200
+    assert response.json()[0]["position_id"] == position.id

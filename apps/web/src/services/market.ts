@@ -4,12 +4,12 @@ const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
   (window.location.protocol === "https:"
     ? window.location.origin
-    : "http://localhost:8000");
+    : `http://${window.location.hostname === "localhost" ? "localhost" : window.location.hostname}:8000`);
 const WS_BASE_URL =
   import.meta.env.VITE_WS_BASE_URL ||
   (window.location.protocol === "https:"
     ? window.location.origin.replace(/^https:/, "wss:")
-    : "ws://localhost:8000");
+    : `ws://${window.location.hostname === "localhost" ? "localhost" : window.location.hostname}:8000`);
 export type Timeframe = "M1" | "M5" | "H1" | "H2" | "H4" | "D1" | "W1";
 
 export interface SymbolMapping {
@@ -125,6 +125,11 @@ export type MarketMessage =
       source: string | null;
     }
   | {
+      type: "pong";
+      ts: number;
+      server_time: string;
+    }
+  | {
       type: "price_alert_triggered";
       alert_id: string;
       symbol: string;
@@ -136,6 +141,14 @@ export type MarketMessage =
       type: "price_alert_updated";
       alert_id: string;
       symbol: string;
+    }
+  | {
+      type: "position_closed" | "position_updated";
+      position_id: number;
+      symbol: string;
+      closed_at?: string | null;
+      close_price?: number | null;
+      profit?: number | null;
     };
 
 interface RequestOptions extends RequestInit {
@@ -201,4 +214,8 @@ export function stopMockMarket(): Promise<MockMarketStatus> {
 
 export function createMarketWebSocket(symbol: string, timeframe: Timeframe): WebSocket {
   return new WebSocket(`${WS_BASE_URL}/ws/market/${symbol}/${timeframe}`);
+}
+
+export function marketWebSocketUrl(symbol: string, timeframe: Timeframe): string {
+  return `${WS_BASE_URL}/ws/market/${symbol}/${timeframe}`;
 }

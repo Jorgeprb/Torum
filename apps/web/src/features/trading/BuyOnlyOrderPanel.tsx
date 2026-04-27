@@ -17,6 +17,8 @@ interface BuyOnlyOrderPanelProps {
   accountMode: "DEMO" | "REAL" | "UNKNOWN";
   disabledReason?: string;
   lastPrice?: number;
+  marketConnectionHealthy?: boolean;
+  marketStaleReason?: string;
   mt5Connected: boolean;
   mt5Status: MT5Status | null;
   onOrderCompleted: (response: ManualOrderResponse) => void;
@@ -35,6 +37,8 @@ export function BuyOnlyOrderPanel({
   accountMode,
   disabledReason,
   lastPrice,
+  marketConnectionHealthy = true,
+  marketStaleReason = "Datos desconectados o desactualizados. Reconectando...",
   mt5Connected,
   mt5Status,
   onOrderCompleted,
@@ -52,7 +56,8 @@ export function BuyOnlyOrderPanel({
   const tpPercent = settings?.default_take_profit_percent ?? 0.09;
   const previewTp = useMemo(() => calculateTp(lastPrice, tpPercent), [lastPrice, tpPercent]);
   const mode: TradingMode = settings?.trading_mode ?? "PAPER";
-  const buyDisabled = !tradable || submitting || !settings || !lotSize || (mode !== "PAPER" && !mt5Connected);
+  const liveDataBlocked = mode !== "PAPER" && !marketConnectionHealthy;
+  const buyDisabled = !tradable || submitting || !settings || !lotSize || (mode !== "PAPER" && !mt5Connected) || liveDataBlocked;
 
   useEffect(() => {
     setMultiplier(1);
@@ -150,6 +155,7 @@ export function BuyOnlyOrderPanel({
 
       {!tradable ? <div className="compact-warning">{disabledReason}</div> : null}
       {mode !== "PAPER" && !mt5Connected ? <div className="compact-warning">MT5 desconectado: DEMO/LIVE bloqueado</div> : null}
+      {liveDataBlocked ? <div className="compact-warning">{marketStaleReason}</div> : null}
       {error ? <div className="compact-error">{error}</div> : null}
 
       {modalOpen ? (

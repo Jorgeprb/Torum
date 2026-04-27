@@ -217,3 +217,17 @@ En Ajustes puedes controlar:
 - `Habilitar ejecucion MT5`
 
 La ejecucion MT5 sigue bloqueada si el modo y la cuenta no coinciden, si `LIVE` no tiene confirmacion fuerte, si el bridge esta desconectado o si el risk manager rechaza la orden. `SELL` sigue bloqueado cuando `long_only=true`.
+
+## Cierre y TP desde grafico
+
+- Toca la linea azul de entrada `BUY` para abrir el panel inferior de posicion.
+- Pulsa `CERRAR CON BENEFICIO/PERDIDA` para cerrar; Torum pide confirmacion.
+- Arrastra la linea verde `TP` para modificar take profit sin popup.
+
+Para BUY:
+
+```text
+tp_percent = ((tp_price - open_price) / open_price) * 100
+```
+
+El backend valida `tp > open_price`. En DEMO/LIVE se llama al bridge con `TRADE_ACTION_SLTP`. No se envia SL.

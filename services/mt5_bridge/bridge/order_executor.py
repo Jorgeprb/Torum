@@ -7,11 +7,12 @@ from typing import Any
 from bridge.account_state import AccountState
 from bridge.config import BridgeSettings
 from bridge.mt5_client import MT5Client, MT5ClientError
-from bridge.order_models import BridgeOrderResponse, ClosePositionRequest, MarketOrderRequest
+from bridge.order_models import BridgeOrderResponse, ClosePositionRequest, MarketOrderRequest, ModifyPositionTpRequest
 
 logger = logging.getLogger(__name__)
 
 MT5_COMMENT_MAX_LEN = 20
+
 
 class OrderExecutor:
     def __init__(self, settings: BridgeSettings, mt5_client: MT5Client) -> None:
@@ -129,6 +130,41 @@ class OrderExecutor:
         }
         return self._send_with_filling_fallback(request, volume, price, self._filling_modes_for_symbol(symbol_info))
 
+    def modify_position_tp(self, ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
+        validation_error = self._validate_execution_allowed(payload.mode)
+        if validation_error is not None:
+            return validation_error
+
+        mt5 = self.mt5_client.mt5
+        assert mt5 is not None
+
+        if not self.mt5_client.select_symbol(payload.broker_symbol):
+            return BridgeOrderResponse(ok=False, comment=f"Symbol not available: {payload.broker_symbol}")
+        symbol_info = self._get_symbol_info(payload.broker_symbol)
+        if symbol_info is None:
+            return BridgeOrderResponse(ok=False, comment=f"MT5 symbol_info unavailable for {payload.broker_symbol}")
+        symbol_error = self._validate_symbol_can_trade(symbol_info, payload.broker_symbol)
+        if symbol_error is not None:
+            return symbol_error
+
+        action = getattr(mt5, "TRADE_ACTION_SLTP", None)
+        if action is None:
+            return BridgeOrderResponse(ok=False, comment="MT5 TRADE_ACTION_SLTP is unavailable")
+
+        tp = self._normalize_price(payload.tp, symbol_info)
+        sl = self._normalize_price(payload.sl, symbol_info) if payload.sl else 0.0
+        request = {
+            "action": action,
+            "position": ticket,
+            "symbol": payload.broker_symbol,
+            "sl": sl,
+            "tp": tp,
+            "magic": payload.magic_number or self.settings.mt5_magic_number,
+            "comment": self._comment(payload.comment or "tp"),
+        }
+        logger.info("MT5 modify TP request prepared: symbol=%s ticket=%s tp=%s sl=%s", payload.broker_symbol, ticket, tp, sl)
+        return self._send_single(request, volume=0.0, price=tp)
+
     def _validate_execution_allowed(self, requested_mode: str) -> BridgeOrderResponse | None:
         if not self.settings.mt5_allow_order_execution:
             return BridgeOrderResponse(ok=False, comment="MT5 order execution is disabled")
@@ -245,6 +281,25 @@ class OrderExecutor:
             last_response = response
 
         return last_response or BridgeOrderResponse(ok=False, comment="order_send failed without response")
+
+    def _send_single(self, request: dict[str, Any], volume: float, price: float) -> BridgeOrderResponse:
+        mt5 = self.mt5_client.mt5
+        assert mt5 is not None
+        logger.info("MT5 order_send request: %s", _json_safe(request))
+        result = mt5.order_send(request)
+        response = _result_to_response(result, volume=volume, price=price, request=request, mt5=mt5)
+        if result is None:
+            error_code, error_message = _last_error(mt5)
+            logger.error(
+                "MT5 order_send FAILED: last_error_code=%s last_error_message=%s request=%s",
+                error_code,
+                error_message,
+                _json_safe(request),
+            )
+        else:
+            logger.info("MT5 order_send result: %s", response.raw)
+            logger.info("MT5 order_send retcode=%s comment=%s", response.retcode, response.comment)
+        return response
 
     def _filling_modes_for_symbol(self, symbol_info: Any) -> list[int]:
         mt5 = self.mt5_client.mt5

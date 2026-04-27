@@ -42,6 +42,17 @@ class ClosePositionRequest(BaseModel):
     magic_number: int | None = None
 
 
+class ModifyPositionTpRequest(BaseModel):
+    internal_symbol: str
+    broker_symbol: str
+    side: OrderSide
+    mode: TradingMode
+    tp: float = Field(gt=0)
+    sl: float | None = Field(default=None, ge=0)
+    magic_number: int | None = None
+    comment: str | None = None
+
+
 class OrderExecutionSettingsRequest(BaseModel):
     enabled: bool
     allowed_account_modes: list[str] | None = None

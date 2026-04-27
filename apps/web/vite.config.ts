@@ -46,7 +46,21 @@ export default defineConfig({
       workbox: {
         navigateFallback: "/",
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest}"],
-        importScripts: ["/push-sw.js"]
+        importScripts: ["/push-sw.js"],
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) =>
+              url.pathname.startsWith("/api/market") ||
+              url.pathname.startsWith("/api/candles") ||
+              url.pathname.startsWith("/api/ticks") ||
+              url.pathname.startsWith("/api/positions") ||
+              url.pathname.startsWith("/api/orders") ||
+              url.pathname.startsWith("/api/mt5") ||
+              url.pathname.startsWith("/api/trade-history") ||
+              url.pathname.startsWith("/api/alerts"),
+            handler: "NetworkOnly"
+          }
+        ]
       }
     })
   ],

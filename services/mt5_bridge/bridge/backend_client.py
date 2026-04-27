@@ -75,6 +75,23 @@ class BackendClient:
             logger.warning("Could not post MT5 bridge status: %s", exc)
             return None
 
+    def post_positions_sync(
+        self,
+        positions: list[dict[str, Any]],
+        account: dict[str, Any] | None,
+        closed_deals: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            payload: dict[str, Any] = {"positions": positions}
+            if closed_deals is not None:
+                payload["closed_deals"] = closed_deals
+            if account is not None:
+                payload["account"] = account
+            return self._post_with_retries(self.settings.torum_mt5_positions_sync_endpoint, payload)
+        except requests.RequestException as exc:
+            logger.warning("Could not post MT5 positions sync: %s", exc)
+            return None
+
     def _post_with_retries(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         last_error: requests.RequestException | None = None
         for attempt in range(1, self.settings.torum_http_max_retries + 1):

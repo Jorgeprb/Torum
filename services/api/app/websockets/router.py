@@ -1,9 +1,14 @@
+from datetime import UTC, datetime
+import json
+import logging
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.market_data.timeframes import SUPPORTED_TIMEFRAMES
 from app.websockets.manager import market_ws_manager
 
 router = APIRouter(tags=["websockets"])
+logger = logging.getLogger(__name__)
 
 
 @router.websocket("/ws/market/{symbol}/{timeframe}")
@@ -23,6 +28,23 @@ async def market_stream(websocket: WebSocket, symbol: str, timeframe: str) -> No
     )
     try:
         while True:
-            await websocket.receive_text()
+            raw_message = await websocket.receive_text()
+            try:
+                message = json.loads(raw_message)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(message, dict) and message.get("type") == "ping":
+                await websocket.send_json(
+                    {
+                        "type": "pong",
+                        "ts": message.get("ts"),
+                        "server_time": datetime.now(UTC).isoformat(),
+                    }
+                )
     except WebSocketDisconnect:
+        market_ws_manager.disconnect(websocket, symbol, timeframe)
+    except RuntimeError:
+        market_ws_manager.disconnect(websocket, symbol, timeframe)
+    except Exception as exc:
+        logger.warning("Market websocket closed after unexpected error: %s", exc)
         market_ws_manager.disconnect(websocket, symbol, timeframe)

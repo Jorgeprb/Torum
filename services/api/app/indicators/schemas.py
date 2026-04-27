@@ -119,3 +119,4 @@ class ChartOverlaysResponse(BaseModel):
     no_trade_zones: list[dict[str, Any]]
     drawings: list[dict[str, Any]] = Field(default_factory=list)
     price_alerts: list[dict[str, Any]] = Field(default_factory=list)
+    positions: list[dict[str, Any]] = Field(default_factory=list)
