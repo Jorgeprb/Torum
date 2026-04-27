@@ -28,6 +28,32 @@ class MT5BridgeClient:
         response.raise_for_status()
         return response.json()
 
+    def get_order_execution_settings(self) -> dict[str, Any]:
+        if not self.is_configured():
+            raise MT5BridgeClientError("MT5 bridge base URL is not configured")
+        try:
+            response = requests.get(f"{self.base_url}/settings/order-execution", timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            logger.warning("MT5 bridge order execution settings request failed: %s", exc)
+            raise MT5BridgeClientError(str(exc)) from exc
+
+    def set_order_execution_enabled(self, enabled: bool) -> dict[str, Any]:
+        if not self.is_configured():
+            raise MT5BridgeClientError("MT5 bridge base URL is not configured")
+        try:
+            response = requests.patch(
+                f"{self.base_url}/settings/order-execution",
+                json={"enabled": enabled},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            logger.warning("MT5 bridge order execution settings update failed: %s", exc)
+            raise MT5BridgeClientError(str(exc)) from exc
+
     def execute_market_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.is_configured():
             raise MT5BridgeClientError("MT5 bridge base URL is not configured")

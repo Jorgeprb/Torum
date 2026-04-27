@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth.router import router as auth_router
+from app.alerts.routes import router as alerts_router
 from app.candles.router import router as candles_router
 from app.chart.routes import router as chart_router
 from app.core.config import get_settings
@@ -14,6 +15,7 @@ from app.indicators.service import seed_default_indicators
 from app.drawings.routes import router as drawings_router
 from app.core.logging import configure_logging
 from app.market_data.mock import MockMarketService
+from app.market_data.diagnostics_router import router as market_diagnostics_router
 from app.market_data.router import router as mock_market_router
 from app.mt5.router import router as mt5_router
 from app.news.routes import router as news_router
@@ -73,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(ticks_router, prefix="/api")
     app.include_router(candles_router, prefix="/api")
     app.include_router(mock_market_router, prefix="/api")
+    app.include_router(market_diagnostics_router, prefix="/api")
     app.include_router(mt5_router, prefix="/api")
     app.include_router(news_router, prefix="/api")
     app.include_router(no_trade_zones_router, prefix="/api")
@@ -80,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(drawings_router, prefix="/api")
     app.include_router(chart_router, prefix="/api")
     app.include_router(strategies_router, prefix="/api")
+    app.include_router(alerts_router, prefix="/api")
     app.include_router(trading_router, prefix="/api")
     app.include_router(orders_router, prefix="/api")
     app.include_router(positions_router, prefix="/api")

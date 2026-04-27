@@ -8,7 +8,13 @@ from bridge.account_state import AccountState
 from bridge.config import BridgeSettings
 from bridge.mt5_client import MT5Client
 from bridge.order_executor import OrderExecutor
-from bridge.order_models import BridgeOrderResponse, ClosePositionRequest, MarketOrderRequest
+from bridge.order_models import (
+    BridgeOrderResponse,
+    ClosePositionRequest,
+    MarketOrderRequest,
+    OrderExecutionSettingsRequest,
+    OrderExecutionSettingsResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,26 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
         if mt5_positions is None:
             return []
         return [position._asdict() if hasattr(position, "_asdict") else dict(position) for position in mt5_positions]
+
+    @app.get("/settings/order-execution", response_model=OrderExecutionSettingsResponse)
+    def get_order_execution_settings() -> OrderExecutionSettingsResponse:
+        return OrderExecutionSettingsResponse(
+            enabled=settings.mt5_allow_order_execution,
+            allowed_account_modes=sorted(settings.allowed_account_modes),
+            enable_real_trading=settings.mt5_enable_real_trading,
+            message="Runtime MT5 order execution setting",
+        )
+
+    @app.patch("/settings/order-execution", response_model=OrderExecutionSettingsResponse)
+    def patch_order_execution_settings(payload: OrderExecutionSettingsRequest) -> OrderExecutionSettingsResponse:
+        settings.mt5_allow_order_execution = payload.enabled
+        logger.warning("MT5 order execution runtime setting changed to %s", payload.enabled)
+        return OrderExecutionSettingsResponse(
+            enabled=settings.mt5_allow_order_execution,
+            allowed_account_modes=sorted(settings.allowed_account_modes),
+            enable_real_trading=settings.mt5_enable_real_trading,
+            message="MT5 order execution updated at runtime",
+        )
 
     @app.post("/orders/market", response_model=BridgeOrderResponse)
     def market_order(payload: MarketOrderRequest) -> BridgeOrderResponse:

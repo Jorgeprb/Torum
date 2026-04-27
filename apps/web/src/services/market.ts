@@ -37,6 +37,27 @@ export interface Candle {
   volume: number | null;
   tick_count: number | null;
   source: string;
+  price_source: string;
+}
+
+export interface Tick {
+  time: string;
+  internal_symbol: string;
+  broker_symbol: string;
+  bid: number | null;
+  ask: number | null;
+  last: number | null;
+  volume: number | null;
+  source: string;
+}
+
+export interface LatestTickDiagnostic extends Tick {
+  symbol: string;
+  time_msc: number;
+  mid: number | null;
+  spread: number | null;
+  age_ms: number;
+  created_at: string;
 }
 
 export interface MockMarketStatus {
@@ -87,6 +108,32 @@ export type MarketMessage =
       connected: boolean;
       source: string;
       last_tick_time: string | null;
+    }
+  | {
+      type: "latest_tick_update" | "market_tick";
+      symbol: string;
+      broker_symbol: string | null;
+      time: string;
+      bid: number | null;
+      ask: number | null;
+      last: number | null;
+      mid?: number | null;
+      spread?: number | null;
+      volume: number | null;
+      source: string | null;
+    }
+  | {
+      type: "price_alert_triggered";
+      alert_id: string;
+      symbol: string;
+      target_price: number;
+      triggered_price: number;
+      triggered_at: string;
+    }
+  | {
+      type: "price_alert_updated";
+      alert_id: string;
+      symbol: string;
     };
 
 interface RequestOptions extends RequestInit {
@@ -122,6 +169,16 @@ export function getSymbols(): Promise<SymbolMapping[]> {
 export function getCandles(symbol: string, timeframe: Timeframe, limit = 500): Promise<Candle[]> {
   const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) });
   return request<Candle[]>(`/api/candles?${params.toString()}`);
+}
+
+export function getTicks(symbol: string, limit = 1000): Promise<Tick[]> {
+  const params = new URLSearchParams({ symbol, limit: String(limit) });
+  return request<Tick[]>(`/api/ticks?${params.toString()}`);
+}
+
+export function getLatestTick(symbol: string): Promise<LatestTickDiagnostic> {
+  const params = new URLSearchParams({ symbol });
+  return request<LatestTickDiagnostic>(`/api/market/latest-tick?${params.toString()}`);
 }
 
 export function getMockMarketStatus(): Promise<MockMarketStatus> {

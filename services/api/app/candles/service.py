@@ -13,14 +13,26 @@ from app.market_data.timeframes import SUPPORTED_TIMEFRAMES, Timeframe, bucket_s
 TickPriceSource = str
 
 
-def select_tick_price(tick: dict[str, object], price_source: TickPriceSource = "last_or_mid") -> float | None:
+def normalized_price_source(price_source: TickPriceSource) -> str:
+    normalized = price_source.strip().upper().replace("-", "_")
+    if normalized in {"LAST_OR_MID", "MID", "BID", "ASK", "LAST"}:
+        return normalized
+    return "BID"
+
+
+def select_tick_price(tick: dict[str, object], price_source: TickPriceSource = "BID") -> float | None:
+    source = normalized_price_source(price_source)
     last = tick.get("last")
     bid = tick.get("bid")
     ask = tick.get("ask")
 
-    if price_source == "last_or_mid" and isinstance(last, (int, float)) and last > 0:
+    if source == "BID" and isinstance(bid, (int, float)) and bid > 0:
+        return float(bid)
+    if source == "ASK" and isinstance(ask, (int, float)) and ask > 0:
+        return float(ask)
+    if source in {"LAST", "LAST_OR_MID"} and isinstance(last, (int, float)) and last > 0:
         return float(last)
-    if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+    if source in {"MID", "LAST_OR_MID"} and isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
         return (float(bid) + float(ask)) / 2
     if isinstance(last, (int, float)) and last > 0:
         return float(last)
@@ -34,7 +46,7 @@ def select_tick_price(tick: dict[str, object], price_source: TickPriceSource = "
 def build_candle_rows_from_ticks(
     ticks: Sequence[dict[str, object]],
     timeframes: Iterable[Timeframe] = SUPPORTED_TIMEFRAMES,
-    price_source: TickPriceSource = "last_or_mid",
+    price_source: TickPriceSource = "BID",
 ) -> list[dict[str, object]]:
     buckets: dict[tuple[str, Timeframe, datetime], dict[str, object]] = {}
 
@@ -89,6 +101,7 @@ def merge_candle_values(existing: dict[str, object], update: dict[str, object]) 
 
 
 def candle_to_read(candle: Candle) -> CandleRead:
+    settings = get_settings()
     return CandleRead(
         time=int(ensure_utc(candle.time).timestamp()),
         internal_symbol=candle.internal_symbol,
@@ -100,6 +113,7 @@ def candle_to_read(candle: Candle) -> CandleRead:
         volume=candle.volume,
         tick_count=candle.tick_count,
         source=candle.source,
+        price_source=normalized_price_source(settings.candle_price_source),
     )
 
 

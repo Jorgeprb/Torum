@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_optional_current_user
+from app.alerts.service import PriceAlertService
 from app.db.session import get_db
 from app.drawings.service import ChartDrawingService
 from app.indicators.schemas import ChartOverlaysResponse
@@ -38,10 +39,18 @@ def chart_overlays(
         drawing_service.to_read(drawing).model_dump(mode="json")
         for drawing in drawing_service.list_visible_for_overlays(user=current_user, symbol=symbol, timeframe=timeframe)
     ]
+    price_alerts = []
+    if current_user is not None:
+        alert_service = PriceAlertService(db)
+        price_alerts = [
+            alert_service.to_read(alert).model_dump(mode="json")
+            for alert in alert_service.list_for_user(user=current_user, symbol=symbol, status_filter="ACTIVE")
+        ]
     return ChartOverlaysResponse(
         symbol=symbol.upper(),
         timeframe=timeframe,
         indicators=indicator_overlays,
         no_trade_zones=no_trade_zones,
         drawings=drawings,
+        price_alerts=price_alerts,
     )

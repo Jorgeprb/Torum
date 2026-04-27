@@ -37,7 +37,7 @@ Payload:
   "ticks": [
     {
       "internal_symbol": "XAUUSD",
-      "broker_symbol": "XAUUSDm",
+      "broker_symbol": "XAUUSD",
       "time": "2026-04-26T12:34:56.123Z",
       "bid": 2325.12,
       "ask": 2325.34,

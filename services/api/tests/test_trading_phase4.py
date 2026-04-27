@@ -34,7 +34,7 @@ def _settings(mode: str = "PAPER", live_enabled: bool = False) -> SimpleNamespac
 
 
 def _symbol(enabled: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(internal_symbol="XAUUSD", broker_symbol="XAUUSDm", enabled=enabled)
+    return SimpleNamespace(internal_symbol="XAUUSD", broker_symbol="XAUUSD", enabled=enabled)
 
 
 def _tick() -> SimpleNamespace:
@@ -152,7 +152,7 @@ def _session() -> Session:
     db.add(
         SymbolMapping(
             internal_symbol="XAUUSD",
-            broker_symbol="XAUUSDm",
+            broker_symbol="XAUUSD",
             display_name="Gold / USD",
             enabled=True,
             digits=2,
@@ -179,7 +179,7 @@ def _session() -> Session:
             id=1,
             time=datetime.now(UTC),
             internal_symbol="XAUUSD",
-            broker_symbol="XAUUSDm",
+            broker_symbol="XAUUSD",
             bid=2325.0,
             ask=2325.2,
             last=None,

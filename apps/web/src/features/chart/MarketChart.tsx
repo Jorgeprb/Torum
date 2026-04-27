@@ -1,7 +1,8 @@
-import { type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   type CandlestickData,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type LineData,
   LineStyle,
@@ -12,6 +13,7 @@ import {
 } from "lightweight-charts";
 
 import type { Candle } from "../../services/market";
+import type { PriceAlertRead } from "../../services/alerts";
 import type { NoTradeZone } from "../../services/news";
 import { type IndicatorLineOutput } from "../../services/indicators";
 import type { ChartDrawingCreate, ChartDrawingRead, DrawingTool } from "../../services/drawings";
@@ -32,6 +34,17 @@ interface MarketChartProps {
   onSelectDrawing?: (drawingId: string | null) => void;
   tradeLines?: TradeLine[];
   tradeMarkers?: SeriesMarker<Time>[];
+  alertToolActive?: boolean;
+  priceAlerts?: PriceAlertRead[];
+  onCreatePriceAlert?: (price: number) => void;
+  onUpdatePriceAlert?: (alert: PriceAlertRead, targetPrice: number) => void;
+  bidPrice?: number | null;
+  askPrice?: number | null;
+  showBidLine?: boolean;
+  showAskLine?: boolean;
+  autoFollowEnabled?: boolean;
+  onAutoFollowChange?: (enabled: boolean) => void;
+  resetKey?: string;
 }
 
 interface ZoneOverlay {
@@ -50,6 +63,12 @@ export interface TradeLine {
 
 interface TradeLineOverlay extends TradeLine {
   y: number;
+}
+
+interface PriceAlertOverlay {
+  alert: PriceAlertRead;
+  y: number;
+  targetPrice: number;
 }
 
 function toChartCandle(candle: Candle): CandlestickData {
@@ -130,15 +149,33 @@ export function MarketChart({
   onCreateDrawing,
   onSelectDrawing,
   tradeLines = [],
-  tradeMarkers = []
+  tradeMarkers = [],
+  alertToolActive = false,
+  priceAlerts = [],
+  onCreatePriceAlert,
+  onUpdatePriceAlert,
+  bidPrice = null,
+  askPrice = null,
+  showBidLine = true,
+  showAskLine = true,
+  autoFollowEnabled = true,
+  onAutoFollowChange,
+  resetKey
 }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lineSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
+  const bidPriceLineRef = useRef<IPriceLine | null>(null);
+  const askPriceLineRef = useRef<IPriceLine | null>(null);
+  const loadedResetKeyRef = useRef<string | null>(null);
+  const hasFullDataRef = useRef(false);
 
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
+  const [priceAlertOverlays, setPriceAlertOverlays] = useState<PriceAlertOverlay[]>([]);
+  const [draggingAlertId, setDraggingAlertId] = useState<string | null>(null);
+  const [draftAlertPrices, setDraftAlertPrices] = useState<Record<string, number>>({});
   const [drawingShapes, setDrawingShapes] = useState<DrawingShape[]>([]);
   const [pendingPoint, setPendingPoint] = useState<DrawingPoint | null>(null);
   const [pendingCoordinate, setPendingCoordinate] = useState<DrawingCoordinate | null>(null);
@@ -152,6 +189,7 @@ export function MarketChart({
       setOverlays([]);
       setDrawingShapes([]);
       setTradeLineOverlays([]);
+      setPriceAlertOverlays([]);
       return;
     }
 
@@ -383,6 +421,17 @@ export function MarketChart({
         .filter((line): line is TradeLineOverlay => line !== null)
     );
 
+    setPriceAlertOverlays(
+      priceAlerts
+        .filter((alert) => alert.status === "ACTIVE")
+        .map((alert): PriceAlertOverlay | null => {
+          const targetPrice = draftAlertPrices[alert.id] ?? alert.target_price;
+          const y = series.priceToCoordinate(targetPrice);
+          return y === null ? null : { alert, y, targetPrice };
+        })
+        .filter((line): line is PriceAlertOverlay => line !== null)
+    );
+
     if (pendingPoint) {
       const x = chart.timeScale().timeToCoordinate(pendingPoint.time as UTCTimestamp);
       const y = series.priceToCoordinate(pendingPoint.price);
@@ -390,7 +439,7 @@ export function MarketChart({
     } else {
       setPendingCoordinate(null);
     }
-  }, [drawings, noTradeZones, pendingPoint, tradeLines]);
+  }, [drawings, draftAlertPrices, noTradeZones, pendingPoint, priceAlerts, tradeLines]);
 
   useEffect(() => {
     setPendingPoint(null);
@@ -446,19 +495,75 @@ export function MarketChart({
   }, []);
 
   useEffect(() => {
-    if (!seriesRef.current) {
+    const series = seriesRef.current;
+    const chart = chartRef.current;
+    if (!series || !chart) {
       return;
     }
 
     const sortedCandles = sortCandlesByTimeAsc(candles.map(toChartCandle));
     const sortedTradeMarkers = sortMarkersByTimeAsc(tradeMarkers);
+    const nextResetKey = resetKey ?? `${symbol}:${timeframe}`;
+    const shouldReset = loadedResetKeyRef.current !== nextResetKey;
 
-    seriesRef.current.setData(sortedCandles);
-    seriesRef.current.setMarkers(sortedTradeMarkers);
+    if (shouldReset || !hasFullDataRef.current) {
+      series.setData(sortedCandles);
+      if (sortedCandles.length > 0) {
+        chart.timeScale().fitContent();
+        loadedResetKeyRef.current = nextResetKey;
+        hasFullDataRef.current = true;
+      }
+    } else if (sortedCandles.length === 0) {
+      series.setData([]);
+      hasFullDataRef.current = false;
+    } else {
+      series.update(sortedCandles[sortedCandles.length - 1]);
+      if (autoFollowEnabled) {
+        chart.timeScale().scrollToRealTime();
+      }
+    }
 
-    chartRef.current?.timeScale().fitContent();
+    series.setMarkers(sortedTradeMarkers);
     window.setTimeout(recalculateOverlays, 0);
-  }, [candles, recalculateOverlays, tradeMarkers]);
+  }, [autoFollowEnabled, candles, recalculateOverlays, resetKey, symbol, timeframe, tradeMarkers]);
+
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) {
+      return;
+    }
+
+    if (bidPriceLineRef.current) {
+      series.removePriceLine(bidPriceLineRef.current);
+      bidPriceLineRef.current = null;
+    }
+    if (askPriceLineRef.current) {
+      series.removePriceLine(askPriceLineRef.current);
+      askPriceLineRef.current = null;
+    }
+
+    if (showBidLine && typeof bidPrice === "number" && Number.isFinite(bidPrice)) {
+      bidPriceLineRef.current = series.createPriceLine({
+        price: bidPrice,
+        color: "#2be0d0",
+        lineWidth: 1,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: "BID"
+      });
+    }
+
+    if (showAskLine && typeof askPrice === "number" && Number.isFinite(askPrice)) {
+      askPriceLineRef.current = series.createPriceLine({
+        price: askPrice,
+        color: "#f45d5d",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: "ASK"
+      });
+    }
+  }, [askPrice, bidPrice, showAskLine, showBidLine]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -499,7 +604,7 @@ export function MarketChart({
     }
   }, [indicatorLines]);
 
-  function chartPointFromClick(event: MouseEvent<HTMLDivElement>): DrawingPoint | null {
+  function chartPointFromClient(clientX: number, clientY: number): DrawingPoint | null {
     const chart = chartRef.current;
     const series = seriesRef.current;
     const container = containerRef.current;
@@ -509,8 +614,8 @@ export function MarketChart({
     }
 
     const bounds = container.getBoundingClientRect();
-    const x = event.clientX - bounds.left;
-    const y = event.clientY - bounds.top;
+    const x = clientX - bounds.left;
+    const y = clientY - bounds.top;
 
     const time = chartTimeToUnix(chart.timeScale().coordinateToTime(x));
     const price = series.coordinateToPrice(y);
@@ -522,14 +627,13 @@ export function MarketChart({
     return { time, price };
   }
 
-  function handleDrawingClick(event: MouseEvent<HTMLDivElement>) {
-    if (drawingTool === "select" || !onCreateDrawing) {
+  function handleChartPoint(point: DrawingPoint) {
+    if (alertToolActive && onCreatePriceAlert) {
+      onCreatePriceAlert(Number(point.price.toFixed(5)));
       return;
     }
 
-    const point = chartPointFromClick(event);
-
-    if (!point) {
+    if (drawingTool === "select" || !onCreateDrawing) {
       return;
     }
 
@@ -659,32 +763,115 @@ export function MarketChart({
     setPendingCoordinate(null);
   }
 
+  function handleChartPointerUp(event: PointerEvent<HTMLDivElement>) {
+    if (draggingAlertId || (!alertToolActive && drawingTool === "select")) {
+      return;
+    }
+    const point = chartPointFromClient(event.clientX, event.clientY);
+    if (!point) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    handleChartPoint(point);
+  }
+
+  function priceFromPointer(event: PointerEvent | globalThis.PointerEvent): number | null {
+    const series = seriesRef.current;
+    const container = containerRef.current;
+    if (!series || !container) {
+      return null;
+    }
+    const bounds = container.getBoundingClientRect();
+    const y = event.clientY - bounds.top;
+    const price = series.coordinateToPrice(y);
+    return price === null ? null : Number(price.toFixed(5));
+  }
+
+  function startAlertDrag(event: PointerEvent<HTMLDivElement>, alert: PriceAlertRead) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDraggingAlertId(alert.id);
+    const price = priceFromPointer(event);
+    if (price !== null) {
+      setDraftAlertPrices((current) => ({ ...current, [alert.id]: price }));
+    }
+  }
+
+  useEffect(() => {
+    if (!draggingAlertId) {
+      return;
+    }
+    const activeAlertId = draggingAlertId;
+
+    function handleMove(event: globalThis.PointerEvent) {
+      const price = priceFromPointer(event);
+      if (price !== null) {
+        setDraftAlertPrices((current) => ({ ...current, [activeAlertId]: price }));
+      }
+    }
+
+    function handleUp(event: globalThis.PointerEvent) {
+      const alert = priceAlerts.find((item) => item.id === activeAlertId);
+      const price = priceFromPointer(event);
+      if (alert && price !== null) {
+        onUpdatePriceAlert?.(alert, price);
+      }
+      setDraggingAlertId(null);
+      setDraftAlertPrices((current) => {
+        const next = { ...current };
+        delete next[activeAlertId];
+        return next;
+      });
+    }
+
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+  }, [draggingAlertId, onUpdatePriceAlert, priceAlerts]);
+
   useEffect(() => {
     const chart = chartRef.current;
+    const container = containerRef.current;
 
-    if (!chart) {
+    if (!chart || !container) {
       return;
     }
 
+    function markManualInteraction() {
+      if (!alertToolActive && drawingTool === "select") {
+        onAutoFollowChange?.(false);
+      }
+    }
+
     chart.timeScale().subscribeVisibleTimeRangeChange(recalculateOverlays);
+    container.addEventListener("wheel", markManualInteraction, { passive: true });
+    container.addEventListener("pointerdown", markManualInteraction, { passive: true });
     window.addEventListener("resize", recalculateOverlays);
     recalculateOverlays();
 
     return () => {
       chart.timeScale().unsubscribeVisibleTimeRangeChange(recalculateOverlays);
+      container.removeEventListener("wheel", markManualInteraction);
+      container.removeEventListener("pointerdown", markManualInteraction);
       window.removeEventListener("resize", recalculateOverlays);
     };
-  }, [recalculateOverlays]);
+  }, [alertToolActive, drawingTool, onAutoFollowChange, recalculateOverlays]);
 
   return (
     <div
       className={
         drawingTool === "select"
-          ? "market-chart market-chart-frame"
+          ? alertToolActive
+            ? "market-chart market-chart-frame market-chart-frame--alert"
+            : "market-chart market-chart-frame"
           : "market-chart market-chart-frame market-chart-frame--drawing"
       }
       ref={containerRef}
-      onClick={handleDrawingClick}
+      onPointerUp={handleChartPointerUp}
     >
       <div className="news-zone-layer" aria-hidden="true">
         {overlays.map((overlay) => (
@@ -722,6 +909,19 @@ export function MarketChart({
             style={{ top: line.y }}
           >
             <span>{line.label}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="price-alert-layer">
+        {priceAlertOverlays.map((overlay) => (
+          <div
+            className="price-alert-line"
+            key={overlay.alert.id}
+            style={{ top: overlay.y }}
+            onPointerDown={(event) => startAlertDrag(event, overlay.alert)}
+          >
+            <span>ALERTA &lt;= {overlay.targetPrice.toFixed(2)}</span>
           </div>
         ))}
       </div>

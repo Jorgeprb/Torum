@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     trading_mode: Literal["PAPER", "DEMO", "LIVE"] = "PAPER"
     mt5_bridge_base_url: str | None = "http://host.docker.internal:9100"
     price_stale_after_seconds: int = 30
-    candle_price_source: Literal["last_or_mid", "mid"] = "last_or_mid"
+    candle_price_source: str = "BID"
     mock_market_tick_interval_seconds: float = 1.0
     live_trading_enabled: bool = False
     default_magic_number: int = 260426
@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     news_block_enabled: bool = False
     news_block_minutes_before: int = 60
     news_block_minutes_after: int = 60
+
+    vapid_public_key: str | None = None
+    vapid_private_key: SecretStr | None = None
+    vapid_subject: str = "mailto:admin@torum.dev"
 
     @property
     def cors_origins_list(self) -> list[str]:

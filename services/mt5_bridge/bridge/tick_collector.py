@@ -57,6 +57,9 @@ class TickCollector:
         self._stop_requested = False
         self._last_seen_by_symbol: dict[str, datetime] = {}
         self._last_status_post = 0.0
+        self._last_diagnostic_log = 0.0
+        self._diagnostic_sent_counts: dict[str, int] = {}
+        self._diagnostic_latest_ticks: dict[str, dict[str, Any]] = {}
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -90,6 +93,7 @@ class TickCollector:
                 self._collect_poll(active_mappings)
                 self._flush(account=account, force=False)
                 self._post_status()
+                self._log_market_diagnostics(active_mappings)
                 time.sleep(self.settings.mt5_poll_interval_ms / 1000)
         except KeyboardInterrupt:
             logger.info("MT5 bridge interrupted by user")
@@ -106,6 +110,15 @@ class TickCollector:
     def _select_symbols(self, mappings: list[SymbolMapping]) -> list[SymbolMapping]:
         active: list[SymbolMapping] = []
         for mapping in mappings:
+            logger.info(
+                "MT5 mapping requested: %s -> %s display=%s enabled=%s tradable=%s analysis_only=%s",
+                mapping.internal_symbol,
+                mapping.broker_symbol,
+                mapping.display_name,
+                mapping.enabled,
+                mapping.tradable,
+                mapping.analysis_only,
+            )
             if self.mt5_client.select_symbol(mapping.broker_symbol):
                 active.append(mapping)
             else:
@@ -141,6 +154,8 @@ class TickCollector:
         latest_time = max(parse_iso_time(tick["time"]) for tick in converted_ticks)
         self._last_seen_by_symbol[mapping.internal_symbol] = latest_time
         self.health.last_tick_time_by_symbol[mapping.internal_symbol] = latest_time
+        self._diagnostic_sent_counts[mapping.internal_symbol] = self._diagnostic_sent_counts.get(mapping.internal_symbol, 0) + len(converted_ticks)
+        self._diagnostic_latest_ticks[mapping.internal_symbol] = max(converted_ticks, key=lambda tick: parse_iso_time(tick["time"]))
         logger.debug("Collected %s ticks for %s", len(converted_ticks), mapping.internal_symbol)
 
     def _flush(self, account: AccountState | None, force: bool) -> None:
@@ -156,6 +171,27 @@ class TickCollector:
         self.health.connected_to_backend = self.backend_client.health()
         self.backend_client.post_status(self.health.to_payload())
         self._last_status_post = now
+
+    def _log_market_diagnostics(self, mappings: list[SymbolMapping]) -> None:
+        now = time.monotonic()
+        if now - self._last_diagnostic_log < max(1, self.settings.mt5_diagnostic_log_interval_seconds):
+            return
+        for mapping in mappings:
+            tick = self._diagnostic_latest_ticks.get(mapping.internal_symbol)
+            if tick is None:
+                logger.info("%s -> %s | no ticks collected yet | source=MT5", mapping.internal_symbol, mapping.broker_symbol)
+                continue
+            logger.info(
+                "%s -> %s | bid=%s ask=%s time_msc=%s sent=%s source=MT5",
+                mapping.internal_symbol,
+                mapping.broker_symbol,
+                tick.get("bid"),
+                tick.get("ask"),
+                int(parse_iso_time(tick["time"]).timestamp() * 1000),
+                self._diagnostic_sent_counts.get(mapping.internal_symbol, 0),
+            )
+            self._diagnostic_sent_counts[mapping.internal_symbol] = 0
+        self._last_diagnostic_log = now
 
     def _log_account(self, account: AccountState) -> None:
         logger.info(

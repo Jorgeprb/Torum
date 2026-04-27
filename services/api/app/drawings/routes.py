@@ -8,7 +8,6 @@ from app.db.session import get_db
 from app.drawings.repository import get_drawing
 from app.drawings.schemas import ChartDrawingBulkCreate, ChartDrawingCreate, ChartDrawingRead, ChartDrawingUpdate
 from app.drawings.service import ChartDrawingService
-from app.market_data.timeframes import Timeframe
 from app.users.models import User
 
 router = APIRouter(prefix="/drawings", tags=["drawings"])
@@ -19,7 +18,7 @@ def list_chart_drawings(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     symbol: str = Query(min_length=3),
-    timeframe: Timeframe = Query(),
+    timeframe: str | None = Query(default=None, max_length=8),
     include_hidden: bool = False,
 ) -> list[ChartDrawingRead]:
     service = ChartDrawingService(db)

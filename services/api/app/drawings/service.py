@@ -7,7 +7,6 @@ from app.drawings.models import ChartDrawing
 from app.drawings.repository import list_drawings
 from app.drawings.schemas import ChartDrawingCreate, ChartDrawingRead, ChartDrawingUpdate
 from app.drawings.validators import normalize_style, validate_drawing_payload
-from app.market_data.timeframes import Timeframe
 from app.symbols.models import SymbolMapping
 from app.users.models import User, UserRole
 
@@ -21,7 +20,7 @@ class ChartDrawingService:
         *,
         user: User,
         symbol: str,
-        timeframe: Timeframe,
+        timeframe: str | None = None,
         include_hidden: bool = False,
     ) -> list[ChartDrawing]:
         return list_drawings(
@@ -32,7 +31,7 @@ class ChartDrawingService:
             include_hidden=include_hidden,
         )
 
-    def list_visible_for_overlays(self, *, user: User | None, symbol: str, timeframe: Timeframe) -> list[ChartDrawing]:
+    def list_visible_for_overlays(self, *, user: User | None, symbol: str, timeframe: str | None = None) -> list[ChartDrawing]:
         if user is None:
             return []
         return list_drawings(
@@ -54,7 +53,7 @@ class ChartDrawingService:
         drawing = ChartDrawing(
             user_id=user.id,
             internal_symbol=payload.internal_symbol,
-            timeframe=payload.timeframe,
+            timeframe=payload.timeframe or "ALL",
             drawing_type=payload.drawing_type,
             name=payload.name,
             payload_json=payload.payload,
@@ -105,7 +104,7 @@ class ChartDrawingService:
             id=drawing.id,
             user_id=drawing.user_id,
             internal_symbol=drawing.internal_symbol,
-            timeframe=drawing.timeframe,  # type: ignore[arg-type]
+            timeframe=None if drawing.timeframe == "ALL" else drawing.timeframe,
             drawing_type=drawing.drawing_type,
             name=drawing.name,
             payload=drawing.payload_json,

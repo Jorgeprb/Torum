@@ -28,6 +28,10 @@ class TradingSettings(Base):
     equity_per_0_01_lot: Mapped[float] = mapped_column(Float, nullable=False, default=2500.0)
     minimum_lot: Mapped[float] = mapped_column(Float, nullable=False, default=0.01)
     allow_manual_lot_adjustment: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    show_bid_line: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    show_ask_line: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    mt5_order_execution_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    market_data_source: Mapped[str] = mapped_column(String(16), nullable=False, default="MT5")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

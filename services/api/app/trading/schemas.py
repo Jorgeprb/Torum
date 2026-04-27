@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 TradingMode = Literal["PAPER", "DEMO", "LIVE"]
+MarketDataSource = Literal["MT5", "MOCK"]
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET"]
 OrderStatus = Literal["CREATED", "VALIDATING", "REJECTED", "SENT", "EXECUTED", "FAILED", "CANCELLED", "CLOSED"]
@@ -65,6 +66,10 @@ class TradingSettingsRead(BaseModel):
     equity_per_0_01_lot: float
     minimum_lot: float
     allow_manual_lot_adjustment: bool
+    show_bid_line: bool
+    show_ask_line: bool
+    mt5_order_execution_enabled: bool
+    market_data_source: MarketDataSource
 
     model_config = {"from_attributes": True}
 
@@ -87,6 +92,10 @@ class TradingSettingsUpdate(BaseModel):
     equity_per_0_01_lot: float | None = Field(default=None, gt=0)
     minimum_lot: float | None = Field(default=None, gt=0)
     allow_manual_lot_adjustment: bool | None = None
+    show_bid_line: bool | None = None
+    show_ask_line: bool | None = None
+    mt5_order_execution_enabled: bool | None = None
+    market_data_source: MarketDataSource | None = None
 
 
 class LotSizeResponse(BaseModel):
@@ -98,3 +107,11 @@ class LotSizeResponse(BaseModel):
     min_lot: float
     lot_step: float
     source: str
+
+
+class MT5OrderExecutionSettingsRead(BaseModel):
+    torum_enabled: bool
+    bridge_configured: bool
+    bridge_connected: bool
+    bridge_enabled: bool | None = None
+    bridge_message: str | None = None

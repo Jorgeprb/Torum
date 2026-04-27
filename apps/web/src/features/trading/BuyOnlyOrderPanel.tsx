@@ -128,11 +128,6 @@ export function BuyOnlyOrderPanel({
 
   return (
     <section className="buy-panel" aria-label="Compra rapida">
-      <div className="buy-panel__quote">
-        <span>BUY</span>
-        <strong>{typeof lastPrice === "number" ? lastPrice.toFixed(2) : "--"}</strong>
-      </div>
-
       <LotSizeControl
         baseLot={lotSize?.base_lot ?? settings?.minimum_lot ?? 0.01}
         disabled={!settings?.allow_manual_lot_adjustment}

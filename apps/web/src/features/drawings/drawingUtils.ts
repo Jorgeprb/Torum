@@ -61,14 +61,14 @@ export function toolName(tool: DrawingTool): string {
 
 export function createBaseDrawing(
   symbol: string,
-  timeframe: string,
+  timeframe: string | null,
   tool: Exclude<DrawingTool, "select">,
   payload: Record<string, unknown>,
   name?: string | null
 ): ChartDrawingCreate {
   return {
     internal_symbol: symbol,
-    timeframe,
+    timeframe: null,
     drawing_type: tool,
     name: name ?? null,
     payload,

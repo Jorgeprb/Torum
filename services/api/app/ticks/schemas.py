@@ -54,3 +54,9 @@ class TickBatchResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
     accepted_ticks: int
     updated_candles: int
+    source: str | None = None
+    min_time: datetime | None = None
+    max_time: datetime | None = None
+    last_bid: float | None = None
+    last_ask: float | None = None
+    last_broker_symbol: str | None = None

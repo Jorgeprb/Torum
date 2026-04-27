@@ -200,8 +200,19 @@ docker compose exec -T timescaledb psql -U torum -d torum -c "select id, interna
 
 ## Errores MT5 comunes
 
-- `MT5 order execution is disabled`: activa `MT5_ALLOW_ORDER_EXECUTION=true` solo para DEMO controlado.
+- `MT5 order execution is disabled`: revisa dos capas. En Ajustes activa `Habilitar ejecucion MT5`; el backend intentara activar tambien el bridge en runtime. Si el bridge acaba de reiniciarse y vuelve a `MT5_ALLOW_ORDER_EXECUTION=false`, guarda el ajuste otra vez o configura `.env` y reinicia el bridge.
+- `MT5 order_send returned None`: revisa el log del bridge. Ahora imprime `MT5 order_send FAILED` con `last_error_code`, `last_error_message` y el request exacto enviado a MT5.
 - `Requested DEMO but MT5 account is REAL`: cambia a cuenta demo o vuelve a `PAPER`.
 - `Unsupported filling mode`: el bridge prueba IOC, FOK y RETURN; revisa el simbolo y el broker.
 - `No current tick`: mercado cerrado, simbolo no visible en Market Watch o mapeo broker incorrecto.
 - `Symbol not available`: revisa `symbol_mappings` o `MT5_FALLBACK_SYMBOL_MAPPINGS`.
+
+## Ajustes nuevos de UX/trading
+
+En Ajustes puedes controlar:
+
+- `Mostrar linea BID`
+- `Mostrar linea ASK`
+- `Habilitar ejecucion MT5`
+
+La ejecucion MT5 sigue bloqueada si el modo y la cuenta no coinciden, si `LIVE` no tiene confirmacion fuerte, si el bridge esta desconectado o si el risk manager rechaza la orden. `SELL` sigue bloqueado cuando `long_only=true`.

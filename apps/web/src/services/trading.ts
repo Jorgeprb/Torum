@@ -30,6 +30,18 @@ export interface TradingSettings {
   equity_per_0_01_lot: number;
   minimum_lot: number;
   allow_manual_lot_adjustment: boolean;
+  show_bid_line: boolean;
+  show_ask_line: boolean;
+  mt5_order_execution_enabled: boolean;
+  market_data_source: "MT5" | "MOCK";
+}
+
+export interface MT5OrderExecutionSettings {
+  torum_enabled: boolean;
+  bridge_configured: boolean;
+  bridge_connected: boolean;
+  bridge_enabled: boolean | null;
+  bridge_message: string | null;
 }
 
 export interface ManualOrderPayload {
@@ -136,6 +148,10 @@ export function patchTradingSettings(payload: Partial<TradingSettings>): Promise
     method: "PATCH",
     body: JSON.stringify(payload)
   });
+}
+
+export function getMT5OrderExecutionSettings(): Promise<MT5OrderExecutionSettings> {
+  return request<MT5OrderExecutionSettings>("/api/trading/mt5-order-execution");
 }
 
 export function getLotSize(symbol: string, multiplier = 1): Promise<LotSizeResponse> {

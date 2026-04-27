@@ -40,3 +40,14 @@ class ClosePositionRequest(BaseModel):
     volume: float = Field(gt=0)
     mode: TradingMode
     magic_number: int | None = None
+
+
+class OrderExecutionSettingsRequest(BaseModel):
+    enabled: bool
+
+
+class OrderExecutionSettingsResponse(BaseModel):
+    enabled: bool
+    allowed_account_modes: list[str]
+    enable_real_trading: bool
+    message: str

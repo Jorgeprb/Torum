@@ -48,7 +48,7 @@ def _session() -> Session:
     db.add(
         SymbolMapping(
             internal_symbol="XAUUSD",
-            broker_symbol="XAUUSDm",
+            broker_symbol="XAUUSD",
             display_name="Gold / USD",
             enabled=True,
             digits=2,
@@ -152,7 +152,7 @@ def test_reject_manual_zone_invalid_price_range() -> None:
     assert response.status_code == 422
 
 
-def test_list_drawings_by_user_symbol_timeframe() -> None:
+def test_list_drawings_by_user_symbol_across_timeframes() -> None:
     db = _session()
     client = _client(db, _user(db))
     client.post(
@@ -165,7 +165,7 @@ def test_list_drawings_by_user_symbol_timeframe() -> None:
         },
     )
 
-    response = client.get("/api/drawings?symbol=XAUUSD&timeframe=H1")
+    response = client.get("/api/drawings?symbol=XAUUSD&timeframe=H4")
 
     assert response.status_code == 200
     assert len(response.json()) == 1
@@ -242,3 +242,23 @@ def test_chart_overlays_includes_visible_drawings() -> None:
 
     assert response.status_code == 200
     assert response.json()["drawings"][0]["drawing_type"] == "horizontal_line"
+
+
+def test_chart_overlays_include_drawing_created_on_other_timeframe() -> None:
+    db = _session()
+    user = _user(db)
+    ChartDrawingService(db).create(
+        ChartDrawingCreate(
+            internal_symbol="XAUUSD",
+            timeframe="H1",
+            drawing_type="rectangle",
+            payload={"time1": 1777209600, "time2": 1777213200, "price1": 2320.0, "price2": 2335.0},
+        ),
+        user,
+    )
+    client = _client(db, user)
+
+    response = client.get("/api/chart/overlays?symbol=XAUUSD&timeframe=H4")
+
+    assert response.status_code == 200
+    assert response.json()["drawings"][0]["drawing_type"] == "rectangle"

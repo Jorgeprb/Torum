@@ -39,6 +39,8 @@ La fuente persistente es:
 time + price + payload + style
 ```
 
+Desde esta fase, `timeframe` queda como campo historico/de procedencia. Los dibujos se consultan por usuario y simbolo, y se pintan en todas las temporalidades recalculando tiempo/precio contra la escala actual.
+
 El frontend convierte esas coordenadas a pixeles con:
 
 - `chart.timeScale().timeToCoordinate(time)`
@@ -49,7 +51,7 @@ El frontend convierte esas coordenadas a pixeles con:
 ```powershell
 $drawing = @{
   internal_symbol = "XAUUSD"
-  timeframe = "H1"
+  timeframe = $null
   drawing_type = "horizontal_line"
   name = "Resistencia"
   payload = @{ price = 2325.50; label = "Resistencia" }
@@ -64,7 +66,7 @@ Invoke-RestMethod -Method Post -ContentType "application/json" -Headers $headers
 ```powershell
 $zone = @{
   internal_symbol = "XAUUSD"
-  timeframe = "H1"
+  timeframe = $null
   drawing_type = "manual_zone"
   name = "Zona manual"
   payload = @{
@@ -108,6 +110,8 @@ Para crear:
 - linea horizontal, vertical o texto: un click en el grafico;
 - tendencia, rectangulo o zona manual: dos clicks.
 
+Si creas un rectangulo en H1 con `time1=10:00` y `time2=11:00`, al cambiar a H2 se ve el mismo rango temporal real. Cambia el ancho visual porque cambia la escala, pero no se guarda ni se reutiliza ningun ancho en pixeles.
+
 ## Ocultar y eliminar
 
 El panel `Dibujos` permite:
@@ -133,6 +137,8 @@ Desde Fase 8, `example_manual_zone_strategy` puede leer `manual_zone` visibles. 
 
 ## Limitaciones actuales
 
+- En movil el icono de lapiz despliega herramientas de dibujo y permite crear objetos con toques sobre el grafico.
+- Las herramientas de dos puntos usan primer toque como punto inicial y segundo toque como punto final.
 - No hay drag and drop avanzado.
 - La edicion numerica completa de payload queda como TODO.
 - No hay sincronizacion WebSocket de dibujos entre varios usuarios todavia.

@@ -12,7 +12,7 @@ export interface ChartDrawingRead {
   id: string;
   user_id: number;
   internal_symbol: string;
-  timeframe: string;
+  timeframe: string | null;
   drawing_type: DrawingTool | string;
   name: string | null;
   payload: Record<string, unknown>;
@@ -27,7 +27,7 @@ export interface ChartDrawingRead {
 
 export interface ChartDrawingCreate {
   internal_symbol: string;
-  timeframe: string;
+  timeframe?: string | null;
   drawing_type: Exclude<DrawingTool, "select">;
   name?: string | null;
   payload: Record<string, unknown>;
@@ -70,8 +70,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await response.json()) as T;
 }
 
-export function getDrawings(symbol: string, timeframe: string, includeHidden = true): Promise<ChartDrawingRead[]> {
-  const params = new URLSearchParams({ symbol, timeframe, include_hidden: includeHidden ? "true" : "false" });
+export function getDrawings(symbol: string, timeframe?: string | null, includeHidden = true): Promise<ChartDrawingRead[]> {
+  const params = new URLSearchParams({ symbol, include_hidden: includeHidden ? "true" : "false" });
+  if (timeframe) {
+    params.set("timeframe", timeframe);
+  }
   return request<ChartDrawingRead[]>(`/api/drawings?${params.toString()}`);
 }
 

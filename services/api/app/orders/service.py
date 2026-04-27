@@ -355,4 +355,8 @@ def _effective_trading_settings(trading_settings: object, mode_override: str | N
         equity_per_0_01_lot=getattr(trading_settings, "equity_per_0_01_lot", 2500.0),
         minimum_lot=getattr(trading_settings, "minimum_lot", 0.01),
         allow_manual_lot_adjustment=getattr(trading_settings, "allow_manual_lot_adjustment", True),
+        show_bid_line=getattr(trading_settings, "show_bid_line", True),
+        show_ask_line=getattr(trading_settings, "show_ask_line", True),
+        mt5_order_execution_enabled=getattr(trading_settings, "mt5_order_execution_enabled", False),
+        market_data_source=getattr(trading_settings, "market_data_source", "MT5"),
     )

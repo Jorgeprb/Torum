@@ -5,9 +5,12 @@ import random
 
 from pydantic import BaseModel
 
+from app.alerts.evaluator import PriceAlertEvaluator
+from app.alerts.push import PushNotificationService
 from app.candles.service import candle_to_read
 from app.core.config import get_settings
 from app.db.session import SessionLocal
+from app.settings.trading_service import get_global_trading_settings
 from app.symbols.models import SymbolMapping
 from app.ticks.schemas import TickBatchRequest, TickInput
 from app.ticks.service import ingest_tick_batch
@@ -77,15 +80,20 @@ class MockMarketService:
     async def _publish_mock_ticks(self) -> None:
         now = datetime.now(UTC)
         with SessionLocal() as db:
+            settings = get_global_trading_settings(db)
+            if settings.market_data_source == "MT5":
+                logger.info("Mock market cycle skipped because market_data_source=MT5")
+                return
             mappings = db.query(SymbolMapping).filter(SymbolMapping.enabled.is_(True)).all()
             ticks = [self._build_tick(mapping, now) for mapping in mappings]
             if not ticks:
                 return
 
-            received_ticks, inserted_ticks, candles, _inserted_rows = ingest_tick_batch(
+            received_ticks, inserted_ticks, candles, inserted_rows = ingest_tick_batch(
                 db,
                 TickBatchRequest(source="MOCK", ticks=ticks),
             )
+            alert_events = PriceAlertEvaluator(db, push_service=PushNotificationService(db)).evaluate_inserted_ticks(inserted_rows)
 
         self._last_tick_time = now
         logger.debug(
@@ -96,6 +104,10 @@ class MockMarketService:
         )
         for candle in candles:
             await market_ws_manager.broadcast_candle_update(candle_to_read(candle).model_dump())
+        for tick in inserted_rows:
+            await market_ws_manager.broadcast_market_tick(tick)
+        for event in alert_events:
+            await market_ws_manager.broadcast_price_alert_triggered(event.model_dump(mode="json"))
         await market_ws_manager.broadcast_market_status(True, "MOCK", self._last_tick_time)
 
     def _build_tick(self, mapping: SymbolMapping, now: datetime) -> TickInput:

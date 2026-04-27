@@ -88,8 +88,38 @@ La pantalla principal es mobile-first e inspirada en proporciones de terminal mo
 - calculo de lote por equity;
 - TP automatico por defecto de `0.09%`;
 - sin stop loss por defecto.
+- lineas dinamicas `BID` y `ASK` activables desde Ajustes;
+- zoom/pan del grafico respetado al llegar ticks, con boton `Seguir precio`.
 
 El backend tambien valida estas reglas. Si `long_only=true`, una orden `SELL` enviada por API queda rechazada.
+
+## Decision de alertas
+
+Fase 9 solo soporta alertas de precio `BELOW`:
+
+```text
+price <= target_price
+```
+
+Las alertas activas se pintan como lineas horizontales. Al dispararse pasan a `TRIGGERED`, desaparecen del grafico, quedan en historico y pueden enviar push PWA al usuario dueño de la alerta.
+
+En movil, el boton de alerta es toggle y el toque sobre el grafico crea la alerta con coordenada de precio, no con pixeles.
+
+## Diagnostico de precio
+
+Para comparar Torum con MT5 usa `GET /api/market/latest-tick?symbol=XAUUSD` o Ajustes -> Diagnostico de mercado. Torum muestra `BID`, `ASK`, `source`, `broker_symbol`, edad del tick y `Candle close`.
+
+Desde esta fase, `CANDLE_PRICE_SOURCE=BID` por defecto. Una diferencia grande con MT5 suele indicar mock activo, `broker_symbol` distinto, tick viejo o estar comparando `MID/CLOSE` contra `BID`. Ver [market_price_diagnostics.md](docs/market_price_diagnostics.md) y [price_consistency.md](docs/price_consistency.md).
+
+Para diagnostico de ejecucion MT5 y errores `order_send=None`, ver [mt5_trading.md](docs/mt5_trading.md).
+
+Para push se usan variables VAPID en `.env`:
+
+```text
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+VAPID_SUBJECT=mailto:admin@torum.dev
+```
 
 ## Roles
 
@@ -391,10 +421,13 @@ Incluido:
 - UI responsive/mobile-first con drawer lateral, panel BUY-only, lotaje por equity y marcadores de operacion en grafico.
 - Endpoint `/api/trading/lot-size` para calcular lotaje desde equity disponible.
 - Settings `long_only`, `default_take_profit_percent`, `use_stop_loss`, `equity_per_0_01_lot` y `minimum_lot`.
+- Alertas de precio `BELOW` persistentes, dibujadas en grafico y evaluadas desde ticks.
+- Push subscriptions PWA y Web Push con VAPID.
 
 Pendiente para fases posteriores:
 
-- Scheduler continuo de estrategias y alertas push.
+- Scheduler continuo de estrategias.
+- Alertas avanzadas por indicadores/estrategias.
 
 ## Contrato mt5_bridge Fase 3
 
@@ -408,7 +441,7 @@ POST /api/ticks/batch
   "ticks": [
     {
       "internal_symbol": "XAUUSD",
-      "broker_symbol": "XAUUSDm",
+      "broker_symbol": "XAUUSD",
       "time": "2026-04-26T12:34:56.123Z",
       "bid": 2325.12,
       "ask": 2325.34,
@@ -440,7 +473,7 @@ Por seguridad, el bridge arranca con ejecucion de ordenes desactivada:
 MT5_ALLOW_ORDER_EXECUTION=false
 ```
 
-Para probar DEMO real en Fase 4, con MT5 abierto en cuenta demo:
+Para probar DEMO real, con MT5 abierto en cuenta demo, puedes activar desde Ajustes `Habilitar ejecucion MT5`. El backend guarda `mt5_order_execution_enabled` y sincroniza el runtime del bridge si esta accesible. Tambien puedes dejarlo activo por `.env`:
 
 ```text
 MT5_ALLOW_ORDER_EXECUTION=true

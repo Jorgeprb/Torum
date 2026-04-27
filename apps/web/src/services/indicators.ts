@@ -1,5 +1,6 @@
 import type { NoTradeZone } from "./news";
 import type { ChartDrawingRead } from "./drawings";
+import type { PriceAlertRead } from "./alerts";
 import { getAuthToken } from "../stores/authStore";
 
 const API_BASE_URL =
@@ -55,6 +56,7 @@ export interface ChartOverlays {
   indicators: IndicatorOutput[];
   no_trade_zones: NoTradeZone[];
   drawings: ChartDrawingRead[];
+  price_alerts: PriceAlertRead[];
 }
 
 interface RequestOptions extends RequestInit {

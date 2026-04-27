@@ -69,7 +69,6 @@ class StrategyContextBuilder:
                 select(ChartDrawing).where(
                     ChartDrawing.user_id == config.user_id,
                     ChartDrawing.internal_symbol == config.internal_symbol,
-                    ChartDrawing.timeframe == config.timeframe,
                     ChartDrawing.drawing_type == "manual_zone",
                     ChartDrawing.visible.is_(True),
                     ChartDrawing.source == "MANUAL",

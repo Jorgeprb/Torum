@@ -13,13 +13,13 @@ def list_drawings(
     *,
     user_id: int | None,
     symbol: str,
-    timeframe: str,
+    timeframe: str | None = None,
     include_hidden: bool = False,
     visible_only: bool = False,
 ) -> list[ChartDrawing]:
+    del timeframe  # Drawings are anchored to time/price and are visible across timeframes.
     stmt = select(ChartDrawing).where(
         ChartDrawing.internal_symbol == symbol.upper(),
-        ChartDrawing.timeframe == timeframe,
         ChartDrawing.deleted_at.is_(None),
     )
     if user_id is not None:

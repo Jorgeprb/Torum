@@ -5,11 +5,12 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
+from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.positions.service import PositionService
 from app.settings.trading_service import get_global_trading_settings, update_global_trading_settings
 from app.mt5.status_store import mt5_status_store
 from app.trading.lot_sizing import calculate_lot_size
-from app.trading.schemas import LotSizeResponse, TradingSettingsRead, TradingSettingsUpdate
+from app.trading.schemas import MT5OrderExecutionSettingsRead, LotSizeResponse, TradingSettingsRead, TradingSettingsUpdate
 from app.users.models import User
 
 router = APIRouter(prefix="/trading", tags=["trading"])
@@ -29,7 +30,53 @@ def patch_trading_settings(
     db: Annotated[Session, Depends(get_db)],
     _current_user: Annotated[User, Depends(get_current_user)],
 ) -> TradingSettingsRead:
+    if payload.mt5_order_execution_enabled is True:
+        try:
+            MT5BridgeClient().set_order_execution_enabled(True)
+        except MT5BridgeClientError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"No se pudo activar ejecucion MT5 en el bridge: {exc}",
+            ) from exc
+    elif payload.mt5_order_execution_enabled is False:
+        try:
+            MT5BridgeClient().set_order_execution_enabled(False)
+        except MT5BridgeClientError:
+            # Turning the local guard off remains safe even if the bridge is down.
+            pass
     return TradingSettingsRead.model_validate(update_global_trading_settings(db, payload))
+
+
+@router.get("/mt5-order-execution", response_model=MT5OrderExecutionSettingsRead)
+def get_mt5_order_execution(
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> MT5OrderExecutionSettingsRead:
+    settings = get_global_trading_settings(db)
+    client = MT5BridgeClient()
+    if not client.is_configured():
+        return MT5OrderExecutionSettingsRead(
+            torum_enabled=settings.mt5_order_execution_enabled,
+            bridge_configured=False,
+            bridge_connected=False,
+            bridge_message="MT5 bridge base URL is not configured",
+        )
+    try:
+        bridge_settings = client.get_order_execution_settings()
+    except MT5BridgeClientError as exc:
+        return MT5OrderExecutionSettingsRead(
+            torum_enabled=settings.mt5_order_execution_enabled,
+            bridge_configured=True,
+            bridge_connected=False,
+            bridge_message=str(exc),
+        )
+    return MT5OrderExecutionSettingsRead(
+        torum_enabled=settings.mt5_order_execution_enabled,
+        bridge_configured=True,
+        bridge_connected=True,
+        bridge_enabled=bool(bridge_settings.get("enabled")),
+        bridge_message=str(bridge_settings.get("message") or ""),
+    )
 
 
 @router.get("/lot-size", response_model=LotSizeResponse)

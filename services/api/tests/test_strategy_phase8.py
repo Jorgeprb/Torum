@@ -38,7 +38,7 @@ def _session() -> Session:
     db.add(
         SymbolMapping(
             internal_symbol="XAUUSD",
-            broker_symbol="XAUUSDm",
+            broker_symbol="XAUUSD",
             display_name="Gold / USD",
             enabled=True,
             asset_class="METAL",
@@ -78,7 +78,7 @@ def _session() -> Session:
         )
     )
     now = datetime.now(UTC)
-    db.add(Tick(id=1, time=now, internal_symbol="XAUUSD", broker_symbol="XAUUSDm", bid=2325.0, ask=2325.2, last=None, volume=0.0, source="TEST"))
+    db.add(Tick(id=1, time=now, internal_symbol="XAUUSD", broker_symbol="XAUUSD", bid=2325.0, ask=2325.2, last=None, volume=0.0, source="TEST"))
     start = datetime(2026, 1, 1)
     for index in range(35):
         close = 100.0 + index

@@ -35,6 +35,7 @@ class BridgeSettings(BaseSettings):
     mt5_allow_order_execution: bool = False
     mt5_default_deviation_points: int = 20
     mt5_order_comment_prefix: str = "Torum"
+    mt5_diagnostic_log_interval_seconds: int = 5
 
     log_level: str = "INFO"
 

@@ -4,7 +4,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.drawings.validators import DRAWING_SOURCES, DRAWING_TYPES, normalize_style, validate_drawing_payload
-from app.market_data.timeframes import Timeframe
 
 DrawingType = Literal["horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "manual_zone"]
 DrawingSource = Literal["MANUAL", "INDICATOR", "NEWS", "STRATEGY", "IMPORT"]
@@ -12,7 +11,7 @@ DrawingSource = Literal["MANUAL", "INDICATOR", "NEWS", "STRATEGY", "IMPORT"]
 
 class ChartDrawingCreate(BaseModel):
     internal_symbol: str = Field(min_length=3, max_length=32)
-    timeframe: Timeframe
+    timeframe: str | None = Field(default=None, max_length=8)
     drawing_type: str = Field(min_length=3, max_length=40)
     name: str | None = Field(default=None, max_length=160)
     payload: dict[str, Any]
@@ -53,7 +52,7 @@ class ChartDrawingRead(BaseModel):
     id: str
     user_id: int
     internal_symbol: str
-    timeframe: Timeframe
+    timeframe: str | None
     drawing_type: str
     name: str | None
     payload: dict[str, Any]

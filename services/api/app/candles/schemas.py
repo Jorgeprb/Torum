@@ -16,6 +16,7 @@ class CandleRead(BaseModel):
     volume: float | None = None
     tick_count: int | None = None
     source: str
+    price_source: str = "BID"
 
 
 class CandleUpdateMessage(BaseModel):

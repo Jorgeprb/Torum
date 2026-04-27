@@ -70,6 +70,31 @@ MT5_ALLOWED_ACCOUNT_MODES=DEMO
 MT5_ENABLE_REAL_TRADING=false
 ```
 
+Desde la app tambien puedes activar/desactivar la ejecucion en Ajustes. Torum guarda `mt5_order_execution_enabled` en backend y llama al servidor HTTP local del bridge:
+
+```text
+PATCH http://127.0.0.1:9100/settings/order-execution
+```
+
+Si el bridge no esta levantado, activar desde la app falla con un mensaje claro. Si el bridge se reinicia con `MT5_ALLOW_ORDER_EXECUTION=false`, vuelve a guardar el ajuste o cambia `.env` y reinicia conscientemente.
+
+## Diagnostico de simbolos y ticks
+
+Al arrancar, el bridge escribe en logs:
+
+- `internal_symbol -> broker_symbol`;
+- resultado de `symbol_select`;
+- `digits`, `point`, `trade_mode`, `visible`, `description`;
+- resumen periodico de bid/ask por simbolo.
+
+Configura la frecuencia:
+
+```text
+MT5_DIAGNOSTIC_LOG_INTERVAL_SECONDS=5
+```
+
+Usa esto para confirmar que Torum esta leyendo exactamente el mismo simbolo que tienes abierto en MT5.
+
 Si `order_send` devuelve error, revisa:
 
 - modo de cuenta detectado en `/api/mt5/status`;

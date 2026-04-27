@@ -7,8 +7,26 @@ from app.ticks.schemas import TickBatchRequest
 def test_select_tick_price_prefers_last_when_configured() -> None:
     tick = {"bid": 100.0, "ask": 102.0, "last": 101.5}
 
+    assert select_tick_price(tick, "BID") == 100.0
     assert select_tick_price(tick, "last_or_mid") == 101.5
     assert select_tick_price(tick, "mid") == 101.0
+
+
+def test_candle_close_uses_bid_when_price_source_bid() -> None:
+    ticks = [
+        {
+            "time": datetime(2026, 4, 26, 12, 0, 1, tzinfo=UTC),
+            "internal_symbol": "XAUUSD",
+            "bid": 4705.60,
+            "ask": 4705.82,
+            "last": None,
+            "volume": 0.0,
+        }
+    ]
+
+    candles = build_candle_rows_from_ticks(ticks, timeframes=("M1",), price_source="BID")
+
+    assert candles[0]["close"] == 4705.60
 
 
 def test_build_candle_ohlc_from_ticks() -> None:
@@ -100,7 +118,7 @@ def test_tick_batch_contract_accepts_mt5_payload() -> None:
             "ticks": [
                 {
                     "internal_symbol": "XAUUSD",
-                    "broker_symbol": "XAUUSDm",
+                    "broker_symbol": "XAUUSD",
                     "time": "2026-04-26T12:34:56.123Z",
                     "bid": 2325.12,
                     "ask": 2325.34,
@@ -129,7 +147,7 @@ def test_tick_batch_contract_accepts_optional_account_payload() -> None:
             "ticks": [
                 {
                     "internal_symbol": "XAUUSD",
-                    "broker_symbol": "XAUUSDm",
+                    "broker_symbol": "XAUUSD",
                     "time": "2026-04-26T12:34:56.123Z",
                     "bid": 2325.12,
                     "ask": 2325.34,

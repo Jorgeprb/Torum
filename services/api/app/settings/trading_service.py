@@ -31,6 +31,10 @@ def get_global_trading_settings(db: Session) -> TradingSettings:
         equity_per_0_01_lot=2500.0,
         minimum_lot=0.01,
         allow_manual_lot_adjustment=True,
+        show_bid_line=True,
+        show_ask_line=True,
+        mt5_order_execution_enabled=False,
+        market_data_source="MT5",
     )
     db.add(settings)
     db.commit()

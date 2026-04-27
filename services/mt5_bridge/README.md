@@ -43,7 +43,7 @@ MT5_BRIDGE_HOST=127.0.0.1
 MT5_BRIDGE_PORT=9100
 MT5_ALLOW_ORDER_EXECUTION=false
 MT5_ENABLE_REAL_TRADING=false
-MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:XAUUSDm,XAUEUR:XAUEUR,XAUAUD:XAUAUD,XAUJPY:XAUJPY,DXY:DXY
+MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:XAUUSD,XAUEUR:XAUEUR,XAUAUD:XAUAUD,XAUJPY:XAUJPY,DXY:DXY
 ```
 
 Si tu broker usa `GOLD`:
@@ -120,7 +120,7 @@ Payload:
   "ticks": [
     {
       "internal_symbol": "XAUUSD",
-      "broker_symbol": "XAUUSDm",
+      "broker_symbol": "XAUUSD",
       "time": "2026-04-26T12:34:56.123Z",
       "bid": 2325.12,
       "ask": 2325.34,
@@ -182,6 +182,15 @@ MT5_ALLOWED_ACCOUNT_MODES=DEMO
 MT5_ENABLE_REAL_TRADING=false
 ```
 
+Tambien existe control runtime desde el servidor HTTP local del bridge:
+
+```text
+GET /settings/order-execution
+PATCH /settings/order-execution
+```
+
+La PWA no llama al bridge directamente. Desde Ajustes, el frontend llama al backend; el backend guarda `mt5_order_execution_enabled` y sincroniza este endpoint del bridge. Si el bridge se reinicia, vuelve al valor de `.env`, asi que puedes volver a guardar el ajuste o fijar `MT5_ALLOW_ORDER_EXECUTION=true` conscientemente para sesiones DEMO.
+
 Para LIVE futuro deben cambiarse conscientemente tambien los controles del backend y de la PWA. No se recomienda activarlo hasta completar hardening de riesgo.
 
 ## Contrato de orden manual
@@ -195,7 +204,7 @@ POST /orders/market
 ```json
 {
   "internal_symbol": "XAUUSD",
-  "broker_symbol": "XAUUSDm",
+  "broker_symbol": "XAUUSD",
   "mode": "DEMO",
   "side": "BUY",
   "order_type": "MARKET",
@@ -233,4 +242,5 @@ Respuesta esperada:
 - Backend no accesible: revisa `TORUM_API_BASE_URL` y Docker.
 - Tailscale: usa la IP/DNS Tailscale en `TORUM_API_BASE_URL`.
 - Ordenes rechazadas: revisa `MT5_ALLOW_ORDER_EXECUTION`, modo de cuenta y `MT5_ALLOWED_ACCOUNT_MODES`.
-- Broker usa sufijos: `XAUUSDm`, `XAUUSD.`, `GOLD`; ajusta el mapeo.
+- `MT5 order_send returned None`: reinicia el bridge con esta version y revisa el log `MT5 order_send FAILED`. Incluye `last_error_code`, `last_error_message` y el request exacto enviado a MetaTrader 5.
+- Broker usa sufijos: `XAUUSD`, `XAUUSD.`, `GOLD`; ajusta el mapeo.

@@ -71,6 +71,20 @@ class MT5Client:
         selected = bool(self.mt5.symbol_select(broker_symbol, True))
         if not selected:
             logger.error("MT5 symbol_select failed for %s: %s", broker_symbol, self.mt5.last_error())
+            return False
+        info = self.mt5.symbol_info(broker_symbol)
+        if info is None:
+            logger.warning("MT5 symbol_info unavailable for %s after symbol_select", broker_symbol)
+            return True
+        logger.info(
+            "MT5 symbol selected: broker_symbol=%s digits=%s point=%s trade_mode=%s visible=%s description=%s",
+            broker_symbol,
+            getattr(info, "digits", None),
+            getattr(info, "point", None),
+            getattr(info, "trade_mode", None),
+            getattr(info, "visible", None),
+            getattr(info, "description", None),
+        )
         return selected
 
     def get_latest_tick(self, broker_symbol: str) -> Any | None:

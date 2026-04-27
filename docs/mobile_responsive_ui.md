@@ -12,9 +12,10 @@ Torum usa una interfaz mobile-first para que el grafico sea la superficie princi
 
 ## Layout movil
 
-- Top bar negra con menu hamburguesa, accesos de dibujo/alerta, timeframe y estado del stream.
-- Selector compacto de simbolo/timeframe.
-- Panel BUY compacto con precio, lote calculado y botones `+` / `-`.
+- Top bar negra con menu hamburguesa, selector de simbolo, selector de timeframe, alerta, lapiz de dibujos y estado del stream.
+- No hay segunda barra de simbolo/timeframe/precio en movil; se elimino para recuperar altura de grafico.
+- Panel BUY compacto solo con lotaje, botones `+` / `-` y `BUY`.
+- El precio se ve en el eje y en las lineas dinamicas `BID`/`ASK`, no dentro del panel de compra.
 - Grafico Lightweight Charts ocupando casi todo el viewport.
 - Drawer lateral para cuenta, grafico, estrategias, indicadores y ajustes.
 
@@ -61,6 +62,19 @@ Desde el navegador movil, instala Torum como app. El layout esta pensado para us
 
 ## Limitaciones actuales
 
-- Los dibujos moviles tienen accesos rapidos; la edicion avanzada sigue en panel.
+- El lapiz abre un menu compacto de herramientas: horizontal, vertical, tendencia, rectangulo, texto y zona manual.
+- El icono de alerta es toggle: activo permite tocar el grafico para crear una alerta `BELOW`; al crearla se desactiva.
 - El bottom nav no es obligatorio en esta fase; la navegacion principal esta en el drawer.
-- Las alertas tienen acceso visual preparado, pero las alertas push reales pertenecen a la fase de alertas.
+
+## Zoom y seguimiento
+
+Torum ya no hace `fitContent()` con cada tick. Al cargar datos iniciales, cambiar simbolo o timeframe se autoajusta el grafico. Si haces pan o zoom manual, se desactiva el seguimiento automatico y aparece el boton `Seguir precio`.
+
+## Lineas BID/ASK
+
+Las lineas `BID` y `ASK` son overlays dinamicos, no dibujos persistentes. Se actualizan con cada tick y se pueden activar/desactivar en Ajustes:
+
+- `Mostrar linea BID`
+- `Mostrar linea ASK`
+
+Si hay diferencia con MT5, abre Ajustes -> Diagnostico de mercado y compara `Backend latest BID/ASK` con el simbolo exacto de MT5.

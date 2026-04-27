@@ -71,6 +71,8 @@ class RiskManager:
         if mode == "PAPER":
             return RiskDecision(allowed=not reasons, reasons=reasons, warnings=warnings)
 
+        if not getattr(trading_settings, "mt5_order_execution_enabled", False):
+            reasons.append("MT5 order execution is disabled in Torum settings")
         if not mt5_status.connected_to_mt5:
             reasons.append("MT5 bridge is disconnected")
         if mt5_status.updated_at is None:
