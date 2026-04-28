@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SeriesMarker, Time } from "lightweight-charts";
+import type { Time } from "lightweight-charts";
 import { AlertTriangle, Bell, Database, Pause, Play, RadioTower, RefreshCw } from "lucide-react";
 
 import { StatusPill } from "../../components/ui/StatusPill";
-import { MarketChart, type TradeLine } from "../chart/MarketChart";
+import { MarketChart, type TradeLine, type TradeMarker } from "../chart/MarketChart";
 import { DrawingPanel } from "../drawings/DrawingPanel";
 import { DrawingToolbar } from "../drawings/DrawingToolbar";
 import { IndicatorsPanel } from "../indicators/IndicatorsPanel";
@@ -51,9 +51,9 @@ import {
   type TradeHistoryItem,
   type TradingSettings,
   closePosition,
-  getTradeHistory,
   getOrders,
   getPositions,
+  getTradeHistory,
   getTradingSettings,
   modifyPositionTp
 } from "../../services/trading";
@@ -121,6 +121,54 @@ function upsertCandle(candles: Candle[], update: Candle): Candle[] {
     .sort((a, b) => a.time - b.time)
     .slice(-500);
 }
+
+function isReallyOpenPosition(position: PositionRead): boolean {
+  if (position.status !== "OPEN") {
+    return false;
+  }
+
+  if (position.closed_at) {
+    return false;
+  }
+
+  if (position.close_price !== null && position.close_price !== undefined) {
+    return false;
+  }
+
+  if (position.mode !== "PAPER" && position.mt5_position_ticket === null) {
+    return false;
+  }
+
+  return true;
+}
+
+function uniqueMarkers(markers: TradeMarker[]): TradeMarker[] {
+  const seen = new Set<string>();
+
+  return markers.filter((marker) => {
+    const key = marker.id;
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function positionOpenTime(position: PositionRead | TradeHistoryItem): Time {
+  return Math.floor(new Date(position.opened_at).getTime() / 1000) as Time;
+}
+
+function positionCloseTime(position: PositionRead | TradeHistoryItem): Time | null {
+  if (!position.closed_at) {
+    return null;
+  }
+
+  return Math.floor(new Date(position.closed_at).getTime() / 1000) as Time;
+}
+
 export function TradingDashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState("XAUUSD");
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>("M1");
@@ -199,64 +247,102 @@ export function TradingDashboard() {
   const symbolTradingNotice = selectedMapping?.analysis_only
     ? `${selectedSymbol} es un activo de analisis. Trading deshabilitado.`
     : `${selectedSymbol} no esta habilitado para trading.`;
-  const tradeMarkers = useMemo<SeriesMarker<Time>[]>(() => {
-    const executedOrders = orders
-      .filter((order) => order.internal_symbol === selectedSymbol && order.status === "EXECUTED")
-      .map((order) => ({
-        time: Math.floor(new Date(order.executed_at ?? order.created_at).getTime() / 1000) as Time,
-        position: "belowBar" as const,
-        color: "#2be0d0",
-        shape: "arrowUp" as const,
-        text: `BUY ${order.volume}`
-      }));
-    const closedPositions = positions
-      .filter((position) => position.internal_symbol === selectedSymbol && position.status === "CLOSED" && position.closed_at)
-      .map((position) => ({
-        time: Math.floor(new Date(position.closed_at ?? position.opened_at).getTime() / 1000) as Time,
-        position: "aboveBar" as const,
-        color: "#f45d5d",
-        shape: "circle" as const,
-        text: "CLOSE"
-      }));
-    return [...executedOrders, ...closedPositions];
-  }, [orders, positions, selectedSymbol]);
+  
+  
+const tradeMarkers = useMemo(() => {
+  const openPositionMarkers: TradeMarker[] = positions
+    .filter((position) => position.internal_symbol === selectedSymbol)
+    .filter(isReallyOpenPosition)
+    .map((position) => ({
+      id: `open-buy-${position.id}`,
+      time: positionOpenTime(position),
+      price: position.open_price,
+      kind: "BUY" as const,
+      label: `BUY ${position.volume.toFixed(2)}`
+    }));
+
+  const historyOpenMarkers: TradeMarker[] = tradeHistory
+    .filter((item) => item.internal_symbol === selectedSymbol)
+    .map((item) => ({
+      id: `history-buy-${item.id}`,
+      time: positionOpenTime(item),
+      price: item.open_price,
+      kind: "BUY" as const,
+      label: `BUY ${item.volume.toFixed(2)}`
+    }));
+
+  const historyCloseMarkers: TradeMarker[] = tradeHistory
+    .filter((item) => item.internal_symbol === selectedSymbol)
+    .filter((item) => item.status === "CLOSED" && Boolean(item.closed_at))
+    .flatMap((item) => {
+      const closeTime = positionCloseTime(item);
+
+      if (closeTime === null || item.close_price === null || item.close_price === undefined) {
+        return [];
+      }
+
+      return [
+        {
+          id: `history-close-${item.id}`,
+          time: closeTime,
+          price: item.close_price,
+          kind: "CLOSE" as const,
+          label: "CLOSE"
+        }
+      ];
+    });
+
+  return uniqueMarkers([
+    ...historyOpenMarkers,
+    ...openPositionMarkers,
+    ...historyCloseMarkers
+  ]);
+}, [positions, selectedSymbol, tradeHistory]);
+
+
   const tradeLines = useMemo(
-    () =>
-      positions
-        .filter((position) => position.internal_symbol === selectedSymbol && position.status === "OPEN")
-        .flatMap((position) => {
-          const lines: TradeLine[] = [
-            {
-              id: `entry-${position.id}`,
-              positionId: position.id,
-              price: position.open_price,
-              label: `BUY ${position.volume.toFixed(2)}, ${(position.profit ?? 0).toFixed(2)} EUR`,
-              tone: "entry" as const,
-              selected: selectedPositionId === position.id
-            }
-          ];
-          if (position.tp) {
-            const tpPercent = position.tp_percent ?? ((position.tp - position.open_price) / position.open_price) * 100;
-            const tpProfit = (position.tp - position.open_price) * position.volume;
-            const selected = selectedPositionId === position.id;
-            lines.push({
-              id: `tp-${position.id}`,
-              positionId: position.id,
-              price: position.tp,
-              label: `TP, +${tpProfit.toFixed(2)} EUR, ${tpPercent.toFixed(2)}%`,
-              tone: "tp" as const,
-              editable: selected,
-              muted: !selected
-            });
+  () =>
+    positions
+      .filter((position) => position.internal_symbol === selectedSymbol)
+      .filter(isReallyOpenPosition)
+      .flatMap((position) => {
+        const lines: TradeLine[] = [
+          {
+            id: `entry-${position.id}`,
+            positionId: position.id,
+            price: position.open_price,
+            label: `BUY ${position.volume.toFixed(2)}, ${(position.profit ?? 0).toFixed(2)} EUR`,
+            tone: "entry" as const,
+            selected: selectedPositionId === position.id
           }
-          return lines;
-        }),
-    [positions, selectedPositionId, selectedSymbol]
-  );
-  const selectedPosition = useMemo(
-    () => positions.find((position) => position.id === selectedPositionId) ?? null,
-    [positions, selectedPositionId]
-  );
+        ];
+
+        if (position.tp) {
+          const tpPercent = position.tp_percent ?? ((position.tp - position.open_price) / position.open_price) * 100;
+          const tpProfit = (position.tp - position.open_price) * position.volume;
+          const selected = selectedPositionId === position.id;
+
+          lines.push({
+            id: `tp-${position.id}`,
+            positionId: position.id,
+            price: position.tp,
+            label: `TP, +${tpProfit.toFixed(2)} EUR, ${tpPercent.toFixed(2)}%`,
+            tone: "tp" as const,
+            editable: selected,
+            muted: !selected
+          });
+        }
+
+        return lines;
+      }),
+  [positions, selectedPositionId, selectedSymbol]
+);
+
+
+ const selectedPosition = useMemo(
+  () => positions.find((position) => position.id === selectedPositionId && isReallyOpenPosition(position)) ?? null,
+  [positions, selectedPositionId]
+);
   function currentMarketKey(symbol = selectedSymbol, timeframe = selectedTimeframe) {
   return `${symbol}:${timeframe}`;
   }
@@ -579,20 +665,20 @@ useEffect(() => {
   ]);
 }
   async function refreshTradingData() {
-    try {
-      const [ordersResponse, positionsResponse, historyResponse] = await Promise.all([
-        getOrders(),
-        getPositions(),
-        getTradeHistory({ symbol: selectedSymbol })
-      ]);
-      setOrders(ordersResponse);
-      setPositions(positionsResponse);
-      setTradeHistory(historyResponse);
-    } catch {
-      // Auth refresh errors are already surfaced by order submission; keep market chart usable.
-    }
-  }
+  try {
+    const [ordersResponse, openPositionsResponse, historyResponse] = await Promise.all([
+      getOrders(),
+      getPositions({ status: "OPEN", symbol: selectedSymbol, limit: 100 }),
+      getTradeHistory({ symbol: selectedSymbol })
+    ]);
 
+    setOrders(ordersResponse);
+    setPositions(openPositionsResponse.filter(isReallyOpenPosition));
+    setTradeHistory(historyResponse);
+  } catch {
+    // Auth refresh errors are already surfaced by order submission; keep market chart usable.
+  }
+}
   async function refreshTradingSettings() {
     try {
       setTradingSettings(await getTradingSettings());
@@ -645,9 +731,9 @@ useEffect(() => {
     setIndicatorLines(response.indicators.filter(isLineOutput));
     setPriceAlerts(response.price_alerts ?? []);
 
-    if (response.positions?.length) {
-      setPositions(response.positions);
-    }
+    // if (response.positions?.length) {
+    //   setPositions(response.positions.filter(isReallyOpenPosition));
+    // }
   } catch {
     if (!isCurrentMarketContext(symbol, timeframe, generation)) {
       return;

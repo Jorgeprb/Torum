@@ -38,7 +38,7 @@ interface MarketChartProps {
   onDeleteDrawing?: (drawingId: string) => void;
   onSelectDrawing?: (drawingId: string | null) => void;
   tradeLines?: TradeLine[];
-  tradeMarkers?: SeriesMarker<Time>[];
+  tradeMarkers?: TradeMarker[];
   onSelectPosition?: (positionId: number) => void;
   onUpdatePositionTp?: (positionId: number, tp: number) => void;
   alertToolActive?: boolean;
@@ -73,11 +73,20 @@ export interface TradeLine {
   muted?: boolean;
   selected?: boolean;
 }
-
+export interface TradeMarker {
+  id: string;
+  time: Time;
+  price: number;
+  kind: "BUY" | "CLOSE";
+  label: string;
+}
 interface TradeLineOverlay extends TradeLine {
   y: number;
 }
-
+interface TradeMarkerOverlay extends TradeMarker {
+  x: number;
+  y: number;
+}
 interface PriceAlertOverlay {
   alert: PriceAlertRead;
   y: number;
@@ -444,6 +453,7 @@ export function MarketChart({
   const priceScaleManuallyAdjustedRef = useRef(false);
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
+  const [tradeMarkerOverlays, setTradeMarkerOverlays] = useState<TradeMarkerOverlay[]>([]);
   const [priceAlertOverlays, setPriceAlertOverlays] = useState<PriceAlertOverlay[]>([]);
   const [draggingAlertId, setDraggingAlertId] = useState<string | null>(null);
   const [draftAlertPrices, setDraftAlertPrices] = useState<Record<string, number>>({});
@@ -465,6 +475,7 @@ export function MarketChart({
       setOverlays([]);
       setDrawingShapes([]);
       setTradeLineOverlays([]);
+      setTradeMarkerOverlays([]);
       setPriceAlertOverlays([]);
       return;
     }
@@ -688,14 +699,16 @@ export function MarketChart({
 
     setDrawingShapes(shapes);
 
-    setTradeLineOverlays(
-      tradeLines
-        .map((line): TradeLineOverlay | null => {
-          const price = draftTradeLinePrices[line.id] ?? line.price;
-          const y = series.priceToCoordinate(price);
-          return y === null ? null : { ...line, price, y };
+    setTradeMarkerOverlays(
+      tradeMarkers
+        .map((marker): TradeMarkerOverlay | null => {
+          const markerTime = timeToNumber(marker.time);
+          const x = chart.timeScale().timeToCoordinate(markerTime as UTCTimestamp);
+          const y = series.priceToCoordinate(marker.price);
+
+          return x === null || y === null ? null : { ...marker, x, y };
         })
-        .filter((line): line is TradeLineOverlay => line !== null)
+        .filter((marker): marker is TradeMarkerOverlay => marker !== null)
     );
 
     setPriceAlertOverlays(
@@ -716,7 +729,7 @@ export function MarketChart({
     } else {
       setPendingCoordinate(null);
     }
-  }, [drawings, draftAlertPrices, draftDrawingPayloads, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, tradeLines]);
+  }, [drawings, draftAlertPrices, draftDrawingPayloads, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, tradeLines, tradeMarkers]);
 
   useEffect(() => {
     setPendingPoint(null);
@@ -839,17 +852,6 @@ export function MarketChart({
     ? timeToNumber(sortedCandles[sortedCandles.length - 1].time)
     : null;
 
-  const sortedTradeMarkers = sortMarkersByTimeAsc(tradeMarkers).filter((marker) => {
-    if (firstCandleTime === null || lastCandleTime === null) {
-      return false;
-    }
-
-    const markerTime = timeToNumber(marker.time);
-
-    // Dejamos un pequeño margen para que se vean operaciones cercanas.
-    return markerTime >= firstCandleTime - 7 * 24 * 60 * 60 && markerTime <= lastCandleTime + 7 * 24 * 60 * 60;
-  });
-
   if (shouldReset) {
   loadedResetKeyRef.current = nextResetKey;
   hasFullDataRef.current = false;
@@ -880,6 +882,7 @@ export function MarketChart({
   setDrawingShapes([]);
   setTradeLineOverlays([]);
   setPriceAlertOverlays([]);
+  setTradeMarkerOverlays([]);
   priceScaleManuallyAdjustedRef.current = false;
   resetPriceScale(chart, series);
 }
@@ -898,7 +901,7 @@ export function MarketChart({
    */
   if (loadingCandles && sortedCandles.length <= 2 && !hasFullDataRef.current) {
     series.setData(sortedCandles);
-    series.setMarkers(sortedTradeMarkers);
+    series.setMarkers([]);
     window.setTimeout(recalculateOverlays, 0);
     return;
   }
@@ -909,7 +912,7 @@ export function MarketChart({
    */
 if (shouldReset || !hasFullDataRef.current) {
   series.setData(sortedCandles);
-  series.setMarkers(sortedTradeMarkers);
+  series.setMarkers([]);
   hasFullDataRef.current = true;
 
   if (shouldApplySymbolReset) {
@@ -936,7 +939,7 @@ if (shouldReset || !hasFullDataRef.current) {
    */
   const lastCandle = sortedCandles[sortedCandles.length - 1];
   series.update(lastCandle);
-  series.setMarkers(sortedTradeMarkers);
+  series.setMarkers([]);
 
   if (autoFollowEnabled) {
     chart.timeScale().scrollToRealTime();
@@ -1621,6 +1624,27 @@ function markPriceScaleManualAdjustment() {
       ) : null}
 
       <div className="trade-line-layer">
+        {tradeMarkerOverlays.map((marker) => (
+          <div
+            className={
+              marker.kind === "BUY"
+                ? "trade-execution-marker trade-execution-marker--buy"
+                : "trade-execution-marker trade-execution-marker--close"
+            }
+            key={marker.id}
+            style={{
+              left: marker.x,
+              top: marker.y
+            }}
+          >
+            <span className="trade-execution-marker__icon">
+              {marker.kind === "BUY" ? "▲" : "●"}
+            </span>
+            <span className="trade-execution-marker__label">
+              {marker.label}
+            </span>
+          </div>
+        ))}
         {tradeLineOverlays.map((line) => (
           <div
             className={[

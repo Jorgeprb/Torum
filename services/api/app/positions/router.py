@@ -24,7 +24,12 @@ def get_positions(
         PositionRead.model_validate(position)
         for position in PositionService(db).list_with_prices(status_filter, limit, symbol)
     ]
-
+@router.post("/reconcile-mt5")
+def reconcile_mt5_positions(
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, int]:
+    return PositionService(db).reconcile_missing_mt5_positions()
 
 @router.post("/{position_id}/close", response_model=PositionRead)
 def close_position(

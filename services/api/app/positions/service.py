@@ -20,11 +20,21 @@ class PositionService:
 
     def list_with_prices(self, status: str | None = None, limit: int = 100, symbol: str | None = None) -> list[Position]:
         positions = list_positions(self.db, status=status, limit=limit, symbol=symbol)
+
+        safe_positions: list[Position] = []
+
         for position in positions:
             if position.status == "OPEN":
+                if not self._is_really_open_position(position):
+                    continue
+
                 self._update_position_price(position)
+
+            safe_positions.append(position)
+
         self.db.commit()
-        return positions
+
+        return safe_positions
 
     def close_position(self, position_id: int) -> tuple[bool, str, Position | None]:
         position = get_position(self.db, position_id)
@@ -71,7 +81,40 @@ class PositionService:
         position.raw_payload_json = {**(position.raw_payload_json or {}), "close_response": response}
         self.db.commit()
         return True, "MT5 position closed", position
+    def reconcile_missing_mt5_positions(self) -> dict[str, int]:
+        """
+        Cierra de forma defensiva posiciones DEMO/LIVE que Torum tiene como OPEN
+        pero que no son seguras para pintar como vivas.
 
+        Esta reconciliación NO borra nada.
+        Solo marca como CLOSED las posiciones no PAPER sin mt5_position_ticket.
+        Las posiciones con mt5_position_ticket deben cerrarse preferentemente por
+        sync_mt5_positions() comparando contra positions_get().
+        """
+        stmt = select(Position).where(
+            Position.status == "OPEN",
+            Position.mode != "PAPER",
+            Position.mt5_position_ticket.is_(None),
+        )
+
+        closed = 0
+
+        for position in self.db.scalars(stmt):
+            self._update_position_price(position)
+            position.status = "CLOSED"
+            position.closed_at = position.closed_at or datetime.now(UTC)
+            position.close_price = position.close_price or position.current_price
+            position.raw_payload_json = {
+                **(position.raw_payload_json or {}),
+                "closed_by_reconcile": True,
+                "close_deal_missing": True,
+                "close_reason": "Non-PAPER position without mt5_position_ticket cannot be considered live",
+            }
+            closed += 1
+
+        self.db.commit()
+
+        return {"closed": closed}
     def close_all_paper(self) -> int:
         positions = self.list_with_prices(status="OPEN", limit=1000)
         count = 0
@@ -196,8 +239,21 @@ class PositionService:
                 position.sl = _float_or_none(raw.get("sl"))
                 position.tp = _float_or_none(raw.get("tp"))
                 position.profit = _float_or_none(raw.get("profit"))
+
+                # Si MT5 devuelve esta posición en positions_get(), entonces está abierta de verdad.
+                # Limpiamos campos de cierre por seguridad, por si quedó una reconciliación antigua mal hecha.
                 position.status = "OPEN"
-                position.raw_payload_json = raw
+                position.closed_at = None
+                position.close_price = None
+                position.closing_deal_ticket = None
+                position.close_payload_json = None
+
+                position.raw_payload_json = {
+                    **(position.raw_payload_json or {}),
+                    "mt5_open_position": raw,
+                    "reopened_by_positions_get": True,
+                }
+
                 updated += 1
 
         closed = self._close_missing_mt5_positions(
@@ -231,7 +287,22 @@ class PositionService:
         position.current_price = current_price
         direction = 1 if position.side == "BUY" else -1
         position.profit = (current_price - position.open_price) * position.volume * direction
+    
+    def _is_really_open_position(self, position: Position) -> bool:
+        if position.status != "OPEN":
+            return False
 
+        if position.closed_at is not None:
+            return False
+
+        if position.close_price is not None:
+            return False
+
+        if position.mode != "PAPER" and position.mt5_position_ticket is None:
+            return False
+
+        return True
+    
     def _close_missing_mt5_positions(
         self,
         seen_tickets: set[int],
@@ -257,8 +328,16 @@ class PositionService:
                 _apply_close_deal(position, close_deal)
             else:
                 self._update_position_price(position)
+
                 position.close_price = position.current_price
-                position.raw_payload_json = {**(position.raw_payload_json or {}), "closed_by_mt5_sync": True}
+
+                position.raw_payload_json = {
+                    **(position.raw_payload_json or {}),
+                    "closed_by_mt5_sync": True,
+                    "close_deal_missing": True,
+                    "close_reason": "Position was not present in MT5 positions_get() during sync",
+                }
+
             position.status = "CLOSED"
             position.closed_at = position.closed_at or datetime.now(UTC)
             count += 1

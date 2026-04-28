@@ -197,8 +197,20 @@ export function getOrders(): Promise<OrderRead[]> {
   return request<OrderRead[]>("/api/orders?limit=50");
 }
 
-export function getPositions(): Promise<PositionRead[]> {
-  return request<PositionRead[]>("/api/positions?limit=50");
+export function getPositions(params: { status?: "OPEN" | "CLOSED"; symbol?: string; limit?: number } = {}): Promise<PositionRead[]> {
+  const query = new URLSearchParams();
+
+  query.set("limit", String(params.limit ?? 100));
+
+  if (params.status) {
+    query.set("status", params.status);
+  }
+
+  if (params.symbol) {
+    query.set("symbol", params.symbol);
+  }
+
+  return request(`/api/positions?${query.toString()}`);
 }
 
 export function closePosition(id: number): Promise<PositionRead> {
