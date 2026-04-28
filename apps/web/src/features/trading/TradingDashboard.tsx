@@ -71,16 +71,56 @@ import {
 const fallbackSymbols = ["XAUUSD", "XAUEUR", "XAUAUD", "XAUJPY", "DXY"];
 const timeframes: Timeframe[] = ["M1", "M5", "H1", "H2", "H4", "D1", "W1"];
 
-function upsertCandle(candles: Candle[], update: Candle): Candle[] {
-  const index = candles.findIndex((candle) => candle.time === update.time);
-  if (index >= 0) {
-    const next = [...candles];
-    next[index] = update;
-    return next;
+function normalizeCandleTime(time: number): number {
+  if (!Number.isFinite(time)) {
+    return 0;
   }
-  return [...candles, update].sort((a, b) => a.time - b.time).slice(-500);
+
+  return time > 10_000_000_000 ? Math.floor(time / 1000) : Math.floor(time);
 }
 
+function normalizeDashboardCandle(candle: Candle): Candle | null {
+  const time = normalizeCandleTime(candle.time);
+
+  if (
+    time <= 0 ||
+    !Number.isFinite(candle.open) ||
+    !Number.isFinite(candle.high) ||
+    !Number.isFinite(candle.low) ||
+    !Number.isFinite(candle.close)
+  ) {
+    return null;
+  }
+
+  return {
+    ...candle,
+    time
+  };
+}
+
+function upsertCandle(candles: Candle[], update: Candle): Candle[] {
+  const normalizedUpdate = normalizeDashboardCandle(update);
+
+  if (!normalizedUpdate) {
+    return candles;
+  }
+
+  const normalizedCandles = candles
+    .map(normalizeDashboardCandle)
+    .filter((candle): candle is Candle => candle !== null);
+
+  const byTime = new Map<number, Candle>();
+
+  for (const candle of normalizedCandles) {
+    byTime.set(candle.time, candle);
+  }
+
+  byTime.set(normalizedUpdate.time, normalizedUpdate);
+
+  return [...byTime.values()]
+    .sort((a, b) => a.time - b.time)
+    .slice(-500);
+}
 export function TradingDashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState("XAUUSD");
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>("M1");
@@ -114,10 +154,15 @@ export function TradingDashboard() {
   const [drawingMenuOpen, setDrawingMenuOpen] = useState(false);
   const [chartAutoFollowEnabled, setChartAutoFollowEnabled] = useState(true);
   const [chartRecenterToken, setChartRecenterToken] = useState(0);
+  const [chartSymbolResetToken, setChartSymbolResetToken] = useState(0);
+  const [chartHardResetToken, setChartHardResetToken] = useState(0);
   const [priceAlerts, setPriceAlerts] = useState<PriceAlertRead[]>([]);
   const [priceAlertHistory, setPriceAlertHistory] = useState<PriceAlertRead[]>([]);
+  const previousSymbolRef = useRef(selectedSymbol);
   const tickTimestampsRef = useRef<number[]>([]);
   const socketManagerRef = useRef<MarketSocketManager | null>(null);
+  const marketGenerationRef = useRef(0);
+  const activeMarketKeyRef = useRef(`${selectedSymbol}:${selectedTimeframe}`);
   const [ticksPerSecond, setTicksPerSecond] = useState(0);
 
   const selectedMapping = useMemo(
@@ -212,7 +257,18 @@ export function TradingDashboard() {
     () => positions.find((position) => position.id === selectedPositionId) ?? null,
     [positions, selectedPositionId]
   );
+  function currentMarketKey(symbol = selectedSymbol, timeframe = selectedTimeframe) {
+  return `${symbol}:${timeframe}`;
+  }
 
+  function isCurrentMarketContext(symbol: string, timeframe: Timeframe, generation: number) {
+    return (
+      generation === marketGenerationRef.current &&
+      symbol === selectedSymbol &&
+      timeframe === selectedTimeframe &&
+      activeMarketKeyRef.current === `${symbol}:${timeframe}`
+    );
+  }
   useEffect(() => {
     if (selectedPositionId && !positions.some((position) => position.id === selectedPositionId && position.status === "OPEN")) {
       setSelectedPositionId(null);
@@ -274,14 +330,37 @@ export function TradingDashboard() {
     };
   }, []);
 
-  useEffect(() => {
-    setChartAutoFollowEnabled(true);
-    setLatestTick(null);
-    setCandles([]);
-    tickTimestampsRef.current = [];
-    setTicksPerSecond(0);
-    void refreshCandlesAndLatestTick();
-  }, [selectedSymbol, selectedTimeframe]);
+useEffect(() => {
+  const symbolChanged = previousSymbolRef.current !== selectedSymbol;
+  previousSymbolRef.current = selectedSymbol;
+
+  marketGenerationRef.current += 1;
+  activeMarketKeyRef.current = `${selectedSymbol}:${selectedTimeframe}`;
+
+  const generation = marketGenerationRef.current;
+  const symbol = selectedSymbol;
+  const timeframe = selectedTimeframe;
+
+  setChartAutoFollowEnabled(true);
+  setLatestTick(null);
+  setBackendLatestTick(null);
+  setCandles([]);
+  setNoTradeZones([]);
+  setIndicatorLines([]);
+  setPriceAlerts([]);
+  setDrawings([]);
+  setSelectedDrawingId(null);
+  setSelectedPositionId(null);
+  setTradeMessage(null);
+  tickTimestampsRef.current = [];
+  setTicksPerSecond(0);
+
+  if (symbolChanged) {
+    setChartSymbolResetToken((current) => current + 1);
+  }
+
+  void refreshCandlesAndLatestTick(generation, symbol, timeframe);
+}, [selectedSymbol, selectedTimeframe]);
 
   useEffect(() => {
     void refreshChartOverlays();
@@ -290,28 +369,50 @@ export function TradingDashboard() {
     void refreshMarketDiagnostics();
   }, [selectedSymbol, selectedTimeframe]);
 
-  useEffect(() => {
-    socketManagerRef.current?.disconnect();
-    const manager = new MarketSocketManager({
-      onMessage: handleMarketMessage,
-      onStatusChange: (status) => {
-        setSocketStatus(status);
-        setStreamConnected(status === "connected");
-      },
-      onReconnect: () => {
-        void resyncAfterReconnect();
-      }
-    });
-    socketManagerRef.current = manager;
-    manager.connect(selectedSymbol, selectedTimeframe);
+ useEffect(() => {
+  socketManagerRef.current?.disconnect();
 
-    return () => {
-      manager.disconnect();
-      if (socketManagerRef.current === manager) {
-        socketManagerRef.current = null;
+  const generation = marketGenerationRef.current;
+  const symbol = selectedSymbol;
+  const timeframe = selectedTimeframe;
+  const socketKey = `${symbol}:${timeframe}`;
+
+  const manager = new MarketSocketManager({
+    onMessage: (message) => {
+      if (generation !== marketGenerationRef.current || activeMarketKeyRef.current !== socketKey) {
+        return;
       }
-    };
-  }, [selectedSymbol, selectedTimeframe]);
+
+      handleMarketMessage(message);
+    },
+    onStatusChange: (status) => {
+      if (generation !== marketGenerationRef.current || activeMarketKeyRef.current !== socketKey) {
+        return;
+      }
+
+      setSocketStatus(status);
+      setStreamConnected(status === "connected");
+    },
+    onReconnect: () => {
+      if (generation !== marketGenerationRef.current || activeMarketKeyRef.current !== socketKey) {
+        return;
+      }
+
+      void resyncAfterReconnect();
+    }
+  });
+
+  socketManagerRef.current = manager;
+  manager.connect(symbol, timeframe);
+
+  return () => {
+    manager.disconnect();
+
+    if (socketManagerRef.current === manager) {
+      socketManagerRef.current = null;
+    }
+  };
+}, [selectedSymbol, selectedTimeframe]);
 
   useEffect(() => {
     function resumeAndResync() {
@@ -354,43 +455,53 @@ export function TradingDashboard() {
   }
 
   function handleMarketMessage(message: MarketMessage) {
-    if (message.type === "candle_update") {
-      if (message.symbol !== selectedSymbol || message.timeframe !== selectedTimeframe) {
-        return;
-      }
-      setCandles((current) => upsertCandle(current, message.candle));
-      setStreamSource(message.candle.source);
+    const activeKey = activeMarketKeyRef.current;
+
+  if (message.type === "candle_update") {
+    const messageKey = `${message.symbol}:${message.timeframe}`;
+
+    if (messageKey !== activeKey || message.symbol !== selectedSymbol || message.timeframe !== selectedTimeframe) {
+      return;
     }
+
+    setCandles((current) => upsertCandle(current, message.candle));
+    setStreamSource(message.candle.source);
+    return;
+  }
     if (message.type === "market_status") {
       setStreamConnected(message.connected);
       setStreamSource(message.source);
       setLastTickTime(message.last_tick_time);
     }
-    if ((message.type === "latest_tick_update" || message.type === "market_tick") && message.symbol === selectedSymbol) {
-      const now = Date.now();
-      tickTimestampsRef.current = [...tickTimestampsRef.current, now].filter((timestamp) => now - timestamp <= 5000);
-      setTicksPerSecond(Number((tickTimestampsRef.current.length / 5).toFixed(2)));
-      const parsedMessageTime = Date.parse(message.time);
-      const messageTimeMsc = message.time_msc ?? (Number.isFinite(parsedMessageTime) ? parsedMessageTime : Date.now());
-      setLatestTick((current) => {
-        if (current && messageTimeMsc < current.time_msc) {
-          return current;
-        }
-        return {
-          time: message.time,
-          time_msc: messageTimeMsc,
-          internal_symbol: message.symbol,
-          broker_symbol: message.broker_symbol ?? "",
-          bid: message.bid,
-          ask: message.ask,
-          last: message.last,
-          volume: message.volume,
-          source: message.source ?? "UNKNOWN"
-        };
-      });
-      setStreamSource(message.source ?? "UNKNOWN");
-      setLastTickTime(message.time);
+      if ((message.type === "latest_tick_update" || message.type === "market_tick") && message.symbol === selectedSymbol) {
+    if (message.symbol !== selectedSymbol) {
+      return;
     }
+
+    const now = Date.now();
+    tickTimestampsRef.current = [...tickTimestampsRef.current, now].filter((timestamp) => now - timestamp <= 5000);
+    setTicksPerSecond(Number((tickTimestampsRef.current.length / 5).toFixed(2)));
+    const parsedMessageTime = Date.parse(message.time);
+    const messageTimeMsc = message.time_msc ?? (Number.isFinite(parsedMessageTime) ? parsedMessageTime : Date.now());
+    setLatestTick((current) => {
+      if (current && messageTimeMsc < current.time_msc) {
+        return current;
+      }
+      return {
+        time: message.time,
+        time_msc: messageTimeMsc,
+        internal_symbol: message.symbol,
+        broker_symbol: message.broker_symbol ?? "",
+        bid: message.bid,
+        ask: message.ask,
+        last: message.last,
+        volume: message.volume,
+        source: message.source ?? "UNKNOWN"
+      };
+    });
+    setStreamSource(message.source ?? "UNKNOWN");
+    setLastTickTime(message.time);
+  }
     if (message.type === "price_alert_triggered") {
       setPriceAlerts((current) => current.filter((alert) => alert.id !== message.alert_id));
       setTradeMessage(`Alerta ${message.symbol} disparada en ${message.triggered_price.toFixed(2)}`);
@@ -404,38 +515,69 @@ export function TradingDashboard() {
     }
   }
 
-  async function refreshCandlesAndLatestTick() {
-    setLoadingCandles(true);
-    setError(null);
-    try {
-      const [nextCandles, ticks] = await Promise.all([
-        getCandles(selectedSymbol, selectedTimeframe),
-        getTicks(selectedSymbol, 1).catch(() => [])
-      ]);
-      setCandles(nextCandles);
-      setLatestTick(ticks[ticks.length - 1] ?? null);
-    } catch (requestError) {
-      setCandles([]);
-      setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar las velas");
-    } finally {
+  async function refreshCandlesAndLatestTick(
+  generation = marketGenerationRef.current,
+  symbol = selectedSymbol,
+  timeframe = selectedTimeframe
+) {
+  setLoadingCandles(true);
+  setError(null);
+
+  try {
+    const [nextCandles, ticks] = await Promise.all([
+      getCandles(symbol, timeframe),
+      getTicks(symbol, 1).catch(() => [])
+    ]);
+
+    if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+      return;
+    }
+
+    const normalizedCandles = [...nextCandles]
+      .filter((candle) => Number.isFinite(candle.time))
+      .sort((a, b) => a.time - b.time);
+
+    setCandles(normalizedCandles);
+    setLatestTick(ticks[ticks.length - 1] ?? null);
+  } catch (requestError) {
+    if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+      return;
+    }
+
+    setCandles([]);
+    setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar las velas");
+  } finally {
+    if (isCurrentMarketContext(symbol, timeframe, generation)) {
       setLoadingCandles(false);
     }
   }
+}
 
   async function resyncAfterReconnect() {
-    await Promise.allSettled([
-      refreshCandlesAndLatestTick(),
-      refreshTradingData(),
-      refreshTradingSettings(),
-      refreshMarketDiagnostics(),
-      refreshChartOverlays(),
-      refreshDrawings(),
-      refreshPriceAlerts(),
-      getMockMarketStatus().then(setMockStatus),
-      getMt5Status().then(setMt5Status)
-    ]);
-  }
+  const generation = marketGenerationRef.current;
+  const symbol = selectedSymbol;
+  const timeframe = selectedTimeframe;
 
+  await Promise.allSettled([
+    refreshCandlesAndLatestTick(generation, symbol, timeframe),
+    refreshTradingData(),
+    refreshTradingSettings(),
+    refreshMarketDiagnostics(generation, symbol),
+    refreshChartOverlays(generation, symbol, timeframe),
+    refreshDrawings(generation, symbol, timeframe),
+    refreshPriceAlerts(generation, symbol),
+    getMockMarketStatus().then((status) => {
+      if (generation === marketGenerationRef.current) {
+        setMockStatus(status);
+      }
+    }),
+    getMt5Status().then((status) => {
+      if (generation === marketGenerationRef.current) {
+        setMt5Status(status);
+      }
+    })
+  ]);
+}
   async function refreshTradingData() {
     try {
       const [ordersResponse, positionsResponse, historyResponse] = await Promise.all([
@@ -459,68 +601,124 @@ export function TradingDashboard() {
     }
   }
 
-  async function refreshMarketDiagnostics() {
-    try {
-      const tick = await getLatestTick(selectedSymbol);
-      setBackendLatestTick(tick);
-      setLatestTick((current) => {
-        if (current && current.internal_symbol === tick.internal_symbol && current.time_msc > tick.time_msc) {
-          return current;
-        }
-        return tick;
-      });
-    } catch {
+  async function refreshMarketDiagnostics(
+  generation = marketGenerationRef.current,
+  symbol = selectedSymbol
+) {
+  try {
+    const tick = await getLatestTick(symbol);
+
+    if (generation !== marketGenerationRef.current || symbol !== selectedSymbol) {
+      return;
+    }
+
+    setBackendLatestTick(tick);
+    setLatestTick((current) => {
+      if (current && current.internal_symbol === tick.internal_symbol && current.time_msc > tick.time_msc) {
+        return current;
+      }
+
+      return tick;
+    });
+  } catch {
+    if (generation === marketGenerationRef.current && symbol === selectedSymbol) {
       setBackendLatestTick(null);
     }
   }
+}
+  async function refreshChartOverlays(
+  generation = marketGenerationRef.current,
+  symbol = selectedSymbol,
+  timeframe = selectedTimeframe
+) {
+  const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+  const to = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
 
-  async function refreshChartOverlays() {
-    const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-    const to = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
-    try {
-      const response = await getChartOverlays(selectedSymbol, selectedTimeframe, from, to);
-      setNoTradeZones(response.no_trade_zones);
-      setIndicatorLines(response.indicators.filter(isLineOutput));
-      setPriceAlerts(response.price_alerts ?? []);
-      if (response.positions?.length) {
-        setPositions(response.positions);
-      }
-    } catch {
-      setNoTradeZones([]);
-      setIndicatorLines([]);
+  try {
+    const response = await getChartOverlays(symbol, timeframe, from, to);
+
+    if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+      return;
+    }
+
+    setNoTradeZones(response.no_trade_zones);
+    setIndicatorLines(response.indicators.filter(isLineOutput));
+    setPriceAlerts(response.price_alerts ?? []);
+
+    if (response.positions?.length) {
+      setPositions(response.positions);
+    }
+  } catch {
+    if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+      return;
+    }
+
+    setNoTradeZones([]);
+    setIndicatorLines([]);
+    setPriceAlerts([]);
+  }
+}
+
+  async function refreshPriceAlerts(
+  generation = marketGenerationRef.current,
+  symbol = selectedSymbol
+) {
+  try {
+    const response = await getPriceAlerts(symbol, "ACTIVE");
+
+    if (generation !== marketGenerationRef.current || symbol !== selectedSymbol) {
+      return;
+    }
+
+    setPriceAlerts(response);
+    void refreshPriceAlertHistory(symbol);
+  } catch {
+    if (generation === marketGenerationRef.current && symbol === selectedSymbol) {
       setPriceAlerts([]);
     }
   }
+}
 
-  async function refreshPriceAlerts() {
-    try {
-      const response = await getPriceAlerts(selectedSymbol, "ACTIVE");
-      setPriceAlerts(response);
-      void refreshPriceAlertHistory();
-    } catch {
-      setPriceAlerts([]);
+  async function refreshPriceAlertHistory(symbol = selectedSymbol) {
+  try {
+    const history = await getPriceAlertHistory(symbol);
+
+    if (symbol !== selectedSymbol) {
+      return;
     }
-  }
 
-  async function refreshPriceAlertHistory() {
-    try {
-      setPriceAlertHistory(await getPriceAlertHistory(selectedSymbol));
-    } catch {
+    setPriceAlertHistory(history);
+  } catch {
+    if (symbol === selectedSymbol) {
       setPriceAlertHistory([]);
     }
   }
+}
 
-  async function refreshDrawings() {
-    try {
-      const response = await getDrawings(selectedSymbol, selectedTimeframe, true);
-      setDrawings(response);
-      setSelectedDrawingId((current) => (current && response.some((drawing) => drawing.id === current) ? current : null));
-    } catch (requestError) {
-      setDrawings([]);
-      setSelectedDrawingId(null);
-      setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar los dibujos");
+  async function refreshDrawings(
+  generation = marketGenerationRef.current,
+  symbol = selectedSymbol,
+  timeframe = selectedTimeframe
+) {
+  try {
+    const response = await getDrawings(symbol, timeframe, true);
+
+    if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+      return;
     }
+
+    setDrawings(response);
+    setSelectedDrawingId((current) => (current && response.some((drawing) => drawing.id === current) ? current : null));
+  } catch (requestError) {
+    if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+      return;
+    }
+
+    setDrawings([]);
+    setSelectedDrawingId(null);
+    setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar los dibujos");
   }
+}
 
   async function handleCreateDrawing(drawing: ChartDrawingCreate) {
     try {
@@ -852,7 +1050,11 @@ export function TradingDashboard() {
       </section>
     );
   }
-
+  function handleHardResetChartView() {
+  setChartAutoFollowEnabled(true);
+  setChartRecenterToken((current) => current + 1);
+  setChartHardResetToken((current) => current + 1);
+}
   return (
     <section className={`trading-grid trading-grid--view-${activeMobileView}`}>
       <MobileTopBar
@@ -1000,6 +1202,9 @@ export function TradingDashboard() {
         <div className="chart-shell">
           <MarketChart
             candles={candles}
+            loadingCandles={loadingCandles}
+            hardResetToken={chartHardResetToken}
+            symbolResetToken={chartSymbolResetToken}
             drawingTool={drawingTool}
             drawings={drawingsVisible ? drawings.filter((drawing) => drawing.visible) : []}
             indicatorLines={indicatorLines}
@@ -1029,18 +1234,13 @@ export function TradingDashboard() {
             tradeLines={tradeLines}
             tradeMarkers={tradeMarkers}
           />
-          {!chartAutoFollowEnabled ? (
-            <button
-              className="chart-follow-button"
-              type="button"
-              onClick={() => {
-                setChartAutoFollowEnabled(true);
-                setChartRecenterToken((current) => current + 1);
-              }}
-            >
-              Centrar precio
-            </button>
-          ) : null}
+          <button
+            className="chart-hard-reset-button"
+            type="button"
+            onClick={handleHardResetChartView}
+          >
+            ⊙ 
+          </button>
           {candles.length === 0 ? (
             <div className="chart-empty-state">
               <RefreshCw size={34} />

@@ -23,6 +23,9 @@ import { createBaseDrawing, drawingLabel, numericStyleValue, styleValue } from "
 
 interface MarketChartProps {
   candles: Candle[];
+  loadingCandles?: boolean;
+  symbolResetToken?: number;
+  hardResetToken?: number;
   noTradeZones?: NoTradeZone[];
   indicatorLines?: IndicatorLineOutput[];
   drawings?: ChartDrawingRead[];
@@ -81,9 +84,54 @@ interface PriceAlertOverlay {
   targetPrice: number;
 }
 
-function toChartCandle(candle: Candle): CandlestickData {
+function normalizeUnixSeconds(value: unknown): UTCTimestamp | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+
+    // Si viene en milisegundos, lo convertimos a segundos.
+    // Lightweight Charts trabaja bien con Unix seconds.
+    const seconds = value > 10_000_000_000 ? Math.floor(value / 1000) : Math.floor(value);
+    return seconds as UTCTimestamp;
+  }
+
+  if (typeof value === "string") {
+    const parsedAsNumber = Number(value);
+
+    if (Number.isFinite(parsedAsNumber)) {
+      const seconds = parsedAsNumber > 10_000_000_000 ? Math.floor(parsedAsNumber / 1000) : Math.floor(parsedAsNumber);
+      return seconds as UTCTimestamp;
+    }
+
+    const parsedDate = Date.parse(value);
+
+    if (!Number.isNaN(parsedDate)) {
+      return Math.floor(parsedDate / 1000) as UTCTimestamp;
+    }
+  }
+
+  return null;
+}
+
+function isValidOhlc(candle: Candle): boolean {
+  return (
+    Number.isFinite(candle.open) &&
+    Number.isFinite(candle.high) &&
+    Number.isFinite(candle.low) &&
+    Number.isFinite(candle.close)
+  );
+}
+
+function toChartCandle(candle: Candle): CandlestickData | null {
+  const time = normalizeUnixSeconds(candle.time);
+
+  if (time === null || !isValidOhlc(candle)) {
+    return null;
+  }
+
   return {
-    time: candle.time as UTCTimestamp,
+    time,
     open: candle.open,
     high: candle.high,
     low: candle.low,
@@ -105,9 +153,34 @@ function timeToNumber(time: Time): number {
 }
 
 function sortCandlesByTimeAsc(candles: CandlestickData[]): CandlestickData[] {
-  return [...candles]
-    .filter((candle) => candle.time !== undefined && candle.time !== null)
-    .sort((a, b) => timeToNumber(a.time) - timeToNumber(b.time));
+  const byTime = new Map<number, CandlestickData>();
+
+  for (const candle of candles) {
+    if (candle.time === undefined || candle.time === null) {
+      continue;
+    }
+
+    const numericTime = timeToNumber(candle.time);
+
+    if (!Number.isFinite(numericTime) || numericTime <= 0) {
+      continue;
+    }
+
+    // Si hay varias velas con el mismo timestamp, nos quedamos con la última recibida.
+    byTime.set(numericTime, {
+      ...candle,
+      time: numericTime as UTCTimestamp
+    });
+  }
+
+  return [...byTime.values()].sort((a, b) => timeToNumber(a.time) - timeToNumber(b.time));
+}
+function normalizeCandlesForChart(candles: Candle[]): CandlestickData[] {
+  return sortCandlesByTimeAsc(
+    candles
+      .map(toChartCandle)
+      .filter((candle): candle is CandlestickData => candle !== null)
+  );
 }
 
 function sortMarkersByTimeAsc(markers: SeriesMarker<Time>[]): SeriesMarker<Time>[] {
@@ -161,14 +234,173 @@ function centerRecentBars(chart: IChartApi, candleCount: number, timeframe: stri
   if (candleCount <= 0) {
     return;
   }
-  const bars = visibleBarsByTimeframe[timeframe] ?? 160;
+
+  if (candleCount <= 2) {
+    chart.timeScale().fitContent();
+    return;
+  }
+
+  const bars = Math.min(visibleBarsByTimeframe[timeframe] ?? 160, candleCount);
   const from = Math.max(0, candleCount - bars);
   const to = candleCount + 8;
+
   chart.timeScale().setVisibleLogicalRange({ from, to });
+}
+function resetPriceScale(chart: IChartApi, series: ISeriesApi<"Candlestick">) {
+  /*
+   * Fuerza a Lightweight Charts a olvidar cualquier zoom/scroll vertical previo.
+   * Esto es importante al cambiar entre activos con precios muy distintos:
+   * XAUUSD ~4600, XAUEUR ~3900, DXY ~100, etc.
+   */
+  chart.priceScale("right").applyOptions({
+    autoScale: true,
+    scaleMargins: {
+      top: 0.18,
+      bottom: 0.18
+    }
+  });
+
+  series.priceScale().applyOptions({
+    autoScale: true,
+    scaleMargins: {
+      top: 0.18,
+      bottom: 0.18
+    }
+  });
+}
+
+function disablePriceAutoScale(chart: IChartApi, series: ISeriesApi<"Candlestick">) {
+  /*
+   * Permite que el usuario mantenga su ajuste manual del eje vertical.
+   * Se usa cuando detectamos interacción sobre la escala de precios.
+   */
+  chart.priceScale("right").applyOptions({
+    autoScale: false
+  });
+
+  series.priceScale().applyOptions({
+    autoScale: false
+  });
+}
+function hardResetChartView(
+  chart: IChartApi,
+  series: ISeriesApi<"Candlestick">,
+  candleCount: number,
+  timeframe: string
+) {
+  /*
+   * Reset fuerte de escala vertical.
+   * Sirve para corregir casos donde el rango de precio queda heredado
+   * de otro activo o de un zoom manual.
+   */
+  resetPriceScale(chart, series);
+
+  /*
+   * Reset horizontal con zoom adecuado por timeframe.
+   */
+  if (candleCount <= 0) {
+    chart.timeScale().fitContent();
+
+    window.requestAnimationFrame(() => {
+      resetPriceScale(chart, series);
+    });
+
+    return;
+  }
+
+  if (candleCount <= 2) {
+    chart.timeScale().fitContent();
+    chart.timeScale().scrollToRealTime();
+
+    window.requestAnimationFrame(() => {
+      resetPriceScale(chart, series);
+    });
+
+    return;
+  }
+
+  const barsByTimeframe: Record<string, number> = {
+    M1: 90,
+    M5: 110,
+    H1: 120,
+    H2: 130,
+    H4: 140,
+    D1: 160,
+    W1: 180
+  };
+
+  const bars = Math.min(barsByTimeframe[timeframe] ?? 120, candleCount);
+  const rightOffset = 8;
+  const from = Math.max(0, candleCount - bars);
+  const to = candleCount + rightOffset;
+
+  chart.timeScale().setVisibleLogicalRange({ from, to });
+
+  /*
+   * Aplicamos reset varias veces en frames distintos porque Lightweight Charts
+   * a veces recalcula escalas después de setData/setVisibleLogicalRange.
+   */
+  window.requestAnimationFrame(() => {
+    resetPriceScale(chart, series);
+    chart.timeScale().setVisibleLogicalRange({ from, to });
+
+    window.requestAnimationFrame(() => {
+      resetPriceScale(chart, series);
+      chart.timeScale().setVisibleLogicalRange({ from, to });
+    });
+  });
+}
+
+function centerSymbolChange(chart: IChartApi, series: ISeriesApi<"Candlestick">, candleCount: number, timeframe: string) {
+  if (candleCount <= 0) {
+    resetPriceScale(chart, series);
+    return;
+  }
+
+  resetPriceScale(chart, series);
+
+  if (candleCount <= 2) {
+    chart.timeScale().fitContent();
+    chart.timeScale().scrollToRealTime();
+
+    window.requestAnimationFrame(() => {
+      resetPriceScale(chart, series);
+    });
+
+    return;
+  }
+
+  const barsByTimeframe: Record<string, number> = {
+    M1: 90,
+    M5: 110,
+    H1: 120,
+    H2: 130,
+    H4: 140,
+    D1: 160,
+    W1: 180
+  };
+
+  const bars = Math.min(barsByTimeframe[timeframe] ?? 120, candleCount);
+  const rightOffset = 8;
+  const from = Math.max(0, candleCount - bars);
+  const to = candleCount + rightOffset;
+
+  chart.timeScale().setVisibleLogicalRange({ from, to });
+
+  /*
+   * Segundo reset en el siguiente frame, después de que setData y el rango lógico
+   * hayan aplicado. Esto evita que se quede el rango vertical del activo anterior.
+   */
+  window.requestAnimationFrame(() => {
+    resetPriceScale(chart, series);
+  });
 }
 
 export function MarketChart({
   candles,
+  loadingCandles = false,
+  symbolResetToken = 0,
+  hardResetToken = 0,
   noTradeZones = [],
   indicatorLines = [],
   drawings = [],
@@ -206,7 +438,10 @@ export function MarketChart({
   const askPriceLineRef = useRef<IPriceLine | null>(null);
   const loadedResetKeyRef = useRef<string | null>(null);
   const hasFullDataRef = useRef(false);
-
+  const centeredResetKeyRef = useRef<string | null>(null);
+  const appliedSymbolResetTokenRef = useRef<number | null>(null);
+  const appliedHardResetTokenRef = useRef<number | null>(hardResetToken);
+  const priceScaleManuallyAdjustedRef = useRef(false);
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
   const [priceAlertOverlays, setPriceAlertOverlays] = useState<PriceAlertOverlay[]>([]);
@@ -218,6 +453,7 @@ export function MarketChart({
   const [draftDrawingPayloads, setDraftDrawingPayloads] = useState<Record<string, Record<string, unknown>>>({});
   const [pendingPoint, setPendingPoint] = useState<DrawingPoint | null>(null);
   const [pendingCoordinate, setPendingCoordinate] = useState<DrawingCoordinate | null>(null);
+  
   const suppressNextChartPointRef = useRef(false);
 
   const recalculateOverlays = useCallback(() => {
@@ -554,37 +790,208 @@ export function MarketChart({
   }, []);
 
   useEffect(() => {
-    const series = seriesRef.current;
-    const chart = chartRef.current;
-    if (!series || !chart) {
-      return;
+  const chart = chartRef.current;
+  const series = seriesRef.current;
+
+  if (!chart || !series) {
+    return;
+  }
+
+  if (appliedHardResetTokenRef.current === hardResetToken) {
+    return;
+  }
+
+  appliedHardResetTokenRef.current = hardResetToken;
+
+  const sortedCandles = normalizeCandlesForChart(candles);
+  priceScaleManuallyAdjustedRef.current = false;
+  hardResetChartView(chart, series, sortedCandles.length, timeframe);
+
+  centeredResetKeyRef.current = resetKey ?? `${symbol}:${timeframe}`;
+  appliedSymbolResetTokenRef.current = symbolResetToken;
+
+  window.setTimeout(recalculateOverlays, 0);
+}, [
+  hardResetToken,
+  candles,
+  timeframe,
+  resetKey,
+  symbol,
+  symbolResetToken,
+  recalculateOverlays
+]);
+
+  useEffect(() => {
+  const series = seriesRef.current;
+  const chart = chartRef.current;
+
+  if (!series || !chart) {
+    return;
+  }
+  
+  const sortedCandles = normalizeCandlesForChart(candles);
+  const nextResetKey = resetKey ?? `${symbol}:${timeframe}`;
+  const shouldReset = loadedResetKeyRef.current !== nextResetKey;
+  const shouldApplySymbolReset = appliedSymbolResetTokenRef.current !== symbolResetToken;
+
+  const firstCandleTime = sortedCandles[0] ? timeToNumber(sortedCandles[0].time) : null;
+  const lastCandleTime = sortedCandles[sortedCandles.length - 1]
+    ? timeToNumber(sortedCandles[sortedCandles.length - 1].time)
+    : null;
+
+  const sortedTradeMarkers = sortMarkersByTimeAsc(tradeMarkers).filter((marker) => {
+    if (firstCandleTime === null || lastCandleTime === null) {
+      return false;
     }
 
-    const sortedCandles = sortCandlesByTimeAsc(candles.map(toChartCandle));
-    const sortedTradeMarkers = sortMarkersByTimeAsc(tradeMarkers);
-    const nextResetKey = resetKey ?? `${symbol}:${timeframe}`;
-    const shouldReset = loadedResetKeyRef.current !== nextResetKey;
+    const markerTime = timeToNumber(marker.time);
 
-    if (shouldReset || !hasFullDataRef.current) {
-      series.setData(sortedCandles);
-      if (sortedCandles.length > 0) {
-        centerRecentBars(chart, sortedCandles.length, timeframe);
-        loadedResetKeyRef.current = nextResetKey;
-        hasFullDataRef.current = true;
-      }
-    } else if (sortedCandles.length === 0) {
-      series.setData([]);
-      hasFullDataRef.current = false;
-    } else {
-      series.update(sortedCandles[sortedCandles.length - 1]);
-      if (autoFollowEnabled) {
-        chart.timeScale().scrollToRealTime();
-      }
-    }
+    // Dejamos un pequeño margen para que se vean operaciones cercanas.
+    return markerTime >= firstCandleTime - 7 * 24 * 60 * 60 && markerTime <= lastCandleTime + 7 * 24 * 60 * 60;
+  });
 
+  if (shouldReset) {
+  loadedResetKeyRef.current = nextResetKey;
+  hasFullDataRef.current = false;
+  centeredResetKeyRef.current = null;
+
+  series.setData([]);
+  series.setMarkers([]);
+
+  /*
+   * Muy importante: eliminar líneas BID/ASK del activo anterior.
+   * Si no, el eje vertical puede quedarse escalado al precio anterior.
+   */
+  if (bidPriceLineRef.current) {
+    series.removePriceLine(bidPriceLineRef.current);
+    bidPriceLineRef.current = null;
+  }
+
+  if (askPriceLineRef.current) {
+    series.removePriceLine(askPriceLineRef.current);
+    askPriceLineRef.current = null;
+  }
+
+  lineSeriesRef.current.forEach((lineSeries) => {
+    lineSeries.setData([]);
+  });
+
+  setOverlays([]);
+  setDrawingShapes([]);
+  setTradeLineOverlays([]);
+  setPriceAlertOverlays([]);
+  priceScaleManuallyAdjustedRef.current = false;
+  resetPriceScale(chart, series);
+}
+
+  if (sortedCandles.length === 0) {
+    series.setData([]);
+    series.setMarkers([]);
+    hasFullDataRef.current = false;
+    window.setTimeout(recalculateOverlays, 0);
+    return;
+  }
+
+  /*
+   * Si estamos cargando histórico, no queremos que una vela suelta recibida
+   * por WebSocket inicialice el gráfico como si fuera todo el histórico.
+   */
+  if (loadingCandles && sortedCandles.length <= 2 && !hasFullDataRef.current) {
+    series.setData(sortedCandles);
     series.setMarkers(sortedTradeMarkers);
     window.setTimeout(recalculateOverlays, 0);
-  }, [autoFollowEnabled, candles, recalculateOverlays, resetKey, symbol, timeframe, tradeMarkers]);
+    return;
+  }
+
+  /*
+   * Cuando cambia símbolo/timeframe, o cuando todavía no tenemos histórico completo,
+   * SIEMPRE usamos setData. update() solo se usa cuando el contexto ya está estable.
+   */
+if (shouldReset || !hasFullDataRef.current) {
+  series.setData(sortedCandles);
+  series.setMarkers(sortedTradeMarkers);
+  hasFullDataRef.current = true;
+
+  if (shouldApplySymbolReset) {
+    priceScaleManuallyAdjustedRef.current = false;
+    centerSymbolChange(chart, series, sortedCandles.length, timeframe);
+    appliedSymbolResetTokenRef.current = symbolResetToken;
+    centeredResetKeyRef.current = nextResetKey;
+  } else if (centeredResetKeyRef.current !== nextResetKey) {
+    if (sortedCandles.length > 2) {
+      centerRecentBars(chart, sortedCandles.length, timeframe);
+    } else {
+      chart.timeScale().fitContent();
+    }
+
+    centeredResetKeyRef.current = nextResetKey;
+  }
+
+  window.setTimeout(recalculateOverlays, 0);
+  return;
+}
+
+  /*
+   * Contexto estable: ahora sí podemos actualizar solo la última vela.
+   */
+  const lastCandle = sortedCandles[sortedCandles.length - 1];
+  series.update(lastCandle);
+  series.setMarkers(sortedTradeMarkers);
+
+  if (autoFollowEnabled) {
+    chart.timeScale().scrollToRealTime();
+  }
+
+  /*
+  * Si el usuario ajustó manualmente el eje vertical, mantenemos desactivado
+  * el autoscale aunque entren nuevas velas/ticks.
+  */
+  if (priceScaleManuallyAdjustedRef.current) {
+    disablePriceAutoScale(chart, series);
+  }
+
+  window.setTimeout(recalculateOverlays, 0);
+}, [
+  autoFollowEnabled,
+  candles,
+  loadingCandles,
+  recalculateOverlays,
+  resetKey,
+  symbol,
+  timeframe,
+  tradeMarkers
+]);
+
+
+  useEffect(() => {
+  const chart = chartRef.current;
+
+  if (!chart || candles.length === 0) {
+    return;
+  }
+
+  const sortedCandles = normalizeCandlesForChart(candles);
+
+  if (sortedCandles.length === 0) {
+    return;
+  }
+
+  if (appliedSymbolResetTokenRef.current === symbolResetToken) {
+    return;
+  }
+
+  const series = seriesRef.current;
+
+if (!series) {
+  return;
+}
+  priceScaleManuallyAdjustedRef.current = false;
+  centerSymbolChange(chart, series, sortedCandles.length, timeframe);
+  appliedSymbolResetTokenRef.current = symbolResetToken;
+  centeredResetKeyRef.current = resetKey ?? `${symbol}:${timeframe}`;
+
+  window.setTimeout(recalculateOverlays, 0);
+}, [candles, recalculateOverlays, resetKey, symbol, symbolResetToken, timeframe]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -596,42 +1003,53 @@ export function MarketChart({
   }, [recenterToken]);
 
   useEffect(() => {
-    const series = seriesRef.current;
-    if (!series) {
-      return;
-    }
+  const series = seriesRef.current;
 
-    if (bidPriceLineRef.current) {
-      series.removePriceLine(bidPriceLineRef.current);
-      bidPriceLineRef.current = null;
-    }
-    if (askPriceLineRef.current) {
-      series.removePriceLine(askPriceLineRef.current);
-      askPriceLineRef.current = null;
-    }
+  if (!series) {
+    return;
+  }
 
-    if (showBidLine && typeof bidPrice === "number" && Number.isFinite(bidPrice)) {
-      bidPriceLineRef.current = series.createPriceLine({
-        price: bidPrice,
-        color: "#2be0d0",
-        lineWidth: 1,
-        lineStyle: LineStyle.Solid,
-        axisLabelVisible: true,
-        title: "BID"
-      });
-    }
+  if (bidPriceLineRef.current) {
+    series.removePriceLine(bidPriceLineRef.current);
+    bidPriceLineRef.current = null;
+  }
 
-    if (showAskLine && typeof askPrice === "number" && Number.isFinite(askPrice)) {
-      askPriceLineRef.current = series.createPriceLine({
-        price: askPrice,
-        color: "#f45d5d",
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: "ASK"
-      });
-    }
-  }, [askPrice, bidPrice, showAskLine, showBidLine]);
+  if (askPriceLineRef.current) {
+    series.removePriceLine(askPriceLineRef.current);
+    askPriceLineRef.current = null;
+  }
+
+  /*
+   * Mientras se está cargando/cambiando el activo, no añadimos BID/ASK.
+   * Pero aquí NO reseteamos la escala vertical, porque este efecto también
+   * se ejecuta con cada tick y podría deshacer el zoom vertical manual.
+   */
+  if (loadingCandles) {
+    return;
+  }
+
+  if (showBidLine && typeof bidPrice === "number" && Number.isFinite(bidPrice)) {
+    bidPriceLineRef.current = series.createPriceLine({
+      price: bidPrice,
+      color: "#2be0d0",
+      lineWidth: 1,
+      lineStyle: LineStyle.Solid,
+      axisLabelVisible: true,
+      title: "BID"
+    });
+  }
+
+  if (showAskLine && typeof askPrice === "number" && Number.isFinite(askPrice)) {
+    askPriceLineRef.current = series.createPriceLine({
+      price: askPrice,
+      color: "#f45d5d",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: "ASK"
+    });
+  }
+}, [askPrice, bidPrice, loadingCandles, showAskLine, showBidLine]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1082,34 +1500,78 @@ export function MarketChart({
       window.removeEventListener("pointerup", handleUp);
     };
   }, [draggingTpLineId, onUpdatePositionTp, tradeLines]);
+  function isPointerInsideRightPriceScale(clientX: number): boolean {
+  const container = containerRef.current;
 
+  if (!container) {
+    return false;
+  }
+
+  const bounds = container.getBoundingClientRect();
+
+  /*
+   * Ancho aproximado de la escala de precios derecha.
+   * Si tu escala es más estrecha/ancha, ajusta este valor.
+   */
+  const priceScaleWidth = 76;
+
+  return clientX >= bounds.right - priceScaleWidth;
+}
+
+function markPriceScaleManualAdjustment() {
+  const chart = chartRef.current;
+  const series = seriesRef.current;
+
+  if (!chart || !series) {
+    return;
+  }
+
+  priceScaleManuallyAdjustedRef.current = true;
+  disablePriceAutoScale(chart, series);
+}
   useEffect(() => {
-    const chart = chartRef.current;
-    const container = containerRef.current;
+  const chart = chartRef.current;
+  const container = containerRef.current;
 
-    if (!chart || !container) {
-      return;
+  if (!chart || !container) {
+    return;
+  }
+
+  function markManualInteraction() {
+    if (!alertToolActive && drawingTool === "select") {
+      onAutoFollowChange?.(false);
+    }
+  }
+
+  function handlePointerDown(event: globalThis.PointerEvent) {
+    if (isPointerInsideRightPriceScale(event.clientX)) {
+      markPriceScaleManualAdjustment();
     }
 
-    function markManualInteraction() {
-      if (!alertToolActive && drawingTool === "select") {
-        onAutoFollowChange?.(false);
-      }
+    markManualInteraction();
+  }
+
+  function handleWheel(event: WheelEvent) {
+    if (isPointerInsideRightPriceScale(event.clientX)) {
+      markPriceScaleManualAdjustment();
     }
 
-    chart.timeScale().subscribeVisibleTimeRangeChange(recalculateOverlays);
-    container.addEventListener("wheel", markManualInteraction, { passive: true });
-    container.addEventListener("pointerdown", markManualInteraction, { passive: true });
-    window.addEventListener("resize", recalculateOverlays);
-    recalculateOverlays();
+    markManualInteraction();
+  }
 
-    return () => {
-      chart.timeScale().unsubscribeVisibleTimeRangeChange(recalculateOverlays);
-      container.removeEventListener("wheel", markManualInteraction);
-      container.removeEventListener("pointerdown", markManualInteraction);
-      window.removeEventListener("resize", recalculateOverlays);
-    };
-  }, [alertToolActive, drawingTool, onAutoFollowChange, recalculateOverlays]);
+  chart.timeScale().subscribeVisibleTimeRangeChange(recalculateOverlays);
+  container.addEventListener("wheel", handleWheel, { passive: true });
+  container.addEventListener("pointerdown", handlePointerDown, { passive: true });
+  window.addEventListener("resize", recalculateOverlays);
+  recalculateOverlays();
+
+  return () => {
+    chart.timeScale().unsubscribeVisibleTimeRangeChange(recalculateOverlays);
+    container.removeEventListener("wheel", handleWheel);
+    container.removeEventListener("pointerdown", handlePointerDown);
+    window.removeEventListener("resize", recalculateOverlays);
+  };
+}, [alertToolActive, drawingTool, onAutoFollowChange, recalculateOverlays]);
 
   return (
     <div

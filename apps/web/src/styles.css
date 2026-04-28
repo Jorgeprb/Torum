@@ -1036,7 +1036,66 @@ h2 {
   font-size: 0.74rem;
   font-weight: 950;
 }
+.chart-shell {
+  position: relative;
+}
 
+.chart-hard-reset-button {
+  position: absolute;
+  top: 12px;
+  right: 82px;
+  z-index: 30;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+
+  height: 38px;
+  padding: 0 14px;
+
+  border: 1px solid rgba(55, 135, 245, 0.95);
+  border-radius: 999px;
+
+  background: rgba(0, 0, 0, 0.78);
+  color: #4da3ff;
+
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.chart-hard-reset-button:active {
+  transform: scale(0.97);
+}
+
+.chart-hard-reset-button:hover {
+  background: rgba(12, 28, 48, 0.92);
+}
+
+@media (max-width: 480px) {
+  .chart-hard-reset-button {
+    top: 10px;
+    right: 78px;
+    height: 34px;
+    padding: 0 11px;
+    font-size: 13px;
+  }
+}
+@media (max-width: 380px) {
+  .chart-hard-reset-button {
+    right: 72px;
+    padding: 0 9px;
+    font-size: 12px;
+  }
+}
 .trade-line {
   position: absolute;
   left: 0;
