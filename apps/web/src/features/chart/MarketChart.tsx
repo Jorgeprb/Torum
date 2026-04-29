@@ -1,4 +1,5 @@
 import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import { LocateFixed, Trash2 } from "lucide-react";
 import {
   type CandlestickData,
   type IChartApi,
@@ -6,7 +7,6 @@ import {
   type ISeriesApi,
   type LineData,
   LineStyle,
-  type SeriesMarker,
   type Time,
   type UTCTimestamp,
   createChart
@@ -69,6 +69,12 @@ export interface TradeLine {
   price: number;
   label: string;
   tone: "entry" | "tp" | "close";
+  side?: "BUY" | "SELL";
+  volume?: number;
+  openPrice?: number;
+  profit?: number;
+  contractSize?: number;
+  currency?: string;
   editable?: boolean;
   muted?: boolean;
   selected?: boolean;
@@ -160,7 +166,120 @@ function timeToNumber(time: Time): number {
 
   return Math.floor(Date.UTC(time.year, time.month - 1, time.day) / 1000);
 }
+function timeframeToSeconds(timeframe: string): number {
+  switch (timeframe) {
+    case "M1":
+      return 60;
+    case "M5":
+      return 5 * 60;
+    case "H1":
+      return 60 * 60;
+    case "H2":
+      return 2 * 60 * 60;
+    case "H4":
+      return 4 * 60 * 60;
+    case "D1":
+      return 24 * 60 * 60;
+    case "W1":
+      return 7 * 24 * 60 * 60;
+    default:
+      return 60;
+  }
+}
 
+function timeframeBucketStart(unixSeconds: number, timeframe: string): number {
+  const date = new Date(unixSeconds * 1000);
+
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  const hour = date.getUTCHours();
+  const minute = date.getUTCMinutes();
+
+  if (timeframe === "M1") {
+    return Math.floor(Date.UTC(year, month, day, hour, minute, 0, 0) / 1000);
+  }
+
+  if (timeframe === "M5") {
+    const bucketMinute = Math.floor(minute / 5) * 5;
+    return Math.floor(Date.UTC(year, month, day, hour, bucketMinute, 0, 0) / 1000);
+  }
+
+  if (timeframe === "H1") {
+    return Math.floor(Date.UTC(year, month, day, hour, 0, 0, 0) / 1000);
+  }
+
+  if (timeframe === "H2") {
+    const bucketHour = Math.floor(hour / 2) * 2;
+    return Math.floor(Date.UTC(year, month, day, bucketHour, 0, 0, 0) / 1000);
+  }
+
+  if (timeframe === "H4") {
+    const bucketHour = Math.floor(hour / 4) * 4;
+    return Math.floor(Date.UTC(year, month, day, bucketHour, 0, 0, 0) / 1000);
+  }
+
+  if (timeframe === "D1") {
+    return Math.floor(Date.UTC(year, month, day, 0, 0, 0, 0) / 1000);
+  }
+
+  if (timeframe === "W1") {
+    const startOfDay = Date.UTC(year, month, day, 0, 0, 0, 0);
+    const utcDay = new Date(startOfDay).getUTCDay();
+    const daysFromMonday = utcDay === 0 ? 6 : utcDay - 1;
+    return Math.floor((startOfDay - daysFromMonday * 24 * 60 * 60 * 1000) / 1000);
+  }
+
+  return unixSeconds;
+}
+
+function findNearestCandleTime(targetTime: number, candleTimes: number[]): number | null {
+  if (candleTimes.length === 0) {
+    return null;
+  }
+
+  let bestTime = candleTimes[0];
+  let bestDistance = Math.abs(bestTime - targetTime);
+
+  for (const candleTime of candleTimes) {
+    const distance = Math.abs(candleTime - targetTime);
+
+    if (distance < bestDistance) {
+      bestTime = candleTime;
+      bestDistance = distance;
+    }
+  }
+
+  return bestTime;
+}
+
+function markerTimeToChartTime(markerTime: Time, timeframe: string, candleTimes: number[]): UTCTimestamp | null {
+  const rawTime = timeToNumber(markerTime);
+
+  if (!Number.isFinite(rawTime) || rawTime <= 0) {
+    return null;
+  }
+
+  const bucketTime = timeframeBucketStart(rawTime, timeframe);
+
+  if (candleTimes.includes(bucketTime)) {
+    return bucketTime as UTCTimestamp;
+  }
+
+  const nearestTime = findNearestCandleTime(bucketTime, candleTimes);
+
+  if (nearestTime === null) {
+    return null;
+  }
+
+  const maxDistance = timeframeToSeconds(timeframe);
+
+  if (Math.abs(nearestTime - bucketTime) > maxDistance) {
+    return null;
+  }
+
+  return nearestTime as UTCTimestamp;
+}
 function sortCandlesByTimeAsc(candles: CandlestickData[]): CandlestickData[] {
   const byTime = new Map<number, CandlestickData>();
 
@@ -192,12 +311,6 @@ function normalizeCandlesForChart(candles: Candle[]): CandlestickData[] {
   );
 }
 
-function sortMarkersByTimeAsc(markers: SeriesMarker<Time>[]): SeriesMarker<Time>[] {
-  return [...markers]
-    .filter((marker) => marker.time !== undefined && marker.time !== null)
-    .sort((a, b) => timeToNumber(a.time) - timeToNumber(b.time));
-}
-
 function sortLineDataByTimeAsc(data: LineData[]): LineData[] {
   return [...data]
     .filter((point) => point.time !== undefined && point.time !== null)
@@ -206,6 +319,28 @@ function sortLineDataByTimeAsc(data: LineData[]): LineData[] {
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function tradeLineLabel(line: TradeLine, price: number): string {
+  if (
+    line.tone === "tp" &&
+    typeof line.openPrice === "number" &&
+    Number.isFinite(line.openPrice) &&
+    line.openPrice !== 0 &&
+    typeof line.volume === "number" &&
+    typeof line.contractSize === "number"
+  ) {
+    const direction = line.side === "SELL" ? -1 : 1;
+    const tpPercent = ((price - line.openPrice) / line.openPrice) * 100 * direction;
+    const profit = (price - line.openPrice) * line.volume * line.contractSize * direction;
+    return `TP, ${profit >= 0 ? "+" : ""}${profit.toFixed(2)} ${line.currency ?? ""}, ${tpPercent.toFixed(2)}%`;
+  }
+
+  return line.label;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 function chartTimeToUnix(time: Time | null): number | null {
@@ -238,6 +373,12 @@ const visibleBarsByTimeframe: Record<string, number> = {
   D1: 180,
   W1: 220
 };
+const candleSpacingScale = 0.6; // Modifica aqui el espacio entre velas: menor = mas espacio.
+const candleBarSpacing = 10; // Modifica aqui el espaciado base de velas.
+
+function barsWithCandleSpacing(baseBars: number, candleCount: number): number {
+  return Math.min(Math.max(20, Math.round(baseBars * candleSpacingScale)), candleCount);
+}
 
 function centerRecentBars(chart: IChartApi, candleCount: number, timeframe: string) {
   if (candleCount <= 0) {
@@ -249,9 +390,9 @@ function centerRecentBars(chart: IChartApi, candleCount: number, timeframe: stri
     return;
   }
 
-  const bars = Math.min(visibleBarsByTimeframe[timeframe] ?? 160, candleCount);
+  const bars = barsWithCandleSpacing(visibleBarsByTimeframe[timeframe] ?? 160, candleCount);
   const from = Math.max(0, candleCount - bars);
-  const to = candleCount + 8;
+  const to = candleCount + 4;
 
   chart.timeScale().setVisibleLogicalRange({ from, to });
 }
@@ -338,8 +479,8 @@ function hardResetChartView(
     W1: 180
   };
 
-  const bars = Math.min(barsByTimeframe[timeframe] ?? 120, candleCount);
-  const rightOffset = 8;
+  const bars = barsWithCandleSpacing(barsByTimeframe[timeframe] ?? 120, candleCount);
+  const rightOffset = 4;
   const from = Math.max(0, candleCount - bars);
   const to = candleCount + rightOffset;
 
@@ -389,8 +530,8 @@ function centerSymbolChange(chart: IChartApi, series: ISeriesApi<"Candlestick">,
     W1: 180
   };
 
-  const bars = Math.min(barsByTimeframe[timeframe] ?? 120, candleCount);
-  const rightOffset = 8;
+  const bars = barsWithCandleSpacing(barsByTimeframe[timeframe] ?? 120, candleCount);
+  const rightOffset = 4;
   const from = Math.max(0, candleCount - bars);
   const to = candleCount + rightOffset;
 
@@ -451,6 +592,10 @@ export function MarketChart({
   const appliedSymbolResetTokenRef = useRef<number | null>(null);
   const appliedHardResetTokenRef = useRef<number | null>(hardResetToken);
   const priceScaleManuallyAdjustedRef = useRef(false);
+  const overlayRecalculateFrameRef = useRef<number | null>(null);
+  const chartPointerActiveRef = useRef(false);
+  const [localHardResetToken, setLocalHardResetToken] = useState(0);
+  const [localRecenterToken, setLocalRecenterToken] = useState(0);
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
   const [tradeMarkerOverlays, setTradeMarkerOverlays] = useState<TradeMarkerOverlay[]>([]);
@@ -465,6 +610,8 @@ export function MarketChart({
   const [pendingCoordinate, setPendingCoordinate] = useState<DrawingCoordinate | null>(null);
   
   const suppressNextChartPointRef = useRef(false);
+  const effectiveHardResetToken = hardResetToken + localHardResetToken;
+  const effectiveRecenterToken = recenterToken + localRecenterToken;
 
   const recalculateOverlays = useCallback(() => {
     const chart = chartRef.current;
@@ -699,17 +846,19 @@ export function MarketChart({
 
     setDrawingShapes(shapes);
 
-    setTradeMarkerOverlays(
-      tradeMarkers
-        .map((marker): TradeMarkerOverlay | null => {
-          const markerTime = timeToNumber(marker.time);
-          const x = chart.timeScale().timeToCoordinate(markerTime as UTCTimestamp);
-          const y = series.priceToCoordinate(marker.price);
+    setTradeLineOverlays(
+      tradeLines
+        .filter((line) => (line.tone === "entry" || line.tone === "tp") && Number.isFinite(line.price))
+        .map((line): TradeLineOverlay | null => {
+          const price = draftTradeLinePrices[line.id] ?? line.price;
+          const y = series.priceToCoordinate(price);
 
-          return x === null || y === null ? null : { ...marker, x, y };
+          return y === null ? null : { ...line, price, y, label: tradeLineLabel(line, price) };
         })
-        .filter((marker): marker is TradeMarkerOverlay => marker !== null)
+        .filter((line): line is TradeLineOverlay => line !== null)
     );
+
+    setTradeMarkerOverlays([]);
 
     setPriceAlertOverlays(
       priceAlerts
@@ -729,7 +878,30 @@ export function MarketChart({
     } else {
       setPendingCoordinate(null);
     }
-  }, [drawings, draftAlertPrices, draftDrawingPayloads, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, tradeLines, tradeMarkers]);
+ }, [
+  candles,
+  drawings,
+  draftAlertPrices,
+  draftDrawingPayloads,
+  draftTradeLinePrices,
+  noTradeZones,
+  pendingPoint,
+  priceAlerts,
+  timeframe,
+  tradeLines,
+  tradeMarkers
+]);
+
+  function scheduleOverlayRecalculate() {
+    if (overlayRecalculateFrameRef.current !== null) {
+      return;
+    }
+
+    overlayRecalculateFrameRef.current = window.requestAnimationFrame(() => {
+      overlayRecalculateFrameRef.current = null;
+      recalculateOverlays();
+    });
+  }
 
   useEffect(() => {
     setPendingPoint(null);
@@ -760,6 +932,7 @@ export function MarketChart({
       },
       timeScale: {
         borderColor: "#293033",
+        barSpacing: candleBarSpacing,
         timeVisible: true,
         secondsVisible: false
       },
@@ -788,13 +961,19 @@ export function MarketChart({
       borderUpColor: "#20c9bd",
       borderDownColor: "#f45d5d",
       wickUpColor: "#20c9bd",
-      wickDownColor: "#f45d5d"
+      wickDownColor: "#f45d5d",
+      lastValueVisible: false,
+      priceLineVisible: false
     });
 
     chartRef.current = chart;
     seriesRef.current = series;
 
     return () => {
+      if (overlayRecalculateFrameRef.current !== null) {
+        window.cancelAnimationFrame(overlayRecalculateFrameRef.current);
+        overlayRecalculateFrameRef.current = null;
+      }
       lineSeriesRef.current.clear();
       chart.remove();
       chartRef.current = null;
@@ -810,11 +989,11 @@ export function MarketChart({
     return;
   }
 
-  if (appliedHardResetTokenRef.current === hardResetToken) {
+  if (appliedHardResetTokenRef.current === effectiveHardResetToken) {
     return;
   }
 
-  appliedHardResetTokenRef.current = hardResetToken;
+  appliedHardResetTokenRef.current = effectiveHardResetToken;
 
   const sortedCandles = normalizeCandlesForChart(candles);
   priceScaleManuallyAdjustedRef.current = false;
@@ -825,7 +1004,7 @@ export function MarketChart({
 
   window.setTimeout(recalculateOverlays, 0);
 }, [
-  hardResetToken,
+  effectiveHardResetToken,
   candles,
   timeframe,
   resetKey,
@@ -1003,7 +1182,7 @@ if (!series) {
     }
     centerRecentBars(chart, candles.length, timeframe);
     window.setTimeout(recalculateOverlays, 0);
-  }, [recenterToken]);
+  }, [effectiveRecenterToken]);
 
   useEffect(() => {
   const series = seriesRef.current;
@@ -1093,7 +1272,7 @@ if (!series) {
     }
   }, [indicatorLines]);
 
-  function chartPointFromClient(clientX: number, clientY: number): DrawingPoint | null {
+  function chartPointFromClient(clientX: number, clientY: number, clampToChart = false): DrawingPoint | null {
     const chart = chartRef.current;
     const series = seriesRef.current;
     const container = containerRef.current;
@@ -1103,8 +1282,10 @@ if (!series) {
     }
 
     const bounds = container.getBoundingClientRect();
-    const x = clientX - bounds.left;
-    const y = clientY - bounds.top;
+    const rawX = clientX - bounds.left;
+    const rawY = clientY - bounds.top;
+    const x = clampToChart ? clampNumber(rawX, 0, bounds.width) : rawX;
+    const y = clampToChart ? clampNumber(rawY, 0, bounds.height) : rawY;
 
     const time = chartTimeToUnix(chart.timeScale().coordinateToTime(x));
     const price = series.coordinateToPrice(y);
@@ -1287,7 +1468,7 @@ if (!series) {
     }
     const updateDrawing = onUpdateDrawing;
     suppressNextChartPointRef.current = true;
-    const startPoint = chartPointFromClient(event.clientX, event.clientY);
+    const startPoint = chartPointFromClient(event.clientX, event.clientY, true);
     if (!startPoint) {
       return;
     }
@@ -1296,7 +1477,7 @@ if (!series) {
     const drawing = shape.drawing;
 
     function handleMove(moveEvent: globalThis.PointerEvent) {
-      const nextPoint = chartPointFromClient(moveEvent.clientX, moveEvent.clientY);
+      const nextPoint = chartPointFromClient(moveEvent.clientX, moveEvent.clientY, true);
       if (!nextPoint) {
         return;
       }
@@ -1306,7 +1487,7 @@ if (!series) {
 
     function handleUp(upEvent: globalThis.PointerEvent) {
       window.removeEventListener("pointermove", handleMove);
-      const nextPoint = chartPointFromClient(upEvent.clientX, upEvent.clientY);
+      const nextPoint = chartPointFromClient(upEvent.clientX, upEvent.clientY, true);
       if (nextPoint) {
         const nextPayload = transformDrawingPayload(drawing, originalPayload, dragStartPoint, nextPoint, action);
         updateDrawing(drawing, { payload: nextPayload });
@@ -1521,7 +1702,7 @@ if (!series) {
   return clientX >= bounds.right - priceScaleWidth;
 }
 
-function markPriceScaleManualAdjustment() {
+  function markPriceScaleManualAdjustment() {
   const chart = chartRef.current;
   const series = seriesRef.current;
 
@@ -1532,6 +1713,13 @@ function markPriceScaleManualAdjustment() {
   priceScaleManuallyAdjustedRef.current = true;
   disablePriceAutoScale(chart, series);
 }
+
+  function handleCenterChart() {
+    onAutoFollowChange?.(true);
+    setLocalHardResetToken((current) => current + 1);
+    setLocalRecenterToken((current) => current + 1);
+  }
+
   useEffect(() => {
   const chart = chartRef.current;
   const container = containerRef.current;
@@ -1547,11 +1735,31 @@ function markPriceScaleManualAdjustment() {
   }
 
   function handlePointerDown(event: globalThis.PointerEvent) {
+    chartPointerActiveRef.current = true;
+
     if (isPointerInsideRightPriceScale(event.clientX)) {
       markPriceScaleManualAdjustment();
     }
 
     markManualInteraction();
+    scheduleOverlayRecalculate();
+  }
+
+  function handlePointerMove() {
+    if (!chartPointerActiveRef.current) {
+      return;
+    }
+
+    scheduleOverlayRecalculate();
+  }
+
+  function handlePointerUp() {
+    if (!chartPointerActiveRef.current) {
+      return;
+    }
+
+    chartPointerActiveRef.current = false;
+    scheduleOverlayRecalculate();
   }
 
   function handleWheel(event: WheelEvent) {
@@ -1560,11 +1768,15 @@ function markPriceScaleManualAdjustment() {
     }
 
     markManualInteraction();
+    scheduleOverlayRecalculate();
   }
 
   chart.timeScale().subscribeVisibleTimeRangeChange(recalculateOverlays);
   container.addEventListener("wheel", handleWheel, { passive: true });
   container.addEventListener("pointerdown", handlePointerDown, { passive: true });
+  window.addEventListener("pointermove", handlePointerMove, { passive: true });
+  window.addEventListener("pointerup", handlePointerUp);
+  window.addEventListener("pointercancel", handlePointerUp);
   window.addEventListener("resize", recalculateOverlays);
   recalculateOverlays();
 
@@ -1572,6 +1784,9 @@ function markPriceScaleManualAdjustment() {
     chart.timeScale().unsubscribeVisibleTimeRangeChange(recalculateOverlays);
     container.removeEventListener("wheel", handleWheel);
     container.removeEventListener("pointerdown", handlePointerDown);
+    window.removeEventListener("pointermove", handlePointerMove);
+    window.removeEventListener("pointerup", handlePointerUp);
+    window.removeEventListener("pointercancel", handlePointerUp);
     window.removeEventListener("resize", recalculateOverlays);
   };
 }, [alertToolActive, drawingTool, onAutoFollowChange, recalculateOverlays]);
@@ -1618,10 +1833,29 @@ function markPriceScaleManualAdjustment() {
       />
 
       {selectedDrawingId && onDeleteDrawing ? (
-        <button className="chart-object-action chart-object-action--danger" type="button" onClick={() => onDeleteDrawing(selectedDrawingId)}>
-          Eliminar
+        <button
+          aria-label="Eliminar dibujo"
+          className="chart-hard-reset-button chart-object-delete-button"
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDeleteDrawing(selectedDrawingId);
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <Trash2 size={16} />
         </button>
       ) : null}
+
+      <button
+        aria-label="Centrar grafico"
+        className="chart-hard-reset-button"
+        type="button"
+        onClick={handleCenterChart}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <LocateFixed size={16} />
+      </button>
 
       <div className="trade-line-layer">
         {tradeMarkerOverlays.map((marker) => (
@@ -1665,7 +1899,18 @@ function markPriceScaleManualAdjustment() {
               }
             }}
           >
-            <span>{line.label}</span>
+            <span>
+              {line.tone === "entry" && typeof line.profit === "number" ? (
+                <>
+                  {line.side ?? "BUY"} {(line.volume ?? 0).toFixed(2)},{" "}
+                  <strong className={line.profit >= 0 ? "trade-line__money trade-line__money--profit" : "trade-line__money trade-line__money--loss"}>
+                    {line.profit.toFixed(2)} {line.currency ?? ""}
+                  </strong>
+                </>
+              ) : (
+                line.label
+              )}
+            </span>
           </div>
         ))}
       </div>

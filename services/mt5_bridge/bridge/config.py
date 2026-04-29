@@ -37,7 +37,7 @@ class BridgeSettings(BaseSettings):
     mt5_default_deviation_points: int = 20
     mt5_order_comment_prefix: str = "Torum"
     mt5_diagnostic_log_interval_seconds: int = 5
-    mt5_position_sync_interval_seconds: int = 3
+    mt5_position_sync_interval_seconds: int = 1
     mt5_deals_history_lookback_days: int = 14
 
     log_level: str = "INFO"

@@ -1,4 +1,4 @@
-import { Eye, EyeOff, MapPin, Minus, MousePointer, Square, Trash2, TrendingUp, Type } from "lucide-react";
+import { Eye, EyeOff, Minus, MousePointer, SeparatorVertical, Square, Trash2, TrendingUp, Type } from "lucide-react";
 
 import type { DrawingTool } from "../../services/drawings";
 import { toolName } from "./drawingUtils";
@@ -15,7 +15,7 @@ interface DrawingToolbarProps {
 const tools: Array<{ tool: DrawingTool; icon: JSX.Element }> = [
   { tool: "select", icon: <MousePointer size={16} /> },
   { tool: "horizontal_line", icon: <Minus size={16} /> },
-  { tool: "vertical_line", icon: <MapPin size={16} /> },
+  { tool: "vertical_line", icon: <SeparatorVertical size={16} /> },
   { tool: "trend_line", icon: <TrendingUp size={16} /> },
   { tool: "rectangle", icon: <Square size={16} /> },
   { tool: "text", icon: <Type size={16} /> },

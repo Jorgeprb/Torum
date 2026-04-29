@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Time } from "lightweight-charts";
-import { AlertTriangle, Bell, Database, Pause, Play, RadioTower, RefreshCw } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, Bell, CalendarDays, Database, Menu, Minus, MousePointer, Pause, Play, RadioTower, RefreshCw, SeparatorVertical, ShieldAlert, Square, TrendingUp, Type, X } from "lucide-react";
 
 import { StatusPill } from "../../components/ui/StatusPill";
 import { MarketChart, type TradeLine, type TradeMarker } from "../chart/MarketChart";
@@ -70,6 +70,65 @@ import {
 
 const fallbackSymbols = ["XAUUSD", "XAUEUR", "XAUAUD", "XAUJPY", "DXY"];
 const timeframes: Timeframe[] = ["M1", "M5", "H1", "H2", "H4", "D1", "W1"];
+type ChartSplitCount = 1 | 2 | 3;
+type ChartSplitOrientation = "vertical" | "horizontal";
+interface SplitChartSelection {
+  symbol: string;
+}
+
+const mobileDrawingTools: DrawingTool[] = ["horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "manual_zone", "select"];
+const spyModeStorageKey = "torum.spyMode";
+
+function readSpyModePreference(): boolean {
+  try {
+    return window.localStorage.getItem(spyModeStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function drawingToolText(tool: DrawingTool): string {
+  const labels: Record<DrawingTool, string> = {
+    horizontal_line: "linea horizontal",
+    vertical_line: "linea vertical",
+    trend_line: "linea de tendencia",
+    rectangle: "rectangulo",
+    text: "texto",
+    manual_zone: "zona manual",
+    select: "seleccionar"
+  };
+
+  return labels[tool] ?? tool.replace(/_/g, " ");
+}
+
+function drawingToolIcon(tool: DrawingTool) {
+  if (tool === "horizontal_line") return <Minus size={18} />;
+  if (tool === "vertical_line") return <SeparatorVertical size={18} />;
+  if (tool === "trend_line") return <TrendingUp size={18} />;
+  if (tool === "rectangle") return <Square size={18} />;
+  if (tool === "text") return <Type size={18} />;
+  if (tool === "manual_zone") {
+    return (
+      <>
+        <Square size={18} />
+        <span>Z</span>
+      </>
+    );
+  }
+  return <MousePointer size={18} />;
+}
+
+function translateTradeMessage(message: string): string {
+  return message
+    .replace(/market closed/gi, "Mercado cerrado")
+    .replace(/order rejected by risk manager/gi, "Orden rechazada por gestion de riesgo")
+    .replace(/no price available/gi, "Sin precio disponible")
+    .replace(/position is not open/gi, "La posicion no esta abierta")
+    .replace(/failed to close position/gi, "No se pudo cerrar la posicion")
+    .replace(/below/gi, "por debajo")
+    .replace(/rejected/gi, "rechazada")
+    .replace(/failed/gi, "fallo");
+}
 
 function normalizeCandleTime(time: number): number {
   if (!Number.isFinite(time)) {
@@ -169,9 +228,377 @@ function positionCloseTime(position: PositionRead | TradeHistoryItem): Time | nu
   return Math.floor(new Date(position.closed_at).getTime() / 1000) as Time;
 }
 
+interface PositionValuation {
+  closePrice: number | null;
+  profit: number;
+}
+
+function contractSizeFor(symbolMappings: SymbolMapping[], symbol: string): number {
+  const mapping = symbolMappings.find((item) => item.internal_symbol === symbol);
+  return mapping && Number.isFinite(mapping.contract_size) && mapping.contract_size > 0 ? mapping.contract_size : 1;
+}
+
+function positionClosePrice(position: PositionRead, bidPrice: number | null, askPrice: number | null): number | null {
+  if (position.side === "BUY") {
+    return bidPrice ?? position.current_price ?? null;
+  }
+
+  return askPrice ?? position.current_price ?? null;
+}
+
+function calculatePriceDistanceProfit(position: PositionRead, closePrice: number | null, contractSize: number): number {
+  if (closePrice === null || !Number.isFinite(closePrice)) {
+    return position.profit ?? 0;
+  }
+
+  const direction = position.side === "BUY" ? 1 : -1;
+  return (closePrice - position.open_price) * position.volume * contractSize * direction;
+}
+
+function calculatePositionProfit(position: PositionRead, closePrice: number | null, contractSize: number): number {
+  if (position.mt5_position_ticket && typeof position.profit === "number" && Number.isFinite(position.profit)) {
+    return position.profit;
+  }
+
+  return calculatePriceDistanceProfit(position, closePrice, contractSize);
+}
+
+function positionValuation(
+  position: PositionRead,
+  symbolMappings: SymbolMapping[],
+  bidPrice: number | null,
+  askPrice: number | null
+): PositionValuation {
+  const closePrice = positionClosePrice(position, bidPrice, askPrice);
+  const profit = calculatePositionProfit(position, closePrice, contractSizeFor(symbolMappings, position.internal_symbol));
+  return { closePrice, profit };
+}
+
+function tradeLinesForSymbol(
+  positions: PositionRead[],
+  symbol: string,
+  symbolMappings: SymbolMapping[],
+  bidPrice: number | null,
+  askPrice: number | null,
+  accountCurrency: string,
+  selectedPositionId: number | null
+): TradeLine[] {
+  return positions
+    .filter((position) => position.internal_symbol === symbol)
+    .filter(isReallyOpenPosition)
+    .flatMap((position) => {
+      const contractSize = contractSizeFor(symbolMappings, position.internal_symbol);
+      const valuation = positionValuation(position, symbolMappings, bidPrice, askPrice);
+      const selected = selectedPositionId === position.id;
+      const lines: TradeLine[] = [
+        {
+          id: `entry-${position.id}`,
+          positionId: position.id,
+          price: position.open_price,
+          label: `${position.side} ${position.volume.toFixed(2)}, ${valuation.profit.toFixed(2)} ${accountCurrency}`,
+          tone: "entry",
+          side: position.side,
+          volume: position.volume,
+          openPrice: position.open_price,
+          profit: valuation.profit,
+          contractSize,
+          currency: accountCurrency,
+          selected
+        }
+      ];
+
+      if (position.tp) {
+        const direction = position.side === "SELL" ? -1 : 1;
+        const tpPercent = position.tp_percent ?? ((position.tp - position.open_price) / position.open_price) * 100 * direction;
+        const tpProfit = calculatePriceDistanceProfit(position, position.tp, contractSize);
+        lines.push({
+          id: `tp-${position.id}`,
+          positionId: position.id,
+          price: position.tp,
+          label: `TP, ${tpProfit >= 0 ? "+" : ""}${tpProfit.toFixed(2)} ${accountCurrency}, ${tpPercent.toFixed(2)}%`,
+          tone: "tp",
+          side: position.side,
+          volume: position.volume,
+          openPrice: position.open_price,
+          profit: tpProfit,
+          contractSize,
+          currency: accountCurrency,
+          editable: selected,
+          muted: !selected
+        });
+      }
+
+      return lines;
+    });
+}
+
+function historyGrossProfit(item: TradeHistoryItem, symbolMappings: SymbolMapping[]): number {
+  if (typeof item.profit === "number" && Number.isFinite(item.profit)) {
+    return item.profit;
+  }
+
+  if (item.close_price === null || item.close_price === undefined) {
+    return 0;
+  }
+
+  const direction = item.side === "BUY" ? 1 : -1;
+  return (item.close_price - item.open_price) * item.volume * contractSizeFor(symbolMappings, item.internal_symbol) * direction;
+}
+
+function formatHistoryDate(value: string | null): string {
+  if (!value) {
+    return "--";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+interface SplitMarketChartProps {
+  accountCurrency: string;
+  alertToolActive: boolean;
+  chartSymbols: string[];
+  drawingTool: DrawingTool;
+  drawingsVisible: boolean;
+  onSelectPosition: (positionId: number) => void;
+  onUpdatePositionTp: (positionId: number, tp: number) => void;
+  positions: PositionRead[];
+  selectedPositionId: number | null;
+  symbolMappings: SymbolMapping[];
+  symbol: string;
+  timeframe: Timeframe;
+  onSymbolChange: (symbol: string) => void;
+  showAskLine: boolean;
+  showBidLine: boolean;
+}
+
+function SplitMarketChart({
+  accountCurrency,
+  alertToolActive,
+  chartSymbols,
+  drawingTool,
+  drawingsVisible,
+  onSelectPosition,
+  onUpdatePositionTp,
+  positions,
+  selectedPositionId,
+  symbolMappings,
+  symbol,
+  timeframe,
+  onSymbolChange,
+  showAskLine,
+  showBidLine
+}: SplitMarketChartProps) {
+  const [candles, setCandles] = useState<Candle[]>([]);
+  const [latestTick, setLatestTick] = useState<Tick | null>(null);
+  const [loadingCandles, setLoadingCandles] = useState(false);
+  const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
+  const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlertRead[]>([]);
+  const [drawings, setDrawings] = useState<ChartDrawingRead[]>([]);
+  const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [autoFollowEnabled, setAutoFollowEnabled] = useState(true);
+  const generationRef = useRef(0);
+  const latestBid = latestTick?.bid ?? null;
+  const latestAsk = latestTick?.ask ?? null;
+  const tradeLines = useMemo(
+    () => tradeLinesForSymbol(positions, symbol, symbolMappings, latestBid, latestAsk, accountCurrency, selectedPositionId),
+    [accountCurrency, latestAsk, latestBid, positions, selectedPositionId, symbol, symbolMappings]
+  );
+
+  useEffect(() => {
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const to = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+
+    async function refresh() {
+      setLoadingCandles(true);
+
+      try {
+        const [nextCandles, ticks, overlays, nextDrawings] = await Promise.all([
+          getCandles(symbol, timeframe),
+          getTicks(symbol, 1).catch(() => []),
+          getChartOverlays(symbol, timeframe, from, to).catch(() => null),
+          getDrawings(symbol, timeframe, true).catch(() => [])
+        ]);
+
+        if (generation !== generationRef.current) {
+          return;
+        }
+
+        setCandles([...nextCandles].filter((candle) => Number.isFinite(candle.time)).sort((a, b) => a.time - b.time));
+        setLatestTick(ticks[ticks.length - 1] ?? null);
+        setNoTradeZones(overlays?.no_trade_zones ?? []);
+        setIndicatorLines(overlays?.indicators.filter(isLineOutput) ?? []);
+        setPriceAlerts(overlays?.price_alerts ?? []);
+        setDrawings(nextDrawings);
+        setSelectedDrawingId((current) => (current && nextDrawings.some((drawing) => drawing.id === current) ? current : null));
+      } catch {
+        if (generation !== generationRef.current) {
+          return;
+        }
+
+        setCandles([]);
+        setLatestTick(null);
+        setNoTradeZones([]);
+        setIndicatorLines([]);
+        setPriceAlerts([]);
+        setDrawings([]);
+        setSelectedDrawingId(null);
+      } finally {
+        if (generation === generationRef.current) {
+          setLoadingCandles(false);
+        }
+      }
+    }
+
+    void refresh();
+
+    const socket = new MarketSocketManager({
+      onMessage: (message) => {
+        if (generation !== generationRef.current) {
+          return;
+        }
+
+        if (message.type === "candle_update" && message.symbol === symbol && message.timeframe === timeframe) {
+          setCandles((current) => upsertCandle(current, message.candle));
+          return;
+        }
+
+        if ((message.type === "latest_tick_update" || message.type === "market_tick") && message.symbol === symbol) {
+          const parsedMessageTime = Date.parse(message.time);
+          const messageTimeMsc = message.time_msc ?? (Number.isFinite(parsedMessageTime) ? parsedMessageTime : Date.now());
+          setLatestTick((current) => {
+            if (current && messageTimeMsc < current.time_msc) {
+              return current;
+            }
+
+            return {
+              time: message.time,
+              time_msc: messageTimeMsc,
+              internal_symbol: message.symbol,
+              broker_symbol: message.broker_symbol ?? "",
+              bid: message.bid,
+              ask: message.ask,
+              last: message.last,
+              volume: message.volume,
+              source: message.source ?? "UNKNOWN"
+            };
+          });
+        }
+      },
+      onReconnect: () => {
+        if (generation === generationRef.current) {
+          void refresh();
+        }
+      },
+      onStatusChange: () => undefined
+    });
+
+    socket.connect(symbol, timeframe);
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [symbol, timeframe]);
+
+  async function handleCreateDrawing(drawing: ChartDrawingCreate) {
+    const created = await createDrawing(drawing);
+    setDrawings((current) => [...current, created]);
+    setSelectedDrawingId(created.id);
+  }
+
+  async function handleUpdateDrawing(drawing: ChartDrawingRead, patch: ChartDrawingUpdate) {
+    const updated = await patchDrawing(drawing.id, patch);
+    setDrawings((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+  }
+
+  async function handleDeleteDrawing(drawingId: string) {
+    await deleteDrawing(drawingId);
+    setDrawings((current) => current.filter((drawing) => drawing.id !== drawingId));
+    setSelectedDrawingId((current) => (current === drawingId ? null : current));
+  }
+
+  async function handleCreatePriceAlert(price: number) {
+    const alert = await createPriceAlert({
+      internal_symbol: symbol,
+      timeframe: null,
+      target_price: price,
+      message: `${symbol} <= ${price.toFixed(2)}`,
+      source: "CHART"
+    });
+    setPriceAlerts((current) => [...current, alert]);
+  }
+
+  async function handleUpdatePriceAlert(alert: PriceAlertRead, targetPrice: number) {
+    const updated = await patchPriceAlert(alert.id, {
+      target_price: targetPrice,
+      message: `${alert.internal_symbol} <= ${targetPrice.toFixed(2)}`
+    });
+    setPriceAlerts((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+  }
+
+  async function handleCancelPriceAlert(alertId: string) {
+    await cancelPriceAlert(alertId);
+    setPriceAlerts((current) => current.filter((alert) => alert.id !== alertId));
+  }
+
+  return (
+    <div className="chart-split-pane chart-split-pane--secondary">
+      <div className="chart-split-pane__controls" onPointerDown={(event) => event.stopPropagation()}>
+        <select aria-label="Simbolo grafico" value={symbol} onChange={(event) => onSymbolChange(event.target.value)}>
+          {chartSymbols.map((item) => (
+            <option key={item} value={item}>
+              {item}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="chart-split-pane__chart">
+        <MarketChart
+          alertToolActive={alertToolActive}
+          askPrice={latestTick?.ask ?? null}
+          autoFollowEnabled
+          bidPrice={latestTick?.bid ?? null}
+          candles={candles}
+          drawingTool={drawingTool}
+          drawings={drawingsVisible ? drawings.filter((drawing) => drawing.visible) : []}
+          indicatorLines={indicatorLines}
+          loadingCandles={loadingCandles}
+          noTradeZones={noTradeZones}
+          onCancelPriceAlert={(alertId) => void handleCancelPriceAlert(alertId)}
+          onCreateDrawing={(drawing) => void handleCreateDrawing(drawing)}
+          onCreatePriceAlert={(price) => void handleCreatePriceAlert(price)}
+          onDeleteDrawing={(drawingId) => void handleDeleteDrawing(drawingId)}
+          onAutoFollowChange={setAutoFollowEnabled}
+          onSelectDrawing={setSelectedDrawingId}
+          onSelectPosition={onSelectPosition}
+          onUpdateDrawing={(drawing, patch) => void handleUpdateDrawing(drawing, patch)}
+          onUpdatePriceAlert={(alert, price) => void handleUpdatePriceAlert(alert, price)}
+          onUpdatePositionTp={(positionId, tp) => onUpdatePositionTp(positionId, tp)}
+          priceAlerts={priceAlerts}
+          resetKey={`${symbol}:${timeframe}`}
+          selectedDrawingId={selectedDrawingId}
+          showAskLine={showAskLine}
+          showBidLine={showBidLine}
+          symbol={symbol}
+          timeframe={timeframe}
+          tradeLines={tradeLines}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function TradingDashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState("XAUUSD");
-  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>("M1");
+  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>("M5");
   const [symbolMappings, setSymbolMappings] = useState<SymbolMapping[]>([]);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [mockStatus, setMockStatus] = useState<MockMarketStatus | null>(null);
@@ -190,6 +617,8 @@ export function TradingDashboard() {
   const [positions, setPositions] = useState<PositionRead[]>([]);
   const [tradeHistory, setTradeHistory] = useState<TradeHistoryItem[]>([]);
   const [selectedPositionId, setSelectedPositionId] = useState<number | null>(null);
+  const [closePositionId, setClosePositionId] = useState<number | null>(null);
+  const [closingPosition, setClosingPosition] = useState(false);
   const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
   const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
   const [drawings, setDrawings] = useState<ChartDrawingRead[]>([]);
@@ -200,18 +629,68 @@ export function TradingDashboard() {
   const [activeMobileView, setActiveMobileView] = useState<MobileView>("chart");
   const [alertToolActive, setAlertToolActive] = useState(false);
   const [drawingMenuOpen, setDrawingMenuOpen] = useState(false);
+  const [chartSplitCount, setChartSplitCount] = useState<ChartSplitCount>(1);
+  const [chartSplitOrientation, setChartSplitOrientation] = useState<ChartSplitOrientation>("vertical");
+  const [secondaryCharts, setSecondaryCharts] = useState<SplitChartSelection[]>([
+    { symbol: "XAUEUR" },
+    { symbol: "DXY" }
+  ]);
+  const [spyModeEnabled, setSpyModeEnabled] = useState(readSpyModePreference);
   const [chartAutoFollowEnabled, setChartAutoFollowEnabled] = useState(true);
   const [chartRecenterToken, setChartRecenterToken] = useState(0);
   const [chartSymbolResetToken, setChartSymbolResetToken] = useState(0);
   const [chartHardResetToken, setChartHardResetToken] = useState(0);
   const [priceAlerts, setPriceAlerts] = useState<PriceAlertRead[]>([]);
   const [priceAlertHistory, setPriceAlertHistory] = useState<PriceAlertRead[]>([]);
+  const [historyTab, setHistoryTab] = useState<"OPEN" | "CLOSED">("OPEN");
+  const [expandedHistoryRows, setExpandedHistoryRows] = useState<Set<string>>(() => new Set());
   const previousSymbolRef = useRef(selectedSymbol);
   const tickTimestampsRef = useRef<number[]>([]);
   const socketManagerRef = useRef<MarketSocketManager | null>(null);
   const marketGenerationRef = useRef(0);
   const activeMarketKeyRef = useRef(`${selectedSymbol}:${selectedTimeframe}`);
   const [ticksPerSecond, setTicksPerSecond] = useState(0);
+
+  useEffect(() => {
+    const root = document.documentElement;
+
+    function syncVisualViewportHeight() {
+      const height = window.visualViewport?.height ?? window.innerHeight;
+      root.style.setProperty("--torum-visual-height", `${height}px`);
+    }
+
+    syncVisualViewportHeight();
+    window.visualViewport?.addEventListener("resize", syncVisualViewportHeight);
+    window.addEventListener("resize", syncVisualViewportHeight);
+
+    return () => {
+      window.visualViewport?.removeEventListener("resize", syncVisualViewportHeight);
+      window.removeEventListener("resize", syncVisualViewportHeight);
+      root.style.removeProperty("--torum-visual-height");
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!tradeMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setTradeMessage(null), 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [tradeMessage]);
+
+  useEffect(() => {
+    function handleSpyModeChange() {
+      setSpyModeEnabled(readSpyModePreference());
+    }
+
+    window.addEventListener("torum-spy-mode-changed", handleSpyModeChange);
+    window.addEventListener("storage", handleSpyModeChange);
+    return () => {
+      window.removeEventListener("torum-spy-mode-changed", handleSpyModeChange);
+      window.removeEventListener("storage", handleSpyModeChange);
+    };
+  }, []);
 
   const selectedMapping = useMemo(
     () => symbolMappings.find((mapping) => mapping.internal_symbol === selectedSymbol),
@@ -221,6 +700,14 @@ export function TradingDashboard() {
     () => (symbolMappings.length > 0 ? symbolMappings.filter((mapping) => mapping.enabled).map((mapping) => mapping.internal_symbol) : fallbackSymbols),
     [symbolMappings]
   );
+  useEffect(() => {
+    setSecondaryCharts((current) =>
+      current.map((chart, index) => ({
+        symbol: chartSymbols.includes(chart.symbol) ? chart.symbol : (chartSymbols[index + 1] ?? chartSymbols[0] ?? selectedSymbol),
+      }))
+    );
+  }, [chartSymbols, selectedSymbol]);
+
   const currentCandle = candles.length > 0 ? candles[candles.length - 1] : undefined;
   const latestBid = latestTick?.bid ?? null;
   const latestAsk = latestTick?.ask ?? null;
@@ -242,6 +729,7 @@ export function TradingDashboard() {
             : "Stream desconectado";
   const streamStatusTone = socketStatus === "connected" ? "success" : socketStatus === "reconnecting" || socketStatus === "stale" || socketStatus === "connecting" ? "warning" : "danger";
   const accountMode = mt5Status?.account_trade_mode ?? "UNKNOWN";
+  const accountCurrency = mt5Status?.account?.currency ?? "EUR";
   const mt5LastTickTime = mt5Status?.last_tick_time_by_symbol[selectedSymbol] ?? null;
   const symbolTradable = selectedMapping ? selectedMapping.tradable && !selectedMapping.analysis_only : true;
   const symbolTradingNotice = selectedMapping?.analysis_only
@@ -249,99 +737,30 @@ export function TradingDashboard() {
     : `${selectedSymbol} no esta habilitado para trading.`;
   
   
-const tradeMarkers = useMemo(() => {
-  const openPositionMarkers: TradeMarker[] = positions
-    .filter((position) => position.internal_symbol === selectedSymbol)
-    .filter(isReallyOpenPosition)
-    .map((position) => ({
-      id: `open-buy-${position.id}`,
-      time: positionOpenTime(position),
-      price: position.open_price,
-      kind: "BUY" as const,
-      label: `BUY ${position.volume.toFixed(2)}`
-    }));
-
-  const historyOpenMarkers: TradeMarker[] = tradeHistory
-    .filter((item) => item.internal_symbol === selectedSymbol)
-    .map((item) => ({
-      id: `history-buy-${item.id}`,
-      time: positionOpenTime(item),
-      price: item.open_price,
-      kind: "BUY" as const,
-      label: `BUY ${item.volume.toFixed(2)}`
-    }));
-
-  const historyCloseMarkers: TradeMarker[] = tradeHistory
-    .filter((item) => item.internal_symbol === selectedSymbol)
-    .filter((item) => item.status === "CLOSED" && Boolean(item.closed_at))
-    .flatMap((item) => {
-      const closeTime = positionCloseTime(item);
-
-      if (closeTime === null || item.close_price === null || item.close_price === undefined) {
-        return [];
-      }
-
-      return [
-        {
-          id: `history-close-${item.id}`,
-          time: closeTime,
-          price: item.close_price,
-          kind: "CLOSE" as const,
-          label: "CLOSE"
-        }
-      ];
-    });
-
-  return uniqueMarkers([
-    ...historyOpenMarkers,
-    ...openPositionMarkers,
-    ...historyCloseMarkers
-  ]);
-}, [positions, selectedSymbol, tradeHistory]);
+const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
 
 
   const tradeLines = useMemo(
-  () =>
-    positions
-      .filter((position) => position.internal_symbol === selectedSymbol)
-      .filter(isReallyOpenPosition)
-      .flatMap((position) => {
-        const lines: TradeLine[] = [
-          {
-            id: `entry-${position.id}`,
-            positionId: position.id,
-            price: position.open_price,
-            label: `BUY ${position.volume.toFixed(2)}, ${(position.profit ?? 0).toFixed(2)} EUR`,
-            tone: "entry" as const,
-            selected: selectedPositionId === position.id
-          }
-        ];
-
-        if (position.tp) {
-          const tpPercent = position.tp_percent ?? ((position.tp - position.open_price) / position.open_price) * 100;
-          const tpProfit = (position.tp - position.open_price) * position.volume;
-          const selected = selectedPositionId === position.id;
-
-          lines.push({
-            id: `tp-${position.id}`,
-            positionId: position.id,
-            price: position.tp,
-            label: `TP, +${tpProfit.toFixed(2)} EUR, ${tpPercent.toFixed(2)}%`,
-            tone: "tp" as const,
-            editable: selected,
-            muted: !selected
-          });
-        }
-
-        return lines;
-      }),
-  [positions, selectedPositionId, selectedSymbol]
+  () => tradeLinesForSymbol(positions, selectedSymbol, symbolMappings, latestBid, latestAsk, accountCurrency, selectedPositionId),
+  [accountCurrency, latestAsk, latestBid, positions, selectedPositionId, selectedSymbol, symbolMappings]
 );
 
 
  const selectedPosition = useMemo(
   () => positions.find((position) => position.id === selectedPositionId && isReallyOpenPosition(position)) ?? null,
   [positions, selectedPositionId]
+);
+ const selectedPositionValuation = useMemo(
+  () => (selectedPosition ? positionValuation(selectedPosition, symbolMappings, latestBid, latestAsk) : null),
+  [latestAsk, latestBid, selectedPosition, symbolMappings]
+);
+ const closePositionCandidate = useMemo(
+  () => positions.find((position) => position.id === closePositionId && isReallyOpenPosition(position)) ?? null,
+  [closePositionId, positions]
+);
+ const closePositionValuation = useMemo(
+  () => (closePositionCandidate ? positionValuation(closePositionCandidate, symbolMappings, latestBid, latestAsk) : null),
+  [closePositionCandidate, latestAsk, latestBid, symbolMappings]
 );
   function currentMarketKey(symbol = selectedSymbol, timeframe = selectedTimeframe) {
   return `${symbol}:${timeframe}`;
@@ -356,10 +775,45 @@ const tradeMarkers = useMemo(() => {
     );
   }
   useEffect(() => {
-    if (selectedPositionId && !positions.some((position) => position.id === selectedPositionId && position.status === "OPEN")) {
+    if (selectedPositionId && !positions.some((position) => position.id === selectedPositionId && isReallyOpenPosition(position))) {
       setSelectedPositionId(null);
     }
   }, [positions, selectedPositionId]);
+
+  useEffect(() => {
+    if (closePositionId && !positions.some((position) => position.id === closePositionId && isReallyOpenPosition(position))) {
+      setClosePositionId(null);
+    }
+  }, [closePositionId, positions]);
+
+  useEffect(() => {
+    if (selectedPositionId === null) {
+      return;
+    }
+
+    function handleOutsidePositionPointerDown(event: globalThis.PointerEvent) {
+      const target = event.target;
+
+      if (!(target instanceof Element)) {
+        return;
+      }
+
+      if (
+        target.closest(".trade-line") ||
+        target.closest(".position-bottom-sheet") ||
+        target.closest(".position-close-modal")
+      ) {
+        return;
+      }
+
+      setSelectedPositionId(null);
+    }
+
+    window.addEventListener("pointerdown", handleOutsidePositionPointerDown, true);
+    return () => {
+      window.removeEventListener("pointerdown", handleOutsidePositionPointerDown, true);
+    };
+  }, [selectedPositionId]);
 
   useEffect(() => {
     void getSymbols()
@@ -437,6 +891,7 @@ useEffect(() => {
   setDrawings([]);
   setSelectedDrawingId(null);
   setSelectedPositionId(null);
+  setClosePositionId(null);
   setTradeMessage(null);
   tickTimestampsRef.current = [];
   setTicksPerSecond(0);
@@ -668,8 +1123,8 @@ useEffect(() => {
   try {
     const [ordersResponse, openPositionsResponse, historyResponse] = await Promise.all([
       getOrders(),
-      getPositions({ status: "OPEN", symbol: selectedSymbol, limit: 100 }),
-      getTradeHistory({ symbol: selectedSymbol })
+      getPositions({ status: "OPEN", limit: 100 }),
+      getTradeHistory()
     ]);
 
     setOrders(ordersResponse);
@@ -859,7 +1314,7 @@ useEffect(() => {
       setPriceAlerts((current) => [...current, alert]);
       setAlertToolActive(false);
       setDrawingMenuOpen(false);
-      setTradeMessage(`Alerta BELOW creada en ${price.toFixed(2)}`);
+      setTradeMessage(`Alerta por debajo creada en ${price.toFixed(2)}`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo crear la alerta");
     }
@@ -894,7 +1349,7 @@ useEffect(() => {
     void refreshTradingData();
   }
 
-  async function handleClosePosition(positionId: number) {
+  function handleClosePosition(positionId: number) {
     const position = positions.find((item) => item.id === positionId);
     if (position?.status !== "OPEN") {
       setTradeMessage("La posicion ya no esta abierta");
@@ -906,19 +1361,46 @@ useEffect(() => {
       void resyncAfterReconnect();
       return;
     }
-    const pnl = position?.profit ?? 0;
-    const label = pnl >= 0 ? `beneficio ${pnl.toFixed(2)}` : `perdida ${Math.abs(pnl).toFixed(2)}`;
-    if (!window.confirm(`Cerrar posicion ${position?.internal_symbol ?? ""} con ${label}?`)) {
+    setClosePositionId(positionId);
+  }
+
+  function toggleHistoryRow(rowId: string) {
+    setExpandedHistoryRows((current) => {
+      const next = new Set(current);
+      if (next.has(rowId)) {
+        next.delete(rowId);
+      } else {
+        next.add(rowId);
+      }
+      return next;
+    });
+  }
+
+  async function confirmClosePosition() {
+    const position = closePositionCandidate;
+    if (!position || position.status !== "OPEN") {
+      setTradeMessage("La posicion ya no esta abierta");
+      setClosePositionId(null);
+      void refreshTradingData();
+      return;
+    }
+    if (position.mode !== "PAPER" && !marketConnectionHealthy) {
+      setTradeMessage(staleTradingReason);
+      void resyncAfterReconnect();
       return;
     }
     setTradeMessage(null);
+    setClosingPosition(true);
     try {
-      await closePosition(positionId);
+      await closePosition(position.id);
       setTradeMessage("Posicion cerrada");
       setSelectedPositionId(null);
+      setClosePositionId(null);
       void refreshTradingData();
     } catch (requestError) {
       setTradeMessage(requestError instanceof Error ? requestError.message : "No se pudo cerrar la posicion");
+    } finally {
+      setClosingPosition(false);
     }
   }
 
@@ -927,6 +1409,11 @@ useEffect(() => {
     if (!position || position.status !== "OPEN") {
       setTradeMessage("No se puede modificar TP: la posicion no esta abierta");
       void refreshTradingData();
+      return;
+    }
+    const tpCrossesEntry = position.side === "BUY" ? tp <= position.open_price : tp >= position.open_price;
+    if (tpCrossesEntry) {
+      handleClosePosition(positionId);
       return;
     }
     if (selectedPositionId !== positionId) {
@@ -954,7 +1441,7 @@ useEffect(() => {
       const next = !current;
       setDrawingTool("select");
       setDrawingMenuOpen(false);
-      setTradeMessage(next ? "Modo alerta activo: toca el grafico para crear una alerta BELOW" : "Modo alerta desactivado");
+      setTradeMessage(next ? "Modo alerta activo: toca el grafico para crear una alerta por debajo" : "Modo alerta desactivado");
       return next;
     });
   }
@@ -963,7 +1450,7 @@ useEffect(() => {
     setAlertToolActive(false);
     setDrawingTool(tool);
     setDrawingMenuOpen(false);
-    setTradeMessage(tool === "select" ? "Modo dibujo desactivado" : `Modo dibujo: ${tool.replace(/_/g, " ")}`);
+    setTradeMessage(tool === "select" ? "Modo dibujo desactivado" : `Modo dibujo: ${drawingToolText(tool)}`);
   }
 
   function renderMarketDiagnosticPanel() {
@@ -1054,57 +1541,261 @@ useEffect(() => {
   }
 
   function renderTradeHistoryPanel() {
+    const closedRows = [...tradeHistory]
+      .filter((item) => item.status === "CLOSED")
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.closed_at ?? left.opened_at);
+        const rightTime = Date.parse(right.closed_at ?? right.opened_at);
+        return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+      });
+    const openRows = [...positions]
+      .filter(isReallyOpenPosition)
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.opened_at);
+        const rightTime = Date.parse(right.opened_at);
+        return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+      });
+    const deposit = 10000;
+    const accountBalance = mt5Status?.account?.balance;
+    const grossProfit = typeof accountBalance === "number" && Number.isFinite(accountBalance)
+      ? accountBalance - deposit
+      : closedRows.reduce((total, item) => total + historyGrossProfit(item, symbolMappings), 0);
+    const swap = closedRows.reduce((total, item) => total + (item.swap ?? 0), 0);
+    const commission = closedRows.reduce((total, item) => total + (item.commission ?? 0), 0);
+    const balance = deposit + grossProfit;
+    const summaryRows = [
+      { label: "Beneficio:", value: grossProfit, tone: grossProfit >= 0 ? "positive" : "negative" },
+      { label: "Deposito", value: deposit, tone: "neutral" },
+      { label: "Swap:", value: swap, tone: swap >= 0 ? "positive" : "negative" },
+      { label: "Comision:", value: commission, tone: commission >= 0 ? "positive" : "negative" },
+      { label: "Balance:", value: balance, tone: "neutral" }
+    ];
+
     return (
-      <section className="panel trade-history-page">
-        <div className="panel-title">Historial de operaciones</div>
-        <div className="history-filter-strip">
-          <span>{selectedSymbol}</span>
-          <span>{tradeHistory.length} registros</span>
+      <section className="trade-history-page">
+        <div className="trade-history-tabs">
+          <button className={historyTab === "OPEN" ? "trade-history-tabs__item trade-history-tabs__item--active" : "trade-history-tabs__item"} type="button" onClick={() => setHistoryTab("OPEN")}>
+            Abiertas
+          </button>
+          <button className={historyTab === "CLOSED" ? "trade-history-tabs__item trade-history-tabs__item--active" : "trade-history-tabs__item"} type="button" onClick={() => setHistoryTab("CLOSED")}>
+            Cerradas
+          </button>
         </div>
-        <div className="trade-history-list">
-          {tradeHistory.length === 0 ? <div className="table-empty">Sin historial</div> : null}
-          {tradeHistory.map((item) => (
-            <article className="trade-history-card" key={item.id}>
-              <div>
-                <strong>{item.internal_symbol} {item.side}</strong>
-                <span>{item.status} / {item.mode}</span>
-              </div>
-              <dl>
-                <div>
-                  <dt>Apertura</dt>
-                  <dd>{new Date(item.opened_at).toLocaleString()}</dd>
-                </div>
-                <div>
-                  <dt>Cierre</dt>
-                  <dd>{item.closed_at ? new Date(item.closed_at).toLocaleString() : "--"}</dd>
-                </div>
-                <div>
-                  <dt>Volumen</dt>
-                  <dd>{item.volume.toFixed(2)}</dd>
-                </div>
-                <div>
-                  <dt>Entrada</dt>
-                  <dd>{item.open_price.toFixed(2)}</dd>
-                </div>
-                <div>
-                  <dt>Cierre</dt>
-                  <dd>{item.close_price?.toFixed(2) ?? "--"}</dd>
-                </div>
-                <div>
-                  <dt>TP</dt>
-                  <dd>{item.tp?.toFixed(2) ?? "--"}</dd>
-                </div>
-                <div>
-                  <dt>Resultado</dt>
-                  <dd className={(item.profit ?? 0) >= 0 ? "profit-positive" : "profit-negative"}>{item.profit?.toFixed(2) ?? "--"}</dd>
-                </div>
-                <div>
-                  <dt>Ticket</dt>
-                  <dd>{item.mt5_position_ticket ?? "--"}</dd>
-                </div>
-              </dl>
-            </article>
+        <dl className="trade-history-summary">
+          {summaryRows.map((row) => (
+            <div className="trade-history-summary__row" key={row.label}>
+              <dt>{row.label}</dt>
+              <dd className={row.tone === "positive" ? "history-money history-money--positive" : row.tone === "negative" ? "history-money history-money--negative" : "history-money"}>
+                {row.value.toFixed(2)}
+              </dd>
+            </div>
           ))}
+        </dl>
+        <div className="trade-history-list">
+          {historyTab === "OPEN" && openRows.length === 0 ? <div className="table-empty">Sin operaciones abiertas</div> : null}
+          {historyTab === "OPEN"
+            ? openRows.map((item) => {
+                const rowId = `open-${item.id}`;
+                const isExpanded = expandedHistoryRows.has(rowId);
+                const liveBid = item.internal_symbol === selectedSymbol ? latestBid : null;
+                const liveAsk = item.internal_symbol === selectedSymbol ? latestAsk : null;
+                const valuation = positionValuation(item, symbolMappings, liveBid, liveAsk);
+                const profit = valuation.profit;
+                const isProfit = profit >= 0;
+                return (
+                  <article className={isExpanded ? "trade-history-row trade-history-row--open trade-history-row--expanded" : "trade-history-row trade-history-row--open"} key={rowId}>
+                    <button className="trade-history-row__button" type="button" onClick={() => toggleHistoryRow(rowId)}>
+                      <div>
+                        <strong>
+                          {item.internal_symbol}, <span>{item.side.toLowerCase()} {item.volume.toFixed(2)}</span>
+                        </strong>
+                        <p>{item.open_price.toFixed(2)} -&gt; {valuation.closePrice?.toFixed(2) ?? item.current_price?.toFixed(2) ?? "--"}</p>
+                      </div>
+                      <div>
+                        <time>{formatHistoryDate(item.opened_at)}</time>
+                        <strong className={isProfit ? "history-money history-money--positive" : "history-money history-money--negative"}>
+                          {profit.toFixed(2)}
+                        </strong>
+                      </div>
+                    </button>
+                    <button
+                      aria-label="Cerrar posicion"
+                      className="trade-history-row__close"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleClosePosition(item.id);
+                      }}
+                    >
+                      <X size={16} />
+                    </button>
+                    {isExpanded ? (
+                      <dl className="trade-history-row__details">
+                        <div>
+                          <dt>#{item.mt5_position_ticket ?? item.id}</dt>
+                          <dd>Apertura: {formatHistoryDate(item.opened_at)}</dd>
+                          <dd>Modo: {item.mode}</dd>
+                          <dd>Lado: {item.side}</dd>
+                        </div>
+                        <div>
+                          <dt>Precio actual: {valuation.closePrice?.toFixed(2) ?? item.current_price?.toFixed(2) ?? "--"}</dt>
+                          <dd>S / L: {item.sl?.toFixed(2) ?? "--"}</dd>
+                          <dd>T / P: {item.tp?.toFixed(2) ?? "--"}</dd>
+                          <dd>Swap: {(item.swap ?? 0).toFixed(2)}</dd>
+                          <dd>Comision: {(item.commission ?? 0).toFixed(2)}</dd>
+                        </div>
+                      </dl>
+                    ) : null}
+                  </article>
+                );
+              })
+            : null}
+          {historyTab === "CLOSED" && closedRows.length === 0 ? <div className="table-empty">Sin operaciones cerradas</div> : null}
+          {historyTab === "CLOSED"
+            ? closedRows.map((item) => {
+                const rowId = `closed-${item.id}`;
+                const isExpanded = expandedHistoryRows.has(rowId);
+                const profit = historyGrossProfit(item, symbolMappings);
+                const isProfit = profit >= 0;
+                return (
+                  <article className={isExpanded ? "trade-history-row trade-history-row--expanded" : "trade-history-row"} key={rowId}>
+                    <button className="trade-history-row__button" type="button" onClick={() => toggleHistoryRow(rowId)}>
+                      <div>
+                        <strong>
+                          {item.internal_symbol}, <span>{item.side.toLowerCase()} {item.volume.toFixed(2)}</span>
+                        </strong>
+                        <p>{item.open_price.toFixed(2)} -&gt; {item.close_price?.toFixed(2) ?? "--"}</p>
+                      </div>
+                      <div>
+                        <time>{formatHistoryDate(item.closed_at ?? item.opened_at)}</time>
+                        <strong className={isProfit ? "history-money history-money--positive" : "history-money history-money--negative"}>
+                          {profit.toFixed(2)}
+                        </strong>
+                      </div>
+                    </button>
+                    {isExpanded ? (
+                      <dl className="trade-history-row__details">
+                        <div>
+                          <dt>#{item.mt5_position_ticket ?? item.position_id}</dt>
+                          <dd>Apertura: {formatHistoryDate(item.opened_at)}</dd>
+                          <dd>Cierre: {formatHistoryDate(item.closed_at)}</dd>
+                          <dd>Modo: {item.mode}</dd>
+                          <dd>Estado: {item.status}</dd>
+                        </div>
+                        <div>
+                          <dt>Deal: {item.closing_deal_ticket ?? "--"}</dt>
+                          <dd>Entrada: {item.open_price.toFixed(2)}</dd>
+                          <dd>Cierre: {item.close_price?.toFixed(2) ?? "--"}</dd>
+                          <dd>T / P: {item.tp?.toFixed(2) ?? "--"}</dd>
+                          <dd>Swap: {(item.swap ?? 0).toFixed(2)}</dd>
+                          <dd>Comision: {(item.commission ?? 0).toFixed(2)}</dd>
+                        </div>
+                      </dl>
+                    ) : null}
+                  </article>
+                );
+              })
+            : null}
+        </div>
+      </section>
+    );
+  }
+
+  function renderTradeHistoryPanelOld() {
+    const historyRows = [...tradeHistory].sort((left, right) => {
+      const leftTime = Date.parse(left.closed_at ?? left.opened_at);
+      const rightTime = Date.parse(right.closed_at ?? right.opened_at);
+      return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+    });
+    const grossProfit = historyRows.reduce((total, item) => total + historyGrossProfit(item, symbolMappings), 0);
+    const swap = historyRows.reduce((total, item) => total + (item.swap ?? 0), 0);
+    const commission = historyRows.reduce((total, item) => total + (item.commission ?? 0), 0);
+    const balance = mt5Status?.account?.balance ?? grossProfit + swap + commission;
+    const deposit = mt5Status?.account?.balance !== undefined ? balance - grossProfit - swap - commission : 0;
+    const summaryRows = [
+      { label: "Beneficio:", value: grossProfit, tone: grossProfit >= 0 ? "positive" : "negative" },
+      { label: "Deposito", value: deposit, tone: "neutral" },
+      { label: "Swap:", value: swap, tone: swap >= 0 ? "positive" : "negative" },
+      { label: "Comision:", value: commission, tone: commission >= 0 ? "positive" : "negative" },
+      { label: "Balance:", value: balance, tone: "neutral" }
+    ];
+
+    return (
+      <section className="trade-history-page">
+        <div className="trade-history-header">
+          <button aria-label="Menu historial" className="mobile-icon-button" type="button">
+            <Menu size={26} />
+            <span>☰</span>
+          </button>
+          <div>
+            <span>Historial</span>
+            <strong>Todos los simbolos</strong>
+          </div>
+          <div className="trade-history-header__actions" aria-hidden="true">
+            <span><RefreshCw size={24} /></span>
+            <span><ArrowDownUp size={24} /></span>
+            <span><CalendarDays size={24} /><strong>3</strong></span>
+          </div>
+          <div className="trade-history-header__actions" aria-hidden="true">
+            <span>↻</span>
+            <span>↓↑</span>
+            <span>3</span>
+          </div>
+        </div>
+        <div className="trade-history-tabs">
+          <span className="trade-history-tabs__item trade-history-tabs__item--active">POSICIONES</span>
+          <span className="trade-history-tabs__item">ORDENES</span>
+          <span className="trade-history-tabs__item">TRANSACCIONES</span>
+        </div>
+        <dl className="trade-history-summary">
+          {summaryRows.map((row) => (
+            <div className="trade-history-summary__row" key={row.label}>
+              <dt>{row.label}</dt>
+              <dd className={row.tone === "positive" ? "history-money history-money--positive" : row.tone === "negative" ? "history-money history-money--negative" : "history-money"}>
+                {row.value.toFixed(2)}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        <div className="trade-history-list">
+          {historyRows.length === 0 ? <div className="table-empty">Sin historial</div> : null}
+          {historyRows.map((item, index) => {
+            const profit = historyGrossProfit(item, symbolMappings);
+            const isProfit = profit >= 0;
+            const priceText = `${item.open_price.toFixed(2)} → ${item.close_price?.toFixed(2) ?? "--"}`;
+            return (
+              <article className="trade-history-row" key={item.id}>
+                <div className="trade-history-row__main">
+                  <div>
+                    <strong>
+                      {item.internal_symbol}, <span>{item.side.toLowerCase()} {item.volume.toFixed(2)}</span>
+                    </strong>
+                    <p>{item.open_price.toFixed(2)} -&gt; {item.close_price?.toFixed(2) ?? "--"}</p>
+                  </div>
+                  <div>
+                    <time>{formatHistoryDate(item.closed_at ?? item.opened_at)}</time>
+                    <strong className={isProfit ? "history-money history-money--positive" : "history-money history-money--negative"}>
+                      {profit.toFixed(2)}
+                    </strong>
+                  </div>
+                </div>
+                {index < 2 ? (
+                  <dl className="trade-history-row__details">
+                    <div>
+                      <dt>#{item.mt5_position_ticket ?? item.position_id}</dt>
+                      <dd>S / L: --</dd>
+                      <dd>T / P: {item.tp?.toFixed(2) ?? "--"}</dd>
+                    </div>
+                    <div>
+                      <dt>Apertura: {formatHistoryDate(item.opened_at)}</dt>
+                      <dd>Swap: {(item.swap ?? 0).toFixed(2)}</dd>
+                      <dd>Comision: {(item.commission ?? 0).toFixed(2)}</dd>
+                    </div>
+                  </dl>
+                ) : null}
+              </article>
+            );
+          })}
         </div>
       </section>
     );
@@ -1114,15 +1805,15 @@ useEffect(() => {
     if (!selectedPosition || selectedPosition.status !== "OPEN") {
       return null;
     }
-    const profit = selectedPosition.profit ?? 0;
-    const closeLabel = profit >= 0 ? `CERRAR CON BENEFICIO ${profit.toFixed(2)}` : `CERRAR CON PERDIDA ${Math.abs(profit).toFixed(2)}`;
+    const profit = selectedPositionValuation?.profit ?? selectedPosition.profit ?? 0;
+    const closeLabel = profit >= 0 ? `CERRAR CON BENEFICIO ${profit.toFixed(2)} ${accountCurrency}` : `CERRAR CON PERDIDA ${Math.abs(profit).toFixed(2)} ${accountCurrency}`;
     const tpPercent = selectedPosition.tp_percent ?? (selectedPosition.tp ? ((selectedPosition.tp - selectedPosition.open_price) / selectedPosition.open_price) * 100 : null);
     return (
       <section className="position-bottom-sheet">
         <div className="position-bottom-sheet__header">
           <div>
-            <strong>{selectedPosition.internal_symbol} BUY {selectedPosition.volume.toFixed(2)}</strong>
-            <span>Entrada {selectedPosition.open_price.toFixed(2)} / TP {selectedPosition.tp?.toFixed(2) ?? "--"} {tpPercent !== null ? `(${tpPercent.toFixed(2)}%)` : ""}</span>
+            <strong>{selectedPosition.internal_symbol} {selectedPosition.side} {selectedPosition.volume.toFixed(2)}</strong>
+            <span>Entrada {selectedPosition.open_price.toFixed(2)} / Cierre {selectedPositionValuation?.closePrice?.toFixed(2) ?? "--"} / TP {selectedPosition.tp?.toFixed(2) ?? "--"} {tpPercent !== null ? `(${tpPercent.toFixed(2)}%)` : ""}</span>
           </div>
           <button className="mobile-icon-button" type="button" onClick={() => setSelectedPositionId(null)}>x</button>
         </div>
@@ -1136,21 +1827,106 @@ useEffect(() => {
       </section>
     );
   }
+
+  function renderClosePositionModal() {
+    if (!closePositionCandidate || closePositionCandidate.status !== "OPEN") {
+      return null;
+    }
+
+    const profit = closePositionValuation?.profit ?? closePositionCandidate.profit ?? 0;
+    const tpPercent = closePositionCandidate.tp_percent ?? (closePositionCandidate.tp ? ((closePositionCandidate.tp - closePositionCandidate.open_price) / closePositionCandidate.open_price) * 100 : null);
+    const resultLabel = profit >= 0 ? `Beneficio ${profit.toFixed(2)} ${accountCurrency}` : `Perdida ${Math.abs(profit).toFixed(2)} ${accountCurrency}`;
+
+    return (
+      <div className="modal-backdrop" role="presentation">
+        <div className="confirm-modal buy-confirm-modal position-close-modal" role="dialog" aria-modal="true" aria-label="Confirmar cierre">
+          <div className="position-close-modal__title">
+            <div className="modal-title-row">
+              <ShieldAlert size={20} />
+              <h2>Confirmar cierre</h2>
+            </div>
+            <button aria-label="Cancelar cierre" className="mobile-icon-button" type="button" onClick={() => setClosePositionId(null)}>
+              <X size={18} />
+            </button>
+          </div>
+          <dl className="confirm-summary">
+            <div>
+              <dt>Simbolo</dt>
+              <dd>{closePositionCandidate.internal_symbol}</dd>
+            </div>
+            <div>
+              <dt>Lado</dt>
+              <dd>{closePositionCandidate.side}</dd>
+            </div>
+            <div>
+              <dt>Lotaje</dt>
+              <dd>{closePositionCandidate.volume.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>Entrada</dt>
+              <dd>{closePositionCandidate.open_price.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>Cierre aprox.</dt>
+              <dd>{closePositionValuation?.closePrice?.toFixed(2) ?? "--"}</dd>
+            </div>
+            <div>
+              <dt>TP</dt>
+              <dd>{closePositionCandidate.tp?.toFixed(2) ?? "--"} {tpPercent !== null ? `(${tpPercent.toFixed(2)}%)` : ""}</dd>
+            </div>
+            <div>
+              <dt>Resultado aprox.</dt>
+              <dd className={profit >= 0 ? "profit-positive" : "profit-negative"}>{resultLabel}</dd>
+            </div>
+          </dl>
+          <p>El backend recalcula precio y resultado antes de cerrar.</p>
+          <div className="modal-actions">
+            <button className="toolbar-action" type="button" onClick={() => setClosePositionId(null)}>
+              Cancelar
+            </button>
+            <button
+              className={profit >= 0 ? "position-close-button position-close-button--profit" : "position-close-button position-close-button--loss"}
+              disabled={closingPosition}
+              type="button"
+              onClick={() => void confirmClosePosition()}
+            >
+              {closingPosition ? "Cerrando" : "Confirmar cierre"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
   function handleHardResetChartView() {
   setChartAutoFollowEnabled(true);
   setChartRecenterToken((current) => current + 1);
   setChartHardResetToken((current) => current + 1);
 }
+  function handleChartSplitChange(count: ChartSplitCount, orientation: ChartSplitOrientation) {
+    setChartSplitCount(count);
+    setChartSplitOrientation(orientation);
+    setDrawingMenuOpen(false);
+  }
+
+  function updateSecondaryChart(index: number, patch: Partial<SplitChartSelection>) {
+    setSecondaryCharts((current) => current.map((chart, chartIndex) => (chartIndex === index ? { ...chart, ...patch } : chart)));
+  }
+
   return (
-    <section className={`trading-grid trading-grid--view-${activeMobileView}`}>
+    <section
+      className={`trading-grid trading-grid--view-${activeMobileView} trading-grid--split-${chartSplitOrientation}${spyModeEnabled ? " trading-grid--spy" : ""}`}
+    >
       <MobileTopBar
         alertToolActive={alertToolActive}
+        chartSplitCount={chartSplitCount}
+        chartSplitOrientation={chartSplitOrientation}
         chartSymbols={chartSymbols}
         connected={streamConnected}
         connectionStatus={socketStatus}
         drawingTool={drawingTool}
         drawingMenuOpen={drawingMenuOpen}
         onAlertClick={toggleAlertTool}
+        onChartSplitChange={handleChartSplitChange}
         onDrawingMenuClick={() => setDrawingMenuOpen((current) => !current)}
         onMenuClick={() => setDrawerOpen(true)}
         onSymbolChange={setSelectedSymbol}
@@ -1169,19 +1945,18 @@ useEffect(() => {
         open={drawerOpen}
       />
       <div className={drawingMenuOpen ? "mobile-drawing-menu mobile-drawing-menu--open" : "mobile-drawing-menu"}>
-        {(["horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "manual_zone"] as DrawingTool[]).map((tool) => (
+        {mobileDrawingTools.map((tool) => (
           <button
             className={drawingTool === tool ? "mobile-drawing-menu__item mobile-drawing-menu__item--active" : "mobile-drawing-menu__item"}
+            aria-label={drawingToolText(tool)}
             key={tool}
+            title={drawingToolText(tool)}
             type="button"
             onClick={() => activateDrawingTool(tool)}
           >
-            {tool.replace(/_/g, " ")}
+            {drawingToolIcon(tool)}
           </button>
         ))}
-        <button className="mobile-drawing-menu__item" type="button" onClick={() => activateDrawingTool("select")}>
-          seleccionar
-        </button>
       </div>
 
       <div className="mobile-view-panel">
@@ -1243,7 +2018,7 @@ useEffect(() => {
           }}
         >
           <Bell size={18} />
-          Alerta BELOW
+          Alerta por debajo
         </button>
 
         <DrawingToolbar
@@ -1269,23 +2044,37 @@ useEffect(() => {
         tradable={symbolTradable}
       />
 
-      <section className="chart-panel" aria-label="Grafico">
-        <div className="chart-panel__header">
-          <div>
-            <p className="eyebrow">{selectedTimeframe}</p>
-            <h2>{selectedMapping?.display_name ?? selectedSymbol}</h2>
+      <section className={chartSplitCount > 1 ? "chart-panel chart-panel--split" : "chart-panel"} aria-label="Grafico">
+        {chartSplitCount === 1 ? (
+          <div className="chart-panel__header">
+            <div>
+              <h2>{selectedSymbol}</h2>
+            </div>
+            <div className="price-cluster">
+              <span className="price-value">{typeof lastPrice === "number" ? `BID ${lastPrice.toFixed(2)}` : "BID --"}</span>
+              <StatusPill
+                label={streamStatusLabel}
+                tone={streamStatusTone}
+              />
+              <StatusPill label={sourceLabel} tone={sourceLabel === "MT5" ? "success" : "neutral"} />
+            </div>
           </div>
-          <div className="price-cluster">
-            <span className="price-value">{typeof lastPrice === "number" ? `BID ${lastPrice.toFixed(2)}` : "BID --"}</span>
-            <StatusPill
-              label={streamStatusLabel}
-              tone={streamStatusTone}
-            />
-            <StatusPill label={sourceLabel} tone={sourceLabel === "MT5" ? "success" : "neutral"} />
-          </div>
-        </div>
+        ) : null}
 
-        <div className="chart-shell">
+        <div className={`chart-split-grid chart-split-grid--${chartSplitCount} chart-split-grid--${chartSplitCount}-${chartSplitOrientation}`}>
+          <div className="chart-split-pane chart-split-pane--primary">
+            {chartSplitCount > 1 ? (
+              <div className="chart-split-pane__controls" onPointerDown={(event) => event.stopPropagation()}>
+                <select aria-label="Simbolo grafico principal" value={selectedSymbol} onChange={(event) => setSelectedSymbol(event.target.value)}>
+                  {chartSymbols.map((symbol) => (
+                    <option key={symbol} value={symbol}>
+                      {symbol}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            <div className="chart-shell">
           <MarketChart
             candles={candles}
             loadingCandles={loadingCandles}
@@ -1333,6 +2122,28 @@ useEffect(() => {
               <span>{loadingCandles ? "Cargando velas" : "Inicia el mock market para generar ticks"}</span>
             </div>
           ) : null}
+            </div>
+          </div>
+          {secondaryCharts.slice(0, chartSplitCount - 1).map((chart, index) => (
+            <SplitMarketChart
+              accountCurrency={accountCurrency}
+              alertToolActive={alertToolActive}
+              chartSymbols={chartSymbols}
+              drawingTool={drawingTool}
+              drawingsVisible={drawingsVisible}
+              key={index}
+              onSelectPosition={setSelectedPositionId}
+              onSymbolChange={(symbol) => updateSecondaryChart(index, { symbol })}
+              onUpdatePositionTp={(positionId, tp) => void handleModifyPositionTp(positionId, tp)}
+              positions={positions}
+              selectedPositionId={selectedPositionId}
+              showAskLine={tradingSettings?.show_ask_line ?? true}
+              showBidLine={tradingSettings?.show_bid_line ?? true}
+              symbol={chart.symbol}
+              symbolMappings={symbolMappings}
+              timeframe={selectedTimeframe}
+            />
+          ))}
         </div>
       </section>
 
@@ -1441,6 +2252,7 @@ useEffect(() => {
       <OrdersPositionsPanel orders={orders} positions={positions} onClosePosition={(id) => void handleClosePosition(id)} />
 
       {renderPositionBottomSheet()}
+      {renderClosePositionModal()}
 
       <IndicatorsPanel
         indicatorLines={indicatorLines}
@@ -1463,7 +2275,7 @@ useEffect(() => {
 
       {tradeMessage ? (
         <section className="panel trade-message">
-          <div>{tradeMessage}</div>
+          <div>{translateTradeMessage(tradeMessage)}</div>
         </section>
       ) : null}
     </section>

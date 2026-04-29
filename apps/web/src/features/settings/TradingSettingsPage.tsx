@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bell, Save } from "lucide-react";
+import { Bell, Save, ScanEye } from "lucide-react";
 
 import {
   type MT5OrderExecutionSettings,
@@ -17,12 +17,23 @@ import {
   type PushStatus
 } from "../alerts/pushNotifications";
 
+const spyModeStorageKey = "torum.spyMode";
+
+function readSpyModePreference(): boolean {
+  try {
+    return window.localStorage.getItem(spyModeStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function TradingSettingsPage() {
   const [settings, setSettings] = useState<TradingSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [pushStatus, setPushStatus] = useState<PushStatus>("permission-required");
   const [mt5Execution, setMt5Execution] = useState<MT5OrderExecutionSettings | null>(null);
+  const [spyModeEnabled, setSpyModeEnabled] = useState(readSpyModePreference);
 
   useEffect(() => {
     void getTradingSettings().then(setSettings).catch((error: unknown) => {
@@ -34,6 +45,16 @@ export function TradingSettingsPage() {
 
   function update<K extends keyof TradingSettings>(key: K, value: TradingSettings[K]) {
     setSettings((current) => (current ? { ...current, [key]: value } : current));
+  }
+
+  function updateSpyMode(enabled: boolean) {
+    setSpyModeEnabled(enabled);
+    try {
+      window.localStorage.setItem(spyModeStorageKey, enabled ? "1" : "0");
+      window.dispatchEvent(new Event("torum-spy-mode-changed"));
+    } catch {
+      setMessage("No se pudo guardar modo espia");
+    }
   }
 
   async function activatePush() {
@@ -188,6 +209,11 @@ export function TradingSettingsPage() {
             onChange={(event) => update("mt5_order_execution_enabled", event.target.checked)}
           />
           Habilitar ejecucion MT5
+        </label>
+        <label className="toggle-line">
+          <input checked={spyModeEnabled} type="checkbox" onChange={(event) => updateSpyMode(event.target.checked)} />
+          <ScanEye size={16} />
+          Modo espia
         </label>
       </div>
 

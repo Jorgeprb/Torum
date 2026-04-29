@@ -13,7 +13,7 @@ export function PriceAlertPanel({ activeAlerts, history, onCancel }: PriceAlertP
     <section className="panel price-alert-panel">
       <div className="panel-title">
         <Bell size={18} />
-        Alertas BELOW
+        Alertas por debajo
       </div>
       <div className="alert-list">
         {activeAlerts.length === 0 ? <div className="table-empty">No hay alertas activas</div> : null}

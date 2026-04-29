@@ -90,15 +90,15 @@ def _load_closed_deals(mt5: Any, lookback_days: int) -> list[dict[str, Any]]:
         logger.warning("MT5 history_deals_get failed: %s", mt5.last_error() if hasattr(mt5, "last_error") else None)
         return []
 
-    closed_entries = {
-        getattr(mt5, "DEAL_ENTRY_OUT", 1),
-        getattr(mt5, "DEAL_ENTRY_INOUT", 2),
-        getattr(mt5, "DEAL_ENTRY_OUT_BY", 3),
+    trade_types = {
+        getattr(mt5, "DEAL_TYPE_BUY", 0),
+        getattr(mt5, "DEAL_TYPE_SELL", 1),
     }
     return [
         _deal_to_payload(deal)
         for deal in deals
-        if getattr(deal, "entry", None) in closed_entries
+        if getattr(deal, "position_id", None)
+        and (getattr(deal, "type", None) is None or getattr(deal, "type", None) in trade_types)
     ]
 
 
@@ -115,6 +115,9 @@ def _deal_to_payload(deal: Any) -> dict[str, Any]:
         "time": raw.get("time"),
         "time_msc": raw.get("time_msc"),
         "price": raw.get("price"),
+        "volume": raw.get("volume"),
+        "type": raw.get("type"),
+        "fee": raw.get("fee"),
         "profit": raw.get("profit"),
         "swap": raw.get("swap"),
         "commission": raw.get("commission"),

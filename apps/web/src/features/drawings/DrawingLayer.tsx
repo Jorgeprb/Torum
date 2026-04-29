@@ -1,4 +1,4 @@
-import type { PointerEvent } from "react";
+import { useRef, type PointerEvent } from "react";
 
 import type { DrawingCoordinate, DrawingDragAction, DrawingShape } from "./drawingTypes";
 
@@ -11,11 +11,32 @@ interface DrawingLayerProps {
 }
 
 export function DrawingLayer({ shapes, pendingPoint, selectedDrawingId, onSelect, onDragStart }: DrawingLayerProps) {
+  const suppressNextClearRef = useRef(false);
+
   function start(event: PointerEvent<SVGElement>, shape: DrawingShape, action: DrawingDragAction = "move") {
     event.preventDefault();
     event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    suppressNextClearRef.current = true;
+    window.addEventListener(
+      "pointerup",
+      () => {
+        window.setTimeout(() => {
+          suppressNextClearRef.current = false;
+        }, 0);
+      },
+      { once: true }
+    );
     onSelect(shape.id);
     onDragStart?.(event, shape, action);
+  }
+
+  function clearSelection() {
+    if (suppressNextClearRef.current) {
+      return;
+    }
+
+    onSelect(null);
   }
 
   function handles(shape: DrawingShape) {
@@ -47,20 +68,21 @@ export function DrawingLayer({ shapes, pendingPoint, selectedDrawingId, onSelect
         cx={item.x}
         cy={item.y}
         key={`${shape.id}-${item.action}`}
-        r={5}
+        r={8}
         onPointerDown={(event) => start(event, shape, item.action)}
       />
     ));
   }
 
   return (
-    <svg className="drawing-layer" onClick={() => onSelect(null)}>
+    <svg className="drawing-layer" onClick={clearSelection}>
       {shapes.map((shape) => {
         const selected = selectedDrawingId === shape.id;
         const className = selected ? "drawing-shape drawing-shape--selected" : "drawing-shape";
         if (shape.kind === "horizontal_line") {
           return (
             <g key={shape.id} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => start(event, shape, "move")}>
+              <line className="drawing-hit-area" x1={shape.x1} x2={shape.x2} y1={shape.y} y2={shape.y} stroke="rgba(0,0,0,0)" strokeWidth={Math.max(16, shape.lineWidth + 12)} />
               <line className={className} x1={shape.x1} x2={shape.x2} y1={shape.y} y2={shape.y} stroke={shape.color} strokeWidth={shape.lineWidth} />
               {shape.label ? <text className="drawing-label" x={shape.x2 - 120} y={shape.y - 6}>{shape.label}</text> : null}
               {handles(shape)}
@@ -70,6 +92,7 @@ export function DrawingLayer({ shapes, pendingPoint, selectedDrawingId, onSelect
         if (shape.kind === "vertical_line") {
           return (
             <g key={shape.id} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => start(event, shape, "move")}>
+              <line className="drawing-hit-area" x1={shape.x} x2={shape.x} y1={shape.y1} y2={shape.y2} stroke="rgba(0,0,0,0)" strokeWidth={Math.max(16, shape.lineWidth + 12)} />
               <line className={className} x1={shape.x} x2={shape.x} y1={shape.y1} y2={shape.y2} stroke={shape.color} strokeWidth={shape.lineWidth} />
               {shape.label ? <text className="drawing-label" x={shape.x + 6} y={18}>{shape.label}</text> : null}
               {handles(shape)}
@@ -79,6 +102,7 @@ export function DrawingLayer({ shapes, pendingPoint, selectedDrawingId, onSelect
         if (shape.kind === "trend_line") {
           return (
             <g key={shape.id} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => start(event, shape, "move")}>
+              <line className="drawing-hit-area" x1={shape.x1} x2={shape.x2} y1={shape.y1} y2={shape.y2} stroke="rgba(0,0,0,0)" strokeWidth={Math.max(16, shape.lineWidth + 12)} />
               <line className={className} x1={shape.x1} x2={shape.x2} y1={shape.y1} y2={shape.y2} stroke={shape.color} strokeWidth={shape.lineWidth} />
               {shape.label ? <text className="drawing-label" x={shape.x2 + 6} y={shape.y2 - 6}>{shape.label}</text> : null}
               {handles(shape)}
@@ -88,6 +112,16 @@ export function DrawingLayer({ shapes, pendingPoint, selectedDrawingId, onSelect
         if (shape.kind === "rectangle" || shape.kind === "manual_zone") {
           return (
             <g key={shape.id} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => start(event, shape, "move")}>
+              <rect
+                className="drawing-hit-area"
+                fill="transparent"
+                height={shape.height}
+                stroke="rgba(0,0,0,0)"
+                strokeWidth={16}
+                width={shape.width}
+                x={shape.x}
+                y={shape.y}
+              />
               <rect
                 className={className}
                 fill={shape.backgroundColor}
@@ -105,6 +139,9 @@ export function DrawingLayer({ shapes, pendingPoint, selectedDrawingId, onSelect
         }
         return (
           <g key={shape.id} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => start(event, shape, "move")}>
+            <text className="drawing-hit-area" fill="transparent" stroke="rgba(0,0,0,0)" strokeWidth={18} x={shape.x} y={shape.y}>
+              {shape.text}
+            </text>
             <text className={className} fill={shape.textColor} x={shape.x} y={shape.y}>
               {shape.text}
             </text>

@@ -4,18 +4,24 @@ interface LotSizeControlProps {
   baseLot: number;
   effectiveLot: number;
   multiplier: number;
+  lotInputValue: string;
   disabled?: boolean;
   onIncrement: () => void;
   onDecrement: () => void;
+  onLotInputChange: (value: string) => void;
+  onLotInputBlur: () => void;
 }
 
 export function LotSizeControl({
   baseLot,
   disabled = false,
   effectiveLot,
+  lotInputValue,
   multiplier,
   onDecrement,
-  onIncrement
+  onIncrement,
+  onLotInputBlur,
+  onLotInputChange
 }: LotSizeControlProps) {
   return (
     <div className="lot-size-control" aria-label="Lotaje">
@@ -23,7 +29,17 @@ export function LotSizeControl({
         <Minus size={18} />
       </button>
       <div className="lot-size-control__value">
-        <strong>{effectiveLot.toFixed(2)}</strong>
+        <input
+          aria-label="Lotaje"
+          disabled={disabled}
+          inputMode="decimal"
+          placeholder={effectiveLot.toFixed(2)}
+          type="text"
+          value={lotInputValue}
+          onBlur={onLotInputBlur}
+          onChange={(event) => onLotInputChange(event.target.value)}
+          onFocus={(event) => event.currentTarget.select()}
+        />
         <span>base {baseLot.toFixed(2)} x{multiplier}</span>
       </div>
       <button aria-label="Aumentar lotaje" disabled={disabled} type="button" onClick={onIncrement}>

@@ -256,6 +256,11 @@ class PositionService:
 
                 updated += 1
 
+        updated += self._refresh_closed_mt5_position_deals(
+            close_deals_by_position,
+            account_login=account_login,
+            account_server=account_server,
+        )
         closed = self._close_missing_mt5_positions(
             seen_tickets,
             account_login=account_login,
@@ -285,8 +290,26 @@ class PositionService:
         if current_price is None:
             return
         position.current_price = current_price
-        direction = 1 if position.side == "BUY" else -1
-        position.profit = (current_price - position.open_price) * position.volume * direction
+        contract_size = self._contract_size(position)
+        position.profit = _calculate_position_profit(
+            open_price=position.open_price,
+            current_price=current_price,
+            volume=position.volume,
+            side=position.side,
+            contract_size=contract_size,
+        )
+
+    def _contract_size(self, position: Position) -> float:
+        mapping = self.db.scalar(
+            select(SymbolMapping)
+            .where(SymbolMapping.internal_symbol == position.internal_symbol)
+            .limit(1)
+        )
+
+        if mapping is None or mapping.contract_size <= 0:
+            return 1.0
+
+        return mapping.contract_size
     
     def _is_really_open_position(self, position: Position) -> bool:
         if position.status != "OPEN":
@@ -302,6 +325,36 @@ class PositionService:
             return False
 
         return True
+
+    def _refresh_closed_mt5_position_deals(
+        self,
+        close_deals_by_position: dict[int, dict[str, Any]],
+        *,
+        account_login: int | None,
+        account_server: str | None,
+    ) -> int:
+        if not close_deals_by_position:
+            return 0
+
+        stmt = select(Position).where(
+            Position.status == "CLOSED",
+            Position.mt5_position_ticket.in_(list(close_deals_by_position.keys())),
+        )
+        if account_login is not None:
+            stmt = stmt.where(or_(Position.account_login == account_login, Position.account_login.is_(None)))
+        if account_server:
+            stmt = stmt.where(or_(Position.account_server == account_server, Position.account_server.is_(None)))
+
+        count = 0
+        for position in self.db.scalars(stmt):
+            if position.mt5_position_ticket is None:
+                continue
+            close_deal = close_deals_by_position.get(position.mt5_position_ticket)
+            if close_deal is None:
+                continue
+            _apply_close_deal(position, close_deal)
+            count += 1
+        return count
     
     def _close_missing_mt5_positions(
         self,
@@ -351,6 +404,18 @@ def _float_or_none(value: object) -> float | None:
         return None
 
 
+def _calculate_position_profit(
+    *,
+    open_price: float,
+    current_price: float,
+    volume: float,
+    side: str,
+    contract_size: float,
+) -> float:
+    direction = 1 if side == "BUY" else -1
+    return (current_price - open_price) * volume * contract_size * direction
+
+
 def _int_or_none(value: object) -> int | None:
     try:
         return int(value)
@@ -375,15 +440,64 @@ def _datetime_from_mt5_milliseconds(value: object) -> datetime | None:
 
 
 def _latest_close_deals_by_position(deals: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    latest: dict[int, dict[str, Any]] = {}
+    grouped: dict[int, list[dict[str, Any]]] = {}
     for deal in deals:
         position_id = _int_or_none(deal.get("position_id") or deal.get("position"))
         if position_id is None:
             continue
-        current = latest.get(position_id)
-        if current is None or _deal_sort_key(deal) >= _deal_sort_key(current):
-            latest[position_id] = deal
-    return latest
+        grouped.setdefault(position_id, []).append(deal)
+    return {
+        position_id: _aggregate_position_deals(position_deals)
+        for position_id, position_deals in grouped.items()
+        if any(_is_close_deal(deal) for deal in position_deals)
+    }
+
+
+def _is_close_deal(deal: dict[str, Any]) -> bool:
+    entry = _int_or_none(deal.get("entry"))
+    return entry in {1, 2, 3} or entry is None
+
+
+def _aggregate_position_deals(position_deals: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(position_deals, key=_deal_sort_key)
+    close_deals = [deal for deal in ordered if _is_close_deal(deal)]
+    if len(ordered) == 1:
+        return ordered[0]
+
+    last_deal = close_deals[-1] if close_deals else ordered[-1]
+    close_price = _weighted_price(close_deals) or _float_or_none(last_deal.get("price"))
+    return {
+        **last_deal,
+        "price": close_price,
+        "profit": sum(_float_or_none(deal.get("profit")) or 0.0 for deal in ordered),
+        "swap": sum(_float_or_none(deal.get("swap")) or 0.0 for deal in ordered),
+        "commission": sum(_float_or_none(deal.get("commission")) or 0.0 for deal in ordered),
+        "fee": sum(_float_or_none(deal.get("fee")) or 0.0 for deal in ordered),
+        "raw": {
+            "deals": [deal.get("raw") if isinstance(deal.get("raw"), dict) else deal for deal in ordered],
+            "deals_count": len(ordered),
+            "close_tickets": [
+                _int_or_none(deal.get("ticket") or deal.get("deal"))
+                for deal in close_deals
+                if _int_or_none(deal.get("ticket") or deal.get("deal")) is not None
+            ],
+        },
+    }
+
+
+def _weighted_price(deals: list[dict[str, Any]]) -> float | None:
+    weighted_total = 0.0
+    volume_total = 0.0
+    for deal in deals:
+        price = _float_or_none(deal.get("price"))
+        volume = _float_or_none(deal.get("volume"))
+        if price is None or volume is None or volume <= 0:
+            continue
+        weighted_total += price * volume
+        volume_total += volume
+    if volume_total <= 0:
+        return None
+    return weighted_total / volume_total
 
 
 def _deal_sort_key(deal: dict[str, Any]) -> tuple[int, int]:

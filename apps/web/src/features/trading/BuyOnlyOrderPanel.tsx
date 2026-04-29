@@ -33,6 +33,17 @@ function calculateTp(price: number | undefined, percent: number): number | null 
   return price * (1 + percent / 100);
 }
 
+function parseLotInput(value: string): number | null {
+  const normalized = value.trim().replace(",", ".");
+
+  if (normalized === "") {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 export function BuyOnlyOrderPanel({
   accountMode,
   disabledReason,
@@ -48,6 +59,7 @@ export function BuyOnlyOrderPanel({
   const [settings, setSettings] = useState<TradingSettings | null>(null);
   const [lotSize, setLotSize] = useState<LotSizeResponse | null>(null);
   const [multiplier, setMultiplier] = useState(1);
+  const [lotInputText, setLotInputText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [liveText, setLiveText] = useState("");
@@ -57,10 +69,20 @@ export function BuyOnlyOrderPanel({
   const previewTp = useMemo(() => calculateTp(lastPrice, tpPercent), [lastPrice, tpPercent]);
   const mode: TradingMode = settings?.trading_mode ?? "PAPER";
   const liveDataBlocked = mode !== "PAPER" && !marketConnectionHealthy;
-  const buyDisabled = !tradable || submitting || !settings || !lotSize || (mode !== "PAPER" && !mt5Connected) || liveDataBlocked;
+  const typedLot = parseLotInput(lotInputText);
+  const minLot = lotSize?.min_lot ?? settings?.minimum_lot ?? 0.01;
+  const maxLot = settings?.max_order_volume ?? null;
+  const selectedLot = typedLot ?? lotSize?.effective_lot ?? null;
+  const lotInputInvalid = lotInputText.trim() !== "" && typedLot === null;
+  const lotOutOfRange =
+    selectedLot === null ||
+    selectedLot < minLot ||
+    (typeof maxLot === "number" && Number.isFinite(maxLot) && selectedLot > maxLot);
+  const buyDisabled = !tradable || submitting || !settings || !lotSize || lotInputInvalid || lotOutOfRange || (mode !== "PAPER" && !mt5Connected) || liveDataBlocked;
 
   useEffect(() => {
     setMultiplier(1);
+    setLotInputText("");
   }, [symbol]);
 
   useEffect(() => {
@@ -100,7 +122,7 @@ export function BuyOnlyOrderPanel({
   }, [multiplier, symbol]);
 
   async function confirmBuy() {
-    if (!settings || !lotSize) {
+    if (!settings || !lotSize || selectedLot === null) {
       return;
     }
     setSubmitting(true);
@@ -110,7 +132,7 @@ export function BuyOnlyOrderPanel({
         internal_symbol: symbol,
         side: "BUY",
         order_type: "MARKET",
-        volume: lotSize.effective_lot,
+        volume: selectedLot,
         sl: null,
         tp_percent: settings.default_take_profit_percent,
         comment: "Manual BUY from Torum mobile",
@@ -136,10 +158,23 @@ export function BuyOnlyOrderPanel({
       <LotSizeControl
         baseLot={lotSize?.base_lot ?? settings?.minimum_lot ?? 0.01}
         disabled={!settings?.allow_manual_lot_adjustment}
-        effectiveLot={lotSize?.effective_lot ?? settings?.minimum_lot ?? 0.01}
+        effectiveLot={selectedLot ?? lotSize?.effective_lot ?? settings?.minimum_lot ?? 0.01}
+        lotInputValue={lotInputText === "" ? (selectedLot ?? lotSize?.effective_lot ?? settings?.minimum_lot ?? 0.01).toFixed(2) : lotInputText}
         multiplier={multiplier}
-        onDecrement={() => setMultiplier((current) => Math.max(1, current - 1))}
-        onIncrement={() => setMultiplier((current) => current + 1)}
+        onDecrement={() => {
+          setLotInputText("");
+          setMultiplier((current) => Math.max(1, current - 1));
+        }}
+        onIncrement={() => {
+          setLotInputText("");
+          setMultiplier((current) => current + 1);
+        }}
+        onLotInputBlur={() => {
+          if (typedLot !== null) {
+            setLotInputText(typedLot.toFixed(2));
+          }
+        }}
+        onLotInputChange={setLotInputText}
       />
 
       <button className="buy-panel__button" disabled={buyDisabled} type="button" onClick={() => setModalOpen(true)}>
@@ -147,15 +182,11 @@ export function BuyOnlyOrderPanel({
         BUY
       </button>
 
-      <div className="buy-panel__meta">
-        <span>{mode}</span>
-        <span>TP {tpPercent.toFixed(2)}%</span>
-        <span>{previewTp ? previewTp.toFixed(2) : "TP --"}</span>
-      </div>
-
       {!tradable ? <div className="compact-warning">{disabledReason}</div> : null}
       {mode !== "PAPER" && !mt5Connected ? <div className="compact-warning">MT5 desconectado: DEMO/LIVE bloqueado</div> : null}
       {liveDataBlocked ? <div className="compact-warning">{marketStaleReason}</div> : null}
+      {lotInputInvalid ? <div className="compact-warning">Lotaje no valido</div> : null}
+      {!lotInputInvalid && lotOutOfRange ? <div className="compact-warning">Lotaje fuera de rango</div> : null}
       {error ? <div className="compact-error">{error}</div> : null}
 
       {modalOpen ? (
@@ -180,7 +211,7 @@ export function BuyOnlyOrderPanel({
               </div>
               <div>
                 <dt>Lotaje</dt>
-                <dd>{lotSize?.effective_lot.toFixed(2)}</dd>
+                <dd>{selectedLot?.toFixed(2) ?? "--"}</dd>
               </div>
               <div>
                 <dt>Precio aprox.</dt>
