@@ -28,12 +28,18 @@ class PositionService:
                 if not self._is_really_open_position(position):
                     continue
 
-                self._update_position_price(position)
+                # IMPORTANTE:
+                # En posiciones reales de MT5, el profit correcto es el que viene de MT5
+                # por positions_get(), porque ya incluye contract size, divisa de cuenta,
+                # conversión del broker, símbolo, etc.
+                #
+                # No recalculamos DEMO/LIVE aquí porque pisaríamos el profit real.
+                if position.mode == "PAPER":
+                    self._update_position_price(position)
 
             safe_positions.append(position)
 
         self.db.commit()
-
         return safe_positions
 
     def close_position(self, position_id: int) -> tuple[bool, str, Position | None]:

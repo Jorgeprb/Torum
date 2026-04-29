@@ -290,17 +290,25 @@ function tradeLinesForSymbol(
       const contractSize = contractSizeFor(symbolMappings, position.internal_symbol);
       const valuation = positionValuation(position, symbolMappings, bidPrice, askPrice);
       const selected = selectedPositionId === position.id;
+
+      // PAPER se calcula en Torum.
+      // DEMO/LIVE usan el profit real sincronizado desde MT5.
+      const entryProfit =
+        position.mode === "PAPER"
+          ? valuation.profit
+          : position.profit ?? 0;
+
       const lines: TradeLine[] = [
         {
           id: `entry-${position.id}`,
           positionId: position.id,
           price: position.open_price,
-          label: `${position.side} ${position.volume.toFixed(2)}, ${valuation.profit.toFixed(2)} ${accountCurrency}`,
+          label: `${position.side} ${position.volume.toFixed(2)}, ${entryProfit.toFixed(2)} ${accountCurrency}`,
           tone: "entry",
           side: position.side,
           volume: position.volume,
           openPrice: position.open_price,
-          profit: valuation.profit,
+          profit: entryProfit,
           contractSize,
           currency: accountCurrency,
           selected
@@ -309,8 +317,14 @@ function tradeLinesForSymbol(
 
       if (position.tp) {
         const direction = position.side === "SELL" ? -1 : 1;
-        const tpPercent = position.tp_percent ?? ((position.tp - position.open_price) / position.open_price) * 100 * direction;
+
+        const tpPercent =
+          position.tp_percent ??
+          ((position.tp - position.open_price) / position.open_price) * 100 * direction;
+
+        // TP es una estimación futura, por tanto sí se calcula.
         const tpProfit = calculatePriceDistanceProfit(position, position.tp, contractSize);
+
         lines.push({
           id: `tp-${position.id}`,
           positionId: position.id,
@@ -1600,7 +1614,7 @@ useEffect(() => {
                 const liveBid = item.internal_symbol === selectedSymbol ? latestBid : null;
                 const liveAsk = item.internal_symbol === selectedSymbol ? latestAsk : null;
                 const valuation = positionValuation(item, symbolMappings, liveBid, liveAsk);
-                const profit = valuation.profit;
+                const profit =item.mode === "PAPER"? valuation.profit: item.profit ?? 0;
                 const isProfit = profit >= 0;
                 return (
                   <article className={isExpanded ? "trade-history-row trade-history-row--open trade-history-row--expanded" : "trade-history-row trade-history-row--open"} key={rowId}>
@@ -1609,7 +1623,7 @@ useEffect(() => {
                         <strong>
                           {item.internal_symbol}, <span>{item.side.toLowerCase()} {item.volume.toFixed(2)}</span>
                         </strong>
-                        <p>{item.open_price.toFixed(2)} -&gt; {valuation.closePrice?.toFixed(2) ?? item.current_price?.toFixed(2) ?? "--"}</p>
+                        <p>{item.open_price.toFixed(2)} -&gt; {item.current_price?.toFixed(2) ?? valuation.closePrice?.toFixed(2) ?? "--"}</p>
                       </div>
                       <div>
                         <time>{formatHistoryDate(item.opened_at)}</time>
