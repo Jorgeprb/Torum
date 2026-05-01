@@ -14,6 +14,8 @@ from app.news.schemas import (
     NewsEventUpdate,
     NewsImportResponse,
     NewsJsonImportRequest,
+    NewsProviderStatusRead,
+    NewsProviderSyncResponse,
     NewsSettingsRead,
     NewsSettingsUpdate,
 )
@@ -119,3 +121,19 @@ def import_csv(
     _current_user: Annotated[User, Depends(get_current_user)],
 ) -> NewsImportResponse:
     return NewsService(db).import_csv(payload)
+
+
+@router.post("/providers/sync", response_model=NewsProviderSyncResponse)
+def sync_provider(
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> NewsProviderSyncResponse:
+    return NewsService(db).sync_provider()
+
+
+@router.get("/providers/status", response_model=NewsProviderStatusRead)
+def provider_status(
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> NewsProviderStatusRead:
+    return NewsService(db).provider_status()

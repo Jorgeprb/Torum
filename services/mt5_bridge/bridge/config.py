@@ -1,11 +1,11 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BridgeSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", env_ignore_empty=True)
 
     torum_api_base_url: str = "http://127.0.0.1:8000"
     torum_ticks_batch_endpoint: str = "/api/ticks/batch"
@@ -22,6 +22,12 @@ class BridgeSettings(BaseSettings):
     mt5_buffer_max_size: int = 50000
     mt5_lookback_seconds_on_start: int = 10
     mt5_copy_ticks_max_count: int = 10000
+    mt5_terminal_path: str = ""
+    mt5_login: int | None = None
+    mt5_password: SecretStr | None = None
+    mt5_server: str = ""
+    mt5_timeout_ms: int = 60000
+    mt5_portable: bool = False
     mt5_enable_real_trading: bool = False
     mt5_allowed_account_modes: str = "DEMO"
     mt5_price_source: str = "auto"

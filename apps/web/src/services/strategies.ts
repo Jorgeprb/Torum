@@ -74,6 +74,28 @@ export interface StrategyRunResult {
   warnings: string[];
 }
 
+export interface TorumV1AssetStatus {
+  symbol: string;
+  enabled: boolean;
+  status: "LOCKED" | "UNLOCKED";
+  reason: string;
+  timeframe: string;
+  session_start: string;
+  session_end: string;
+  unlocked_at: string | null;
+  blocked_by_news: boolean;
+  active_config_id: number | null;
+}
+
+export interface TorumV1Status {
+  strategy_key: "torum_v1";
+  enabled: boolean;
+  use_news: boolean;
+  server_time: string;
+  madrid_time: string;
+  assets: Record<string, TorumV1AssetStatus>;
+}
+
 interface RequestOptions extends RequestInit {
   token?: string | null;
 }
@@ -135,4 +157,8 @@ export function getStrategySignals(): Promise<StrategySignal[]> {
 
 export function getStrategyRuns(): Promise<StrategyRun[]> {
   return request<StrategyRun[]>("/api/strategy-runs?limit=20");
+}
+
+export function getTorumV1Status(): Promise<TorumV1Status> {
+  return request<TorumV1Status>("/api/strategies/torum-v1/status");
 }

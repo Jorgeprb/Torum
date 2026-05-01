@@ -87,6 +87,7 @@ class StrategyRunner:
                 symbol_mapping=get_symbol_by_internal(self.db, signal.internal_symbol),
                 mt5_status=mt5_status_store.get(),
                 price_stale_after_seconds=get_settings().price_stale_after_seconds,
+                user_id=config.user_id,
             )
             signal.risk_result_json = risk_decision.model_dump()
             if not risk_decision.allowed:

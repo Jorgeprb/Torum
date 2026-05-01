@@ -26,6 +26,9 @@ export function defaultDrawingStyle(tool: DrawingTool): Record<string, unknown> 
     return {
       color: "#62d995",
       lineWidth: 2,
+      lineStyle: "solid",
+      glow: 0,
+      opacity: 0.16,
       backgroundColor: "rgba(98,217,149,0.16)",
       textColor: "#edf2ef"
     };
@@ -34,13 +37,29 @@ export function defaultDrawingStyle(tool: DrawingTool): Record<string, unknown> 
     return {
       color: "#d6b25e",
       lineWidth: 2,
+      lineStyle: "solid",
+      glow: 0,
+      opacity: 0.13,
       backgroundColor: "rgba(214,178,94,0.13)",
       textColor: "#edf2ef"
+    };
+  }
+  if (tool === "text") {
+    return {
+      color: "#edf2ef",
+      lineWidth: 2,
+      lineStyle: "solid",
+      glow: 0,
+      backgroundColor: "rgba(245,197,66,0.12)",
+      textColor: "#edf2ef",
+      fontSize: 14
     };
   }
   return {
     color: "#f5c542",
     lineWidth: 2,
+    lineStyle: "solid",
+    glow: 0,
     backgroundColor: "rgba(245,197,66,0.12)",
     textColor: "#edf2ef"
   };

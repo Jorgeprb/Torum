@@ -17,6 +17,8 @@ export interface DrawingShapeBase {
   drawing: ChartDrawingRead;
   color: string;
   lineWidth: number;
+  lineStyle: "solid" | "dashed";
+  glow: number;
   label?: string;
 }
 
@@ -39,4 +41,4 @@ export type DrawingShape =
   | (DrawingShapeBase & { kind: "trend_line"; x1: number; y1: number; x2: number; y2: number })
   | (DrawingShapeBase & { kind: "rectangle"; x: number; y: number; width: number; height: number; backgroundColor: string })
   | (DrawingShapeBase & { kind: "manual_zone"; x: number; y: number; width: number; height: number; backgroundColor: string; direction: string })
-  | (DrawingShapeBase & { kind: "text"; x: number; y: number; text: string; textColor: string });
+  | (DrawingShapeBase & { kind: "text"; x: number; y: number; text: string; textColor: string; fontSize: number });

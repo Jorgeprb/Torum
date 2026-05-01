@@ -8,8 +8,10 @@ import { DrawingPanel } from "../drawings/DrawingPanel";
 import { DrawingToolbar } from "../drawings/DrawingToolbar";
 import { IndicatorsPanel } from "../indicators/IndicatorsPanel";
 import { NewsPanel } from "../news/NewsPanel";
+import { NewsProviderPage } from "../news/NewsProviderPage";
 import { StrategyPanel } from "../strategies/StrategyPanel";
 import { PriceAlertPanel } from "../alerts/PriceAlertPanel";
+import { activatePushForPriceAlert, type PushStatus } from "../alerts/pushNotifications";
 import { AccountDrawer, type MobileView } from "../mobile/AccountDrawer";
 import { MobileTopBar } from "../mobile/MobileTopBar";
 import { TradingSettingsPage } from "../settings/TradingSettingsPage";
@@ -59,6 +61,7 @@ import {
 } from "../../services/trading";
 import { type IndicatorLineOutput, getChartOverlays, isLineOutput } from "../../services/indicators";
 import { type NoTradeZone } from "../../services/news";
+import { type TorumV1Status, getTorumV1Status } from "../../services/strategies";
 import {
   type PriceAlertRead,
   cancelPriceAlert,
@@ -69,7 +72,7 @@ import {
 } from "../../services/alerts";
 
 const fallbackSymbols = ["XAUUSD", "XAUEUR", "XAUAUD", "XAUJPY", "DXY"];
-const timeframes: Timeframe[] = ["M1", "M5", "H1", "H2", "H4", "D1", "W1"];
+const timeframes: Timeframe[] = ["M1", "M5", "H1", "H2", "H3", "H4", "D1", "W1"];
 type ChartSplitCount = 1 | 2 | 3;
 type ChartSplitOrientation = "vertical" | "horizontal";
 interface SplitChartSelection {
@@ -78,12 +81,32 @@ interface SplitChartSelection {
 
 const mobileDrawingTools: DrawingTool[] = ["horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "manual_zone", "select"];
 const spyModeStorageKey = "torum.spyMode";
+const showFutureNewsZonesStorageKey = "torum.showFutureNewsZones";
+const autoExtendToFutureNewsStorageKey = "torum.autoExtendToFutureNews";
+const futureNewsVisualsChangedEvent = "torum-future-news-visuals-changed";
+const futureOverlayLookaheadDays = 90;
 
 function readSpyModePreference(): boolean {
   try {
     return window.localStorage.getItem(spyModeStorageKey) === "1";
   } catch {
     return false;
+  }
+}
+
+function readDefaultTruePreference(key: string): boolean {
+  try {
+    return window.localStorage.getItem(key) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function readInitialSymbol(): string {
+  try {
+    return new URLSearchParams(window.location.search).get("symbol")?.toUpperCase() || "XAUUSD";
+  } catch {
+    return "XAUUSD";
   }
 }
 
@@ -118,6 +141,19 @@ function drawingToolIcon(tool: DrawingTool) {
   return <MousePointer size={18} />;
 }
 
+function torumAssetIcon(status: TorumV1Status | null, symbol: string): string {
+  const asset = status?.assets?.[symbol];
+  if (!asset) {
+    return "";
+  }
+  return asset.status === "UNLOCKED" ? "✅" : "❌";
+}
+
+function torumAssetLabel(status: TorumV1Status | null, symbol: string): string {
+  const icon = torumAssetIcon(status, symbol);
+  return icon ? `${icon} ${symbol}` : symbol;
+}
+
 function translateTradeMessage(message: string): string {
   return message
     .replace(/market closed/gi, "Mercado cerrado")
@@ -128,6 +164,27 @@ function translateTradeMessage(message: string): string {
     .replace(/below/gi, "por debajo")
     .replace(/rejected/gi, "rechazada")
     .replace(/failed/gi, "fallo");
+}
+
+function pushStatusLabel(status: PushStatus): string {
+  const labels: Record<PushStatus, string> = {
+    unsupported: "Push no disponible en este navegador",
+    denied: "Push bloqueado en permisos",
+    "permission-required": "Push sin permiso",
+    subscribed: "Push activo",
+    ready: "Push listo",
+    "missing-vapid": "Faltan claves VAPID"
+  };
+
+  return labels[status];
+}
+
+async function preparePushForPriceAlert(): Promise<PushStatus | null> {
+  try {
+    return await activatePushForPriceAlert();
+  } catch {
+    return null;
+  }
 }
 
 function normalizeCandleTime(time: number): number {
@@ -380,15 +437,18 @@ interface SplitMarketChartProps {
   drawingTool: DrawingTool;
   drawingsVisible: boolean;
   onSelectPosition: (positionId: number) => void;
-  onUpdatePositionTp: (positionId: number, tp: number) => void;
+  onUpdatePositionTp: (positionId: number, tp: number, closePrice?: number | null) => void | Promise<void>;
   positions: PositionRead[];
   selectedPositionId: number | null;
   symbolMappings: SymbolMapping[];
+  symbolLabels: Record<string, string>;
   symbol: string;
   timeframe: Timeframe;
   onSymbolChange: (symbol: string) => void;
   showAskLine: boolean;
   showBidLine: boolean;
+  showFutureNewsZones: boolean;
+  autoExtendToFutureNews: boolean;
 }
 
 function SplitMarketChart({
@@ -402,11 +462,14 @@ function SplitMarketChart({
   positions,
   selectedPositionId,
   symbolMappings,
+  symbolLabels,
   symbol,
   timeframe,
   onSymbolChange,
   showAskLine,
-  showBidLine
+  showBidLine,
+  showFutureNewsZones,
+  autoExtendToFutureNews
 }: SplitMarketChartProps) {
   const [candles, setCandles] = useState<Candle[]>([]);
   const [latestTick, setLatestTick] = useState<Tick | null>(null);
@@ -429,7 +492,14 @@ function SplitMarketChart({
     generationRef.current += 1;
     const generation = generationRef.current;
     const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-    const to = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    const to = new Date(Date.now() + futureOverlayLookaheadDays * 24 * 60 * 60 * 1000).toISOString();
+    setCandles([]);
+    setNoTradeZones([]);
+    setIndicatorLines([]);
+    setPriceAlerts([]);
+    setDrawings([]);
+    setSelectedDrawingId(null);
+    setAutoFollowEnabled(true);
 
     async function refresh() {
       setLoadingCandles(true);
@@ -529,6 +599,20 @@ function SplitMarketChart({
   }
 
   async function handleUpdateDrawing(drawing: ChartDrawingRead, patch: ChartDrawingUpdate) {
+    setDrawings((current) =>
+      current.map((item) =>
+        item.id === drawing.id
+          ? {
+              ...item,
+              ...patch,
+              payload: patch.payload ?? item.payload,
+              style: patch.style ?? item.style,
+              metadata: patch.metadata ?? item.metadata
+            }
+          : item
+      )
+    );
+
     const updated = await patchDrawing(drawing.id, patch);
     setDrawings((current) => current.map((item) => (item.id === updated.id ? updated : item)));
   }
@@ -540,6 +624,7 @@ function SplitMarketChart({
   }
 
   async function handleCreatePriceAlert(price: number) {
+    await preparePushForPriceAlert();
     const alert = await createPriceAlert({
       internal_symbol: symbol,
       timeframe: null,
@@ -559,8 +644,15 @@ function SplitMarketChart({
   }
 
   async function handleCancelPriceAlert(alertId: string) {
-    await cancelPriceAlert(alertId);
+    const removedAlert = priceAlerts.find((alert) => alert.id === alertId) ?? null;
     setPriceAlerts((current) => current.filter((alert) => alert.id !== alertId));
+    try {
+      await cancelPriceAlert(alertId);
+    } catch {
+      if (removedAlert) {
+        setPriceAlerts((current) => (current.some((alert) => alert.id === alertId) ? current : [...current, removedAlert]));
+      }
+    }
   }
 
   return (
@@ -569,7 +661,7 @@ function SplitMarketChart({
         <select aria-label="Simbolo grafico" value={symbol} onChange={(event) => onSymbolChange(event.target.value)}>
           {chartSymbols.map((item) => (
             <option key={item} value={item}>
-              {item}
+              {symbolLabels[item] ?? item}
             </option>
           ))}
         </select>
@@ -579,6 +671,7 @@ function SplitMarketChart({
           alertToolActive={alertToolActive}
           askPrice={latestTick?.ask ?? null}
           autoFollowEnabled
+          autoExtendToFutureNews={autoExtendToFutureNews}
           bidPrice={latestTick?.bid ?? null}
           candles={candles}
           drawingTool={drawingTool}
@@ -593,14 +686,15 @@ function SplitMarketChart({
           onAutoFollowChange={setAutoFollowEnabled}
           onSelectDrawing={setSelectedDrawingId}
           onSelectPosition={onSelectPosition}
-          onUpdateDrawing={(drawing, patch) => void handleUpdateDrawing(drawing, patch)}
+          onUpdateDrawing={handleUpdateDrawing}
           onUpdatePriceAlert={(alert, price) => void handleUpdatePriceAlert(alert, price)}
-          onUpdatePositionTp={(positionId, tp) => onUpdatePositionTp(positionId, tp)}
+          onUpdatePositionTp={(positionId, tp, closePrice) => onUpdatePositionTp(positionId, tp, closePrice)}
           priceAlerts={priceAlerts}
           resetKey={`${symbol}:${timeframe}`}
           selectedDrawingId={selectedDrawingId}
           showAskLine={showAskLine}
           showBidLine={showBidLine}
+          showFutureNewsZones={showFutureNewsZones}
           symbol={symbol}
           timeframe={timeframe}
           tradeLines={tradeLines}
@@ -610,8 +704,13 @@ function SplitMarketChart({
   );
 }
 
-export function TradingDashboard() {
-  const [selectedSymbol, setSelectedSymbol] = useState("XAUUSD");
+interface TradingDashboardProps {
+  activeView?: MobileView;
+  onActiveViewChange?: (view: MobileView) => void;
+}
+
+export function TradingDashboard({ activeView: controlledActiveView, onActiveViewChange }: TradingDashboardProps = {}) {
+  const [selectedSymbol, setSelectedSymbol] = useState(readInitialSymbol);
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>("M5");
   const [symbolMappings, setSymbolMappings] = useState<SymbolMapping[]>([]);
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -624,6 +723,7 @@ export function TradingDashboard() {
   const [latestTick, setLatestTick] = useState<Tick | null>(null);
   const [backendLatestTick, setBackendLatestTick] = useState<LatestTickDiagnostic | null>(null);
   const [tradingSettings, setTradingSettings] = useState<TradingSettings | null>(null);
+  const [torumV1Status, setTorumV1Status] = useState<TorumV1Status | null>(null);
   const [loadingCandles, setLoadingCandles] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
@@ -640,7 +740,7 @@ export function TradingDashboard() {
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const [drawingsVisible, setDrawingsVisible] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [activeMobileView, setActiveMobileView] = useState<MobileView>("chart");
+  const [internalActiveView, setInternalActiveView] = useState<MobileView>("chart");
   const [alertToolActive, setAlertToolActive] = useState(false);
   const [drawingMenuOpen, setDrawingMenuOpen] = useState(false);
   const [chartSplitCount, setChartSplitCount] = useState<ChartSplitCount>(1);
@@ -650,6 +750,8 @@ export function TradingDashboard() {
     { symbol: "DXY" }
   ]);
   const [spyModeEnabled, setSpyModeEnabled] = useState(readSpyModePreference);
+  const [showFutureNewsZones, setShowFutureNewsZones] = useState(() => readDefaultTruePreference(showFutureNewsZonesStorageKey));
+  const [autoExtendToFutureNews, setAutoExtendToFutureNews] = useState(() => readDefaultTruePreference(autoExtendToFutureNewsStorageKey));
   const [chartAutoFollowEnabled, setChartAutoFollowEnabled] = useState(true);
   const [chartRecenterToken, setChartRecenterToken] = useState(0);
   const [chartSymbolResetToken, setChartSymbolResetToken] = useState(0);
@@ -661,9 +763,52 @@ export function TradingDashboard() {
   const previousSymbolRef = useRef(selectedSymbol);
   const tickTimestampsRef = useRef<number[]>([]);
   const socketManagerRef = useRef<MarketSocketManager | null>(null);
+  const resumeReconnectAtRef = useRef(0);
   const marketGenerationRef = useRef(0);
   const activeMarketKeyRef = useRef(`${selectedSymbol}:${selectedTimeframe}`);
   const [ticksPerSecond, setTicksPerSecond] = useState(0);
+  const activeMobileView = controlledActiveView ?? internalActiveView;
+
+  function setActiveMobileView(view: MobileView) {
+    setInternalActiveView(view);
+    onActiveViewChange?.(view);
+  }
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) {
+      return;
+    }
+
+    function handleServiceWorkerMessage(event: MessageEvent) {
+      const data = event.data as { type?: string; symbol?: string } | null;
+      if (data?.type !== "price_alert_notification_click" || !data.symbol) {
+        return;
+      }
+
+      setSelectedSymbol(data.symbol.toUpperCase());
+      setActiveMobileView("chart");
+    }
+
+    navigator.serviceWorker.addEventListener("message", handleServiceWorkerMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", handleServiceWorkerMessage);
+  }, []);
+
+  useEffect(() => {
+    if (!drawingMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Element | null;
+      if (target?.closest(".mobile-drawing-menu") || target?.closest("[data-mobile-drawing-toggle]")) {
+        return;
+      }
+      setDrawingMenuOpen(false);
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [drawingMenuOpen]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -706,6 +851,20 @@ export function TradingDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    function handleFutureNewsVisualsChange() {
+      setShowFutureNewsZones(readDefaultTruePreference(showFutureNewsZonesStorageKey));
+      setAutoExtendToFutureNews(readDefaultTruePreference(autoExtendToFutureNewsStorageKey));
+    }
+
+    window.addEventListener(futureNewsVisualsChangedEvent, handleFutureNewsVisualsChange);
+    window.addEventListener("storage", handleFutureNewsVisualsChange);
+    return () => {
+      window.removeEventListener(futureNewsVisualsChangedEvent, handleFutureNewsVisualsChange);
+      window.removeEventListener("storage", handleFutureNewsVisualsChange);
+    };
+  }, []);
+
   const selectedMapping = useMemo(
     () => symbolMappings.find((mapping) => mapping.internal_symbol === selectedSymbol),
     [selectedSymbol, symbolMappings]
@@ -713,6 +872,10 @@ export function TradingDashboard() {
   const chartSymbols = useMemo(
     () => (symbolMappings.length > 0 ? symbolMappings.filter((mapping) => mapping.enabled).map((mapping) => mapping.internal_symbol) : fallbackSymbols),
     [symbolMappings]
+  );
+  const strategySymbolLabels = useMemo(
+    () => Object.fromEntries(chartSymbols.map((symbol) => [symbol, torumAssetLabel(torumV1Status, symbol)])),
+    [chartSymbols, torumV1Status]
   );
   useEffect(() => {
     setSecondaryCharts((current) =>
@@ -861,6 +1024,12 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
   }, []);
 
   useEffect(() => {
+    void refreshTorumV1Status();
+    const intervalId = window.setInterval(() => void refreshTorumV1Status(), 30000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
     let active = true;
 
     async function refreshMt5Status() {
@@ -974,7 +1143,14 @@ useEffect(() => {
       if (document.visibilityState === "hidden") {
         return;
       }
-      socketManagerRef.current?.ensureFresh("foreground");
+
+      const now = Date.now();
+      if (now - resumeReconnectAtRef.current < 1000) {
+        return;
+      }
+
+      resumeReconnectAtRef.current = now;
+      socketManagerRef.current?.reconnectNow("foreground");
       void resyncAfterReconnect();
     }
 
@@ -1156,6 +1332,14 @@ useEffect(() => {
     }
   }
 
+  async function refreshTorumV1Status() {
+    try {
+      setTorumV1Status(await getTorumV1Status());
+    } catch {
+      setTorumV1Status(null);
+    }
+  }
+
   async function refreshMarketDiagnostics(
   generation = marketGenerationRef.current,
   symbol = selectedSymbol
@@ -1187,7 +1371,7 @@ useEffect(() => {
   timeframe = selectedTimeframe
 ) {
   const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-  const to = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+  const to = new Date(Date.now() + futureOverlayLookaheadDays * 24 * 60 * 60 * 1000).toISOString();
 
   try {
     const response = await getChartOverlays(symbol, timeframe, from, to);
@@ -1290,11 +1474,25 @@ useEffect(() => {
 
   async function handleUpdateDrawing(drawing: ChartDrawingRead, patch: ChartDrawingUpdate) {
     try {
+      setDrawings((current) =>
+        current.map((item) =>
+          item.id === drawing.id
+            ? {
+                ...item,
+                ...patch,
+                payload: patch.payload ?? item.payload,
+                style: patch.style ?? item.style,
+                metadata: patch.metadata ?? item.metadata
+              }
+            : item
+        )
+      );
       const updated = await patchDrawing(drawing.id, patch);
       setDrawings((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       void refreshChartOverlays();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo actualizar el dibujo");
+      void refreshDrawings();
     }
   }
 
@@ -1318,6 +1516,7 @@ useEffect(() => {
 
   async function handleCreatePriceAlert(price: number) {
     try {
+      const pushStatus = await preparePushForPriceAlert();
       const alert = await createPriceAlert({
         internal_symbol: selectedSymbol,
         timeframe: null,
@@ -1328,7 +1527,8 @@ useEffect(() => {
       setPriceAlerts((current) => [...current, alert]);
       setAlertToolActive(false);
       setDrawingMenuOpen(false);
-      setTradeMessage(`Alerta por debajo creada en ${price.toFixed(2)}`);
+      const pushText = pushStatus ? ` ${pushStatusLabel(pushStatus)}.` : " Push no activado.";
+      setTradeMessage(`Alerta creada en ${price.toFixed(2)}.${pushText}`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo crear la alerta");
     }
@@ -1349,12 +1549,13 @@ useEffect(() => {
   }
 
   async function handleCancelPriceAlert(alertId: string) {
+    setPriceAlerts((current) => current.filter((alert) => alert.id !== alertId));
     try {
       await cancelPriceAlert(alertId);
-      setPriceAlerts((current) => current.filter((alert) => alert.id !== alertId));
       void refreshPriceAlertHistory();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo cancelar la alerta");
+      void refreshPriceAlerts();
     }
   }
 
@@ -1376,6 +1577,65 @@ useEffect(() => {
       return;
     }
     setClosePositionId(positionId);
+  }
+
+  async function closePositionNow(position: PositionRead, successMessage = "Posicion cerrada") {
+    if (position.status !== "OPEN") {
+      setTradeMessage("La posicion ya no esta abierta");
+      void refreshTradingData();
+      return;
+    }
+
+    if (position.mode !== "PAPER" && !marketConnectionHealthy) {
+      setTradeMessage(staleTradingReason);
+      void resyncAfterReconnect();
+      return;
+    }
+
+    setTradeMessage(null);
+    setClosingPosition(true);
+
+    try {
+      await closePosition(position.id);
+      setTradeMessage(successMessage);
+      setSelectedPositionId(null);
+      setClosePositionId(null);
+      void refreshTradingData();
+    } catch (requestError) {
+      setTradeMessage(requestError instanceof Error ? requestError.message : "No se pudo cerrar la posicion");
+    } finally {
+      setClosingPosition(false);
+    }
+  }
+
+  function tpClosesWinningPositionNow(position: PositionRead, tp: number, draggedChartClosePrice?: number | null): boolean {
+    const useLiveSelectedPrices = position.internal_symbol === selectedSymbol;
+    const fallbackValuation = positionValuation(
+      position,
+      symbolMappings,
+      useLiveSelectedPrices ? latestBid : null,
+      useLiveSelectedPrices ? latestAsk : null
+    );
+    const closePrice =
+      typeof draggedChartClosePrice === "number" && Number.isFinite(draggedChartClosePrice)
+        ? draggedChartClosePrice
+        : fallbackValuation.closePrice;
+
+    if (closePrice === null || !Number.isFinite(closePrice)) {
+      return false;
+    }
+
+    const profit = calculatePositionProfit(position, closePrice, contractSizeFor(symbolMappings, position.internal_symbol));
+
+    if (profit <= 0) {
+      return false;
+    }
+
+    if (position.side === "BUY") {
+      return tp > position.open_price && tp <= closePrice;
+    }
+
+    return tp < position.open_price && tp >= closePrice;
   }
 
   function toggleHistoryRow(rowId: string) {
@@ -1403,26 +1663,18 @@ useEffect(() => {
       void resyncAfterReconnect();
       return;
     }
-    setTradeMessage(null);
-    setClosingPosition(true);
-    try {
-      await closePosition(position.id);
-      setTradeMessage("Posicion cerrada");
-      setSelectedPositionId(null);
-      setClosePositionId(null);
-      void refreshTradingData();
-    } catch (requestError) {
-      setTradeMessage(requestError instanceof Error ? requestError.message : "No se pudo cerrar la posicion");
-    } finally {
-      setClosingPosition(false);
-    }
+    await closePositionNow(position);
   }
 
-  async function handleModifyPositionTp(positionId: number, tp: number) {
+  async function handleModifyPositionTp(positionId: number, tp: number, closePrice?: number | null) {
     const position = positions.find((item) => item.id === positionId);
     if (!position || position.status !== "OPEN") {
       setTradeMessage("No se puede modificar TP: la posicion no esta abierta");
       void refreshTradingData();
+      return;
+    }
+    if (tpClosesWinningPositionNow(position, tp, closePrice)) {
+      await closePositionNow(position, "Posicion cerrada por TP manual");
       return;
     }
     const tpCrossesEntry = position.side === "BUY" ? tp <= position.open_price : tp >= position.open_price;
@@ -1947,6 +2199,7 @@ useEffect(() => {
         onTimeframeChange={setSelectedTimeframe}
         selectedSymbol={selectedSymbol}
         selectedTimeframe={selectedTimeframe}
+        symbolLabels={strategySymbolLabels}
         timeframes={timeframes}
       />
       <AccountDrawer
@@ -1974,7 +2227,7 @@ useEffect(() => {
       </div>
 
       <div className="mobile-view-panel">
-        {activeMobileView === "strategies" ? <StrategyPanel symbols={chartSymbols} timeframes={timeframes} /> : null}
+        {activeMobileView === "strategies" ? <StrategyPanel symbols={chartSymbols} timeframes={timeframes} onChanged={() => void refreshTorumV1Status()} /> : null}
         {activeMobileView === "indicators" ? (
           <IndicatorsPanel
             indicatorLines={indicatorLines}
@@ -1990,6 +2243,7 @@ useEffect(() => {
           </>
         ) : null}
         {activeMobileView === "history" ? renderTradeHistoryPanel() : null}
+        {activeMobileView === "news" ? <NewsProviderPage onChanged={() => void refreshChartOverlays()} /> : null}
       </div>
 
       <div className="market-toolbar">
@@ -2001,7 +2255,7 @@ useEffect(() => {
               type="button"
               onClick={() => setSelectedSymbol(symbol)}
             >
-              {symbol}
+              {torumAssetLabel(torumV1Status, symbol)}
             </button>
           ))}
         </div>
@@ -2062,7 +2316,7 @@ useEffect(() => {
         {chartSplitCount === 1 ? (
           <div className="chart-panel__header">
             <div>
-              <h2>{selectedSymbol}</h2>
+              <h2>{torumAssetLabel(torumV1Status, selectedSymbol)}</h2>
             </div>
             <div className="price-cluster">
               <span className="price-value">{typeof lastPrice === "number" ? `BID ${lastPrice.toFixed(2)}` : "BID --"}</span>
@@ -2082,7 +2336,7 @@ useEffect(() => {
                 <select aria-label="Simbolo grafico principal" value={selectedSymbol} onChange={(event) => setSelectedSymbol(event.target.value)}>
                   {chartSymbols.map((symbol) => (
                     <option key={symbol} value={symbol}>
-                      {symbol}
+                      {torumAssetLabel(torumV1Status, symbol)}
                     </option>
                   ))}
                 </select>
@@ -2105,10 +2359,11 @@ useEffect(() => {
             onSelectDrawing={setSelectedDrawingId}
             onSelectPosition={setSelectedPositionId}
             onCancelPriceAlert={(alertId) => void handleCancelPriceAlert(alertId)}
-            onUpdateDrawing={(drawing, patch) => void handleUpdateDrawing(drawing, patch)}
+            onUpdateDrawing={handleUpdateDrawing}
             onUpdatePriceAlert={(alert, price) => void handleUpdatePriceAlert(alert, price)}
-            onUpdatePositionTp={(positionId, tp) => void handleModifyPositionTp(positionId, tp)}
+            onUpdatePositionTp={handleModifyPositionTp}
             askPrice={latestAsk}
+            autoExtendToFutureNews={autoExtendToFutureNews}
             autoFollowEnabled={chartAutoFollowEnabled}
             bidPrice={latestBid}
             onAutoFollowChange={setChartAutoFollowEnabled}
@@ -2118,6 +2373,7 @@ useEffect(() => {
             selectedDrawingId={selectedDrawingId}
             showAskLine={tradingSettings?.show_ask_line ?? true}
             showBidLine={tradingSettings?.show_bid_line ?? true}
+            showFutureNewsZones={showFutureNewsZones}
             symbol={selectedSymbol}
             timeframe={selectedTimeframe}
             tradeLines={tradeLines}
@@ -2145,16 +2401,19 @@ useEffect(() => {
               chartSymbols={chartSymbols}
               drawingTool={drawingTool}
               drawingsVisible={drawingsVisible}
-              key={index}
+              key={`${index}:${chart.symbol}:${selectedTimeframe}`}
               onSelectPosition={setSelectedPositionId}
               onSymbolChange={(symbol) => updateSecondaryChart(index, { symbol })}
-              onUpdatePositionTp={(positionId, tp) => void handleModifyPositionTp(positionId, tp)}
+              onUpdatePositionTp={handleModifyPositionTp}
               positions={positions}
               selectedPositionId={selectedPositionId}
+              autoExtendToFutureNews={autoExtendToFutureNews}
               showAskLine={tradingSettings?.show_ask_line ?? true}
               showBidLine={tradingSettings?.show_bid_line ?? true}
+              showFutureNewsZones={showFutureNewsZones}
               symbol={chart.symbol}
               symbolMappings={symbolMappings}
+              symbolLabels={strategySymbolLabels}
               timeframe={selectedTimeframe}
             />
           ))}
@@ -2284,8 +2543,6 @@ useEffect(() => {
       />
 
       <NewsPanel symbol={selectedSymbol} zones={noTradeZones} onChanged={() => void refreshChartOverlays()} />
-
-      <StrategyPanel symbols={chartSymbols} timeframes={timeframes} />
 
       {tradeMessage ? (
         <section className="panel trade-message">

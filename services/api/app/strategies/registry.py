@@ -1,6 +1,7 @@
 from app.strategies.plugins.base import StrategyPlugin
 from app.strategies.plugins.example_manual_zone_strategy import ExampleManualZoneStrategy
 from app.strategies.plugins.example_sma_dxy_filter import ExampleSmaDxyFilter
+from app.strategies.plugins.torum_v1_strategy import TorumV1Strategy
 
 
 class StrategyRegistry:
@@ -21,5 +22,6 @@ class StrategyRegistry:
 
 
 strategy_registry = StrategyRegistry()
+strategy_registry.register(TorumV1Strategy())
 strategy_registry.register(ExampleSmaDxyFilter())
 strategy_registry.register(ExampleManualZoneStrategy())

@@ -10,7 +10,7 @@ const WS_BASE_URL =
   (window.location.protocol === "https:"
     ? window.location.origin.replace(/^https:/, "wss:")
     : `ws://${window.location.hostname === "localhost" ? "localhost" : window.location.hostname}:8000`);
-export type Timeframe = "M1" | "M5" | "H1" | "H2" | "H4" | "D1" | "W1";
+export type Timeframe = "M1" | "M5" | "H1" | "H2" | "H3" | "H4" | "D1" | "W1";
 
 export interface SymbolMapping {
   id: number;

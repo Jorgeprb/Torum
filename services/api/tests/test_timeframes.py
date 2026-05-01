@@ -19,6 +19,7 @@ def test_bucket_h2_and_h4_use_hour_multiples() -> None:
     value = datetime(2026, 4, 26, 13, 45, 10, tzinfo=UTC)
 
     assert bucket_start(value, "H2") == datetime(2026, 4, 26, 12, tzinfo=UTC)
+    assert bucket_start(value, "H3") == datetime(2026, 4, 26, 12, tzinfo=UTC)
     assert bucket_start(value, "H4") == datetime(2026, 4, 26, 12, tzinfo=UTC)
 
 

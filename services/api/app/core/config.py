@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     news_block_enabled: bool = False
     news_block_minutes_before: int = 60
     news_block_minutes_after: int = 60
+    finnhub_calendar_url: str = "https://finnhub.io/api/v1/calendar/economic"
+    finnhub_api_key: SecretStr = "d7p2inpr01qr68pbfq1gd7p2inpr01qr68pbfq20"
+    news_provider_timeout_seconds: float = 10.0
 
     vapid_public_key: str | None = None
     vapid_private_key: SecretStr | None = None

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Bell, Columns2, Columns3, Menu, PencilLine, Rows2, Rows3, Signal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Bell, ChevronDown, Columns2, Columns3, Menu, PencilLine, Rows2, Rows3, Signal } from "lucide-react";
 
 import type { Timeframe } from "../../services/market";
 import type { MarketSocketStatus } from "../../services/marketSocket";
@@ -22,6 +22,7 @@ interface MobileTopBarProps {
   onTimeframeChange: (timeframe: Timeframe) => void;
   selectedSymbol: string;
   selectedTimeframe: Timeframe;
+  symbolLabels?: Record<string, string>;
   timeframes: Timeframe[];
 }
 
@@ -42,9 +43,11 @@ export function MobileTopBar({
   onTimeframeChange,
   selectedSymbol,
   selectedTimeframe,
+  symbolLabels,
   timeframes
 }: MobileTopBarProps) {
-  const [splitMenuOpen, setSplitMenuOpen] = useState(false);
+  const [openMenu, setOpenMenu] = useState<"symbol" | "timeframe" | "split" | null>(null);
+  const dropdownRootRef = useRef<HTMLDivElement | null>(null);
   const statusClass =
     connectionStatus === "connected"
       ? "mobile-status mobile-status--ok"
@@ -63,12 +66,12 @@ export function MobileTopBar({
             : connected
               ? "Stream pendiente"
               : "Stream desconectado";
-  const splitOptions: Array<{ count: 1 | 2 | 3; orientation: "vertical" | "horizontal"; label: string }> = [
-    { count: 1, orientation: chartSplitOrientation, label: "1" },
-    { count: 2, orientation: "vertical", label: "2V" },
-    { count: 3, orientation: "vertical", label: "3V" },
+  const splitOptions: Array<{ className?: string; count: 1 | 2 | 3; orientation: "vertical" | "horizontal"; label: string }> = [
+    { className: "mobile-split-menu__item--wide", count: 1, orientation: chartSplitOrientation, label: "1" },
     { count: 2, orientation: "horizontal", label: "2H" },
-    { count: 3, orientation: "horizontal", label: "3H" }
+    { count: 2, orientation: "vertical", label: "2V" },
+    { count: 3, orientation: "horizontal", label: "3H" },
+    { count: 3, orientation: "vertical", label: "3V" }
   ];
 
   const splitIcon =
@@ -80,54 +83,113 @@ export function MobileTopBar({
         ? <Columns3 size={22} />
         : <Columns2 size={22} />;
 
+  useEffect(() => {
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Element | null;
+      if (
+        !dropdownRootRef.current?.contains(event.target as Node) ||
+        (!target?.closest(".mobile-topbar-dropdown") && !target?.closest(".mobile-split-picker"))
+      ) {
+        setOpenMenu(null);
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, []);
+
+  function toggleMenu(menu: "symbol" | "timeframe" | "split") {
+    setOpenMenu((current) => (current === menu ? null : menu));
+  }
+
   return (
-    <header className="mobile-topbar">
+    <header className="mobile-topbar" ref={dropdownRootRef}>
       <button aria-label="Abrir menu" className="mobile-icon-button" type="button" onClick={onMenuClick}>
         <Menu size={26} />
       </button>
-      <select
-        className="mobile-topbar-select mobile-topbar-select--symbol"
-        aria-label="Simbolo"
-        value={selectedSymbol}
-        onChange={(event) => onSymbolChange(event.target.value)}
-      >
-        {chartSymbols.map((symbol) => (
-          <option key={symbol} value={symbol}>
-            {symbol}
-          </option>
-        ))}
-      </select>
-      <select className="mobile-topbar-select mobile-topbar-select--timeframe" aria-label="Timeframe" value={selectedTimeframe} onChange={(event) => onTimeframeChange(event.target.value as Timeframe)}>
-        {timeframes.map((timeframe) => (
-          <option key={timeframe} value={timeframe}>
-            {timeframe}
-          </option>
-        ))}
-      </select>
+      <div className="mobile-topbar-dropdown mobile-topbar-dropdown--symbol">
+        <button
+          aria-expanded={openMenu === "symbol"}
+          aria-label="Simbolo"
+          className="mobile-topbar-dropdown__button"
+          type="button"
+          onClick={() => toggleMenu("symbol")}
+        >
+          <span>{symbolLabels?.[selectedSymbol] ?? selectedSymbol}</span>
+          <ChevronDown size={14} />
+        </button>
+        {openMenu === "symbol" ? (
+          <div className="mobile-topbar-dropdown__menu">
+            {chartSymbols.map((symbol) => (
+              <button
+                className={symbol === selectedSymbol ? "mobile-dropdown-item mobile-dropdown-item--active" : "mobile-dropdown-item"}
+                key={symbol}
+                type="button"
+                onClick={() => {
+                  onSymbolChange(symbol);
+                  setOpenMenu(null);
+                }}
+              >
+                {symbolLabels?.[symbol] ?? symbol}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className="mobile-topbar-dropdown mobile-topbar-dropdown--timeframe">
+        <button
+          aria-expanded={openMenu === "timeframe"}
+          aria-label="Timeframe"
+          className="mobile-topbar-dropdown__button"
+          type="button"
+          onClick={() => toggleMenu("timeframe")}
+        >
+          <span>{selectedTimeframe}</span>
+          <ChevronDown size={14} />
+        </button>
+        {openMenu === "timeframe" ? (
+          <div className="mobile-topbar-dropdown__menu">
+            {timeframes.map((timeframe) => (
+              <button
+                className={timeframe === selectedTimeframe ? "mobile-dropdown-item mobile-dropdown-item--active" : "mobile-dropdown-item"}
+                key={timeframe}
+                type="button"
+                onClick={() => {
+                  onTimeframeChange(timeframe);
+                  setOpenMenu(null);
+                }}
+              >
+                {timeframe}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
       <div className="mobile-split-picker">
         <button
           aria-label="Elegir graficos divididos"
+          aria-expanded={openMenu === "split"}
           className={chartSplitCount > 1 ? "mobile-icon-button mobile-icon-button--active" : "mobile-icon-button"}
           type="button"
-          onClick={() => setSplitMenuOpen((current) => !current)}
+          onClick={() => toggleMenu("split")}
         >
           {splitIcon}
           <span>{chartSplitCount}</span>
         </button>
-        {splitMenuOpen ? (
+        {openMenu === "split" ? (
           <div className="mobile-split-menu">
             {splitOptions.map((option) => (
               <button
                 className={
                   chartSplitCount === option.count && (option.count === 1 || chartSplitOrientation === option.orientation)
-                    ? "mobile-split-menu__item mobile-split-menu__item--active"
-                    : "mobile-split-menu__item"
+                    ? `mobile-split-menu__item ${option.className ?? ""} mobile-split-menu__item--active`
+                    : `mobile-split-menu__item ${option.className ?? ""}`
                 }
                 key={`${option.count}-${option.orientation}`}
                 type="button"
                 onClick={() => {
                   onChartSplitChange(option.count, option.orientation);
-                  setSplitMenuOpen(false);
+                  setOpenMenu(null);
                 }}
               >
                 {option.orientation === "horizontal" ? (
@@ -146,6 +208,7 @@ export function MobileTopBar({
       <button
         aria-label="Herramientas de dibujo"
         className={drawingMenuOpen || drawingTool !== "select" ? "mobile-icon-button mobile-icon-button--active" : "mobile-icon-button"}
+        data-mobile-drawing-toggle="true"
         type="button"
         onClick={onDrawingMenuClick}
       >

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bell, Save, ScanEye } from "lucide-react";
+import { Bell, Clock3, Save, ScanEye } from "lucide-react";
 
 import {
   type MT5OrderExecutionSettings,
@@ -18,6 +18,17 @@ import {
 } from "../alerts/pushNotifications";
 
 const spyModeStorageKey = "torum.spyMode";
+const showFutureNewsZonesStorageKey = "torum.showFutureNewsZones";
+const autoExtendToFutureNewsStorageKey = "torum.autoExtendToFutureNews";
+const futureNewsVisualsChangedEvent = "torum-future-news-visuals-changed";
+const chartTimeModeStorageKey = "torum.chartTimeMode";
+const chartManualBrokerUtcOffsetStorageKey = "torum.chartManualBrokerUtcOffset";
+const chartManualLocalUtcOffsetStorageKey = "torum.chartManualLocalUtcOffset";
+const chartTimeSettingsChangedEvent = "torum-chart-time-settings-changed";
+const defaultChartBrokerTimeZone = "Etc/GMT-3";
+const chartDisplayTimeZone = "Europe/Madrid";
+const utcOffsetOptions = Array.from({ length: 27 }, (_, index) => index - 12);
+type ChartTimeMode = "auto" | "manual";
 
 function readSpyModePreference(): boolean {
   try {
@@ -27,6 +38,65 @@ function readSpyModePreference(): boolean {
   }
 }
 
+function readDefaultTruePreference(key: string): boolean {
+  try {
+    return window.localStorage.getItem(key) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function readChartTimeMode(): ChartTimeMode {
+  try {
+    return window.localStorage.getItem(chartTimeModeStorageKey) === "manual" ? "manual" : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function currentUtcOffsetHours(timeZone: string): number {
+  const value = new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+    timeZone
+  }).format(new Date());
+  const utcHour = new Date().getUTCHours();
+  let offset = Number(value) - utcHour;
+
+  if (offset > 12) {
+    offset -= 24;
+  }
+
+  if (offset < -12) {
+    offset += 24;
+  }
+
+  return offset;
+}
+
+function readStoredUtcOffset(key: string, fallback: number): number {
+  try {
+    const parsed = Number(window.localStorage.getItem(key));
+    return Number.isInteger(parsed) && parsed >= -12 && parsed <= 14 ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function formatUtcOffset(offset: number): string {
+  if (offset === 0) {
+    return "UTC+0";
+  }
+
+  return `UTC${offset > 0 ? "+" : ""}${offset}`;
+}
+
+function saveChartTimePreference(key: string, value: string) {
+  window.localStorage.setItem(key, value);
+  window.dispatchEvent(new Event(chartTimeSettingsChangedEvent));
+}
+
 export function TradingSettingsPage() {
   const [settings, setSettings] = useState<TradingSettings | null>(null);
   const [saving, setSaving] = useState(false);
@@ -34,6 +104,15 @@ export function TradingSettingsPage() {
   const [pushStatus, setPushStatus] = useState<PushStatus>("permission-required");
   const [mt5Execution, setMt5Execution] = useState<MT5OrderExecutionSettings | null>(null);
   const [spyModeEnabled, setSpyModeEnabled] = useState(readSpyModePreference);
+  const [showFutureNewsZones, setShowFutureNewsZones] = useState(() => readDefaultTruePreference(showFutureNewsZonesStorageKey));
+  const [autoExtendToFutureNews, setAutoExtendToFutureNews] = useState(() => readDefaultTruePreference(autoExtendToFutureNewsStorageKey));
+  const [chartTimeMode, setChartTimeMode] = useState(readChartTimeMode);
+  const [chartBrokerUtcOffset, setChartBrokerUtcOffset] = useState(() =>
+    readStoredUtcOffset(chartManualBrokerUtcOffsetStorageKey, currentUtcOffsetHours(import.meta.env.VITE_CHART_BROKER_TIME_ZONE || defaultChartBrokerTimeZone))
+  );
+  const [chartLocalUtcOffset, setChartLocalUtcOffset] = useState(() =>
+    readStoredUtcOffset(chartManualLocalUtcOffsetStorageKey, currentUtcOffsetHours(chartDisplayTimeZone))
+  );
 
   useEffect(() => {
     void getTradingSettings().then(setSettings).catch((error: unknown) => {
@@ -54,6 +133,48 @@ export function TradingSettingsPage() {
       window.dispatchEvent(new Event("torum-spy-mode-changed"));
     } catch {
       setMessage("No se pudo guardar modo espia");
+    }
+  }
+
+  function updateFutureNewsVisual(key: string, enabled: boolean) {
+    if (key === showFutureNewsZonesStorageKey) {
+      setShowFutureNewsZones(enabled);
+    } else {
+      setAutoExtendToFutureNews(enabled);
+    }
+
+    try {
+      window.localStorage.setItem(key, enabled ? "1" : "0");
+      window.dispatchEvent(new Event(futureNewsVisualsChangedEvent));
+    } catch {
+      setMessage("No se pudo guardar visual de noticias");
+    }
+  }
+
+  function updateChartTimeMode(mode: ChartTimeMode) {
+    setChartTimeMode(mode);
+    try {
+      saveChartTimePreference(chartTimeModeStorageKey, mode);
+      setMessage("Horario de grafico guardado");
+    } catch {
+      setMessage("No se pudo guardar horario de grafico");
+    }
+  }
+
+  function updateChartUtcOffset(key: string, value: number) {
+    const safeValue = Math.max(-12, Math.min(14, Math.floor(value)));
+
+    if (key === chartManualBrokerUtcOffsetStorageKey) {
+      setChartBrokerUtcOffset(safeValue);
+    } else {
+      setChartLocalUtcOffset(safeValue);
+    }
+
+    try {
+      saveChartTimePreference(key, String(safeValue));
+      setMessage("Horario de grafico guardado");
+    } catch {
+      setMessage("No se pudo guardar horario de grafico");
     }
   }
 
@@ -215,7 +336,60 @@ export function TradingSettingsPage() {
           <ScanEye size={16} />
           Modo espia
         </label>
+        <label className="toggle-line">
+          <input checked={showFutureNewsZones} type="checkbox" onChange={(event) => updateFutureNewsVisual(showFutureNewsZonesStorageKey, event.target.checked)} />
+          Zonas futuras
+        </label>
+        <label className="toggle-line">
+          <input checked={autoExtendToFutureNews} type="checkbox" onChange={(event) => updateFutureNewsVisual(autoExtendToFutureNewsStorageKey, event.target.checked)} />
+          Extender tiempo futuro
+        </label>
       </div>
+
+      <section className="settings-push-box">
+        <div className="panel-title">
+          <Clock3 size={18} />
+          Horario grafico
+        </div>
+        <div className="settings-form-grid">
+          <label>
+            Rango horario
+            <select value={chartTimeMode} onChange={(event) => updateChartTimeMode(event.target.value as ChartTimeMode)}>
+              <option value="auto">Automatico</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <label>
+            Hora broker
+            <select
+              disabled={chartTimeMode === "auto"}
+              value={chartBrokerUtcOffset}
+              onChange={(event) => updateChartUtcOffset(chartManualBrokerUtcOffsetStorageKey, Number(event.target.value))}
+            >
+              {utcOffsetOptions.map((offset) => (
+                <option key={offset} value={offset}>
+                  {formatUtcOffset(offset)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Mi hora
+            <select
+              disabled={chartTimeMode === "auto"}
+              value={chartLocalUtcOffset}
+              onChange={(event) => updateChartUtcOffset(chartManualLocalUtcOffsetStorageKey, Number(event.target.value))}
+            >
+              {utcOffsetOptions.map((offset) => (
+                <option key={offset} value={offset}>
+                  {formatUtcOffset(offset)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p className="notice-strip">Automatico mantiene la hora actual. Manual solo cambia la vista del grafico.</p>
+      </section>
 
       <div className="danger-strip">Por defecto Torum compra sin stop loss y con TP automatico. LIVE sigue bloqueado si no activas sus protecciones.</div>
       <section className="settings-push-box settings-mt5-box">

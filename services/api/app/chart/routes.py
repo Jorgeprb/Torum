@@ -11,6 +11,7 @@ from app.drawings.service import ChartDrawingService
 from app.indicators.schemas import ChartOverlaysResponse
 from app.indicators.service import IndicatorService
 from app.market_data.timeframes import Timeframe
+from app.news.service import get_global_news_settings
 from app.no_trade_zones.schemas import NoTradeZoneRead
 from app.no_trade_zones.service import NoTradeZoneService
 from app.positions.schemas import PositionRead
@@ -18,6 +19,11 @@ from app.positions.service import PositionService
 from app.users.models import User
 
 router = APIRouter(prefix="/chart", tags=["chart"])
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 def _is_really_open_position(position: object) -> bool:
     status = getattr(position, "status", None)
@@ -49,13 +55,18 @@ def chart_overlays(
     from_time: datetime | None = Query(default=None, alias="from"),
     to_time: datetime | None = Query(default=None, alias="to"),
 ) -> ChartOverlaysResponse:
-    start = from_time or datetime.now(UTC) - timedelta(days=30)
-    end = to_time or datetime.now(UTC) + timedelta(days=30)
+    now = datetime.now(UTC)
+    start = _as_utc(from_time) if from_time is not None else now - timedelta(days=30)
+    end = _as_utc(to_time) if to_time is not None else now + timedelta(days=30)
     indicator_overlays = IndicatorService(db).calculate_active_overlays(symbol=symbol, timeframe=timeframe)
-    no_trade_zones = [
-        NoTradeZoneRead.model_validate(zone).model_dump(mode="json")
-        for zone in NoTradeZoneService(db).list_zones(symbol=symbol, start_time=start, end_time=end)
-    ]
+    news_settings = get_global_news_settings(db)
+    no_trade_zones = []
+    if news_settings.draw_news_zones_enabled:
+        visible_zone_start = max(start, now)
+        no_trade_zones = [
+            NoTradeZoneRead.model_validate(zone).model_dump(mode="json")
+            for zone in NoTradeZoneService(db).list_zones(symbol=symbol, start_time=visible_zone_start, end_time=end)
+        ]
     drawing_service = ChartDrawingService(db)
     drawings = [
         drawing_service.to_read(drawing).model_dump(mode="json")

@@ -12,6 +12,7 @@ from app.ticks.models import Tick
 from app.ticks.service import latest_tick_order_by
 from app.trading.schemas import ManualOrderRequest
 from app.risk.schemas import RiskDecision
+from app.strategies.torum_v1 import TorumV1StatusService
 
 
 class RiskManager:
@@ -66,8 +67,6 @@ class RiskManager:
                 reasons.append(f"Price is stale for {order.internal_symbol}: {int(age)}s old")
             self._validate_sl_tp(order, latest_tick, trading_settings, reasons, warnings)
 
-        self._apply_news_zone_rules(order.internal_symbol, reasons, warnings)
-
         confirmation = order.client_confirmation
         if mode == "PAPER":
             return RiskDecision(allowed=not reasons, reasons=reasons, warnings=warnings)
@@ -109,6 +108,7 @@ class RiskManager:
         symbol_mapping: SymbolMapping | None,
         mt5_status: MT5StatusRead,
         price_stale_after_seconds: int,
+        user_id: int | None = None,
     ) -> RiskDecision:
         decision = self.evaluate(
             order=order,
@@ -126,6 +126,7 @@ class RiskManager:
                 reasons.append("Strategies are disabled")
             if trading_settings.trading_mode == "LIVE" and not getattr(strategy_settings, "strategy_live_enabled", False):
                 reasons.append("Strategy LIVE execution is disabled")
+        reasons.extend(TorumV1StatusService(self.db).bot_block_reasons(order.internal_symbol, user_id))
         return RiskDecision(allowed=not reasons, reasons=reasons, warnings=warnings)
 
     def latest_tick(self, internal_symbol: str) -> Tick | None:

@@ -39,12 +39,27 @@ Edita `.env`:
 ```text
 TORUM_API_BASE_URL=http://127.0.0.1:8000
 MT5_ALLOWED_ACCOUNT_MODES=DEMO
+MT5_TERMINAL_PATH=
+MT5_LOGIN=
+MT5_PASSWORD=
+MT5_SERVER=
 MT5_BRIDGE_HOST=127.0.0.1
 MT5_BRIDGE_PORT=9100
 MT5_ALLOW_ORDER_EXECUTION=false
 MT5_ENABLE_REAL_TRADING=false
 MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:XAUUSD,XAUEUR:XAUEUR,XAUAUD:XAUAUD,XAUJPY:XAUJPY,DXY:DXY
 ```
+
+Si MT5 no esta ya logueado o aparece `Terminal: Authorization failed`, deja credenciales en `.env`:
+
+```text
+MT5_TERMINAL_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
+MT5_LOGIN=12345678
+MT5_PASSWORD=tu_password
+MT5_SERVER=NombreBroker-Demo
+```
+
+`MT5_SERVER` debe ser exactamente el servidor que sale en MetaTrader 5 al iniciar sesion. Tambien puedes dejar esos campos vacios y abrir MT5 manualmente con la cuenta ya conectada.
 
 Si tu broker usa `GOLD`:
 

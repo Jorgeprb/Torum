@@ -40,6 +40,16 @@ const defaultJson = JSON.stringify(
   2
 );
 
+const spainDateTimeFormatter = new Intl.DateTimeFormat("es-ES", {
+  dateStyle: "short",
+  timeStyle: "medium",
+  timeZone: "Europe/Madrid"
+});
+
+function formatSpainDateTime(value: string): string {
+  return spainDateTimeFormatter.format(new Date(value));
+}
+
 export function NewsPanel({ symbol, zones, onChanged }: NewsPanelProps) {
   const [settings, setSettings] = useState<NewsSettings | null>(null);
   const [events, setEvents] = useState<NewsEvent[]>([]);
@@ -232,7 +242,7 @@ export function NewsPanel({ symbol, zones, onChanged }: NewsPanelProps) {
         <div className="compact-table">
           {events.slice(0, 8).map((event) => (
             <div className="table-row table-row--news" key={event.id}>
-              <span>{new Date(event.event_time).toLocaleString()}</span>
+              <span>{formatSpainDateTime(event.event_time)}</span>
               <span>{event.title}</span>
               <span>{event.currency}</span>
               <span>{event.impact}</span>
@@ -249,8 +259,8 @@ export function NewsPanel({ symbol, zones, onChanged }: NewsPanelProps) {
           {zones.slice(0, 8).map((zone) => (
             <div className="table-row table-row--zones" key={zone.id}>
               <span>{zone.internal_symbol}</span>
-              <span>{new Date(zone.start_time).toLocaleString()}</span>
-              <span>{new Date(zone.end_time).toLocaleString()}</span>
+              <span>{formatSpainDateTime(zone.start_time)}</span>
+              <span>{formatSpainDateTime(zone.end_time)}</span>
               <span>{zone.blocks_trading ? "Bloquea" : "Visual"}</span>
               <span>{zone.reason}</span>
             </div>

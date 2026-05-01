@@ -19,6 +19,7 @@ from app.market_data.diagnostics_router import router as market_diagnostics_rout
 from app.market_data.router import router as mock_market_router
 from app.mt5.router import router as mt5_router
 from app.news.routes import router as news_router
+from app.news.scheduler import news_provider_scheduler
 from app.news.service import seed_global_news_settings
 from app.no_trade_zones.routes import router as no_trade_zones_router
 from app.orders.router import router as orders_router
@@ -48,10 +49,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     seed_global_news_settings()
     seed_default_indicators()
     seed_strategy_engine_defaults()
+    news_provider_scheduler.start()
     logger.info("Torum API started")
     try:
         yield
     finally:
+        news_provider_scheduler.stop()
         await app.state.mock_market.stop()
 
 

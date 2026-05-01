@@ -1,7 +1,9 @@
-import { Activity, Bell, Gauge, LogOut, Settings, Shield, Signal } from "lucide-react";
+import { useState } from "react";
+import { LogOut, Shield, Signal } from "lucide-react";
 
 import { StatusPill } from "../ui/StatusPill";
 import { TradingDashboard } from "../../features/trading/TradingDashboard";
+import { accountNavItems, type MobileView } from "../../features/mobile/AccountDrawer";
 import type { User } from "../../services/api";
 import { useAuthStore } from "../../stores/authStore";
 
@@ -11,6 +13,8 @@ interface ShellProps {
 
 export function Shell({ user }: ShellProps) {
   const logout = useAuthStore((state) => state.logout);
+  const [activeView, setActiveView] = useState<MobileView>("chart");
+  const activeLabel = accountNavItems.find((item) => item.id === activeView)?.label ?? "Grafico";
 
   return (
     <div className="app-shell">
@@ -24,22 +28,20 @@ export function Shell({ user }: ShellProps) {
         </div>
 
         <nav className="nav-list" aria-label="Principal">
-          <button className="nav-item nav-item--active" type="button">
-            <Activity size={18} />
-            Trading
-          </button>
-          <button className="nav-item" type="button">
-            <Gauge size={18} />
-            Indicadores
-          </button>
-          <button className="nav-item" type="button">
-            <Bell size={18} />
-            Alertas
-          </button>
-          <button className="nav-item" type="button">
-            <Settings size={18} />
-            Configuracion
-          </button>
+          {accountNavItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                className={activeView === item.id ? "nav-item nav-item--active" : "nav-item"}
+                key={item.id}
+                type="button"
+                onClick={() => setActiveView(item.id)}
+              >
+                <Icon size={18} />
+                {item.label}
+              </button>
+            );
+          })}
         </nav>
 
         <div className="sidebar-footer">
@@ -59,7 +61,7 @@ export function Shell({ user }: ShellProps) {
         <header className="topbar">
           <div>
             <p className="eyebrow">Terminal</p>
-            <h1>Trading</h1>
+            <h1>{activeLabel}</h1>
           </div>
           <div className="topbar-status">
             <Signal size={18} />
@@ -69,7 +71,7 @@ export function Shell({ user }: ShellProps) {
           </div>
         </header>
 
-        <TradingDashboard />
+        <TradingDashboard activeView={activeView} onActiveViewChange={setActiveView} />
       </main>
     </div>
   );

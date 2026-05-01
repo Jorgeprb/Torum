@@ -46,6 +46,13 @@ class NewsSettings(Base):
     affected_symbols: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     provider_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     provider_name: Mapped[str] = mapped_column(String(80), nullable=False, default="manual_csv_json")
+    provider: Mapped[str] = mapped_column(String(24), nullable=False, default="MANUAL")
+    auto_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sync_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=360)
+    days_ahead: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_status: Mapped[str | None] = mapped_column(String(24))
+    last_sync_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

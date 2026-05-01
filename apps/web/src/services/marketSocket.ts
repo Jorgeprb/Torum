@@ -29,9 +29,9 @@ export class MarketSocketManager {
   private readonly maxBackoffMs: number;
 
   constructor(private readonly options: MarketSocketManagerOptions) {
-    this.heartbeatMs = options.heartbeatMs ?? 10000;
-    this.staleAfterMs = options.staleAfterMs ?? 30000;
-    this.maxBackoffMs = options.maxBackoffMs ?? 15000;
+    this.heartbeatMs = options.heartbeatMs ?? 5000;
+    this.staleAfterMs = options.staleAfterMs ?? 12000;
+    this.maxBackoffMs = options.maxBackoffMs ?? 5000;
   }
 
   connect(symbol: string, timeframe: Timeframe) {
@@ -63,6 +63,15 @@ export class MarketSocketManager {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN || stale) {
       this.reconnect(reason);
     }
+  }
+
+  reconnectNow(_reason = "manual") {
+    if (this.closedByUser) {
+      return;
+    }
+
+    this.reconnectAttempts = 0;
+    this.openSocket("reconnecting");
   }
 
   markOffline() {
@@ -153,9 +162,9 @@ export class MarketSocketManager {
   }
 
   private nextBackoffDelay() {
-    const base = Math.min(this.maxBackoffMs, 500 * 2 ** this.reconnectAttempts);
+    const base = Math.min(this.maxBackoffMs, 250 * 2 ** this.reconnectAttempts);
     this.reconnectAttempts += 1;
-    const jitter = Math.floor(Math.random() * 300);
+    const jitter = Math.floor(Math.random() * 150);
     return Math.min(this.maxBackoffMs, base + jitter);
   }
 

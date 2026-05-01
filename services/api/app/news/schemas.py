@@ -93,6 +93,13 @@ class NewsSettingsRead(BaseModel):
     affected_symbols: list[str]
     provider_enabled: bool
     provider_name: str
+    provider: str
+    auto_sync_enabled: bool
+    sync_interval_minutes: int
+    days_ahead: int
+    last_sync_at: datetime | None
+    last_sync_status: str | None
+    last_sync_error: str | None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -108,6 +115,10 @@ class NewsSettingsUpdate(BaseModel):
     affected_symbols: list[str] | None = None
     provider_enabled: bool | None = None
     provider_name: str | None = Field(default=None, min_length=1, max_length=80)
+    provider: str | None = Field(default=None, min_length=3, max_length=24)
+    auto_sync_enabled: bool | None = None
+    sync_interval_minutes: int | None = Field(default=None, ge=15, le=10080)
+    days_ahead: int | None = Field(default=None, ge=1, le=90)
 
     @model_validator(mode="after")
     def normalize_filters(self) -> "NewsSettingsUpdate":
@@ -119,6 +130,10 @@ class NewsSettingsUpdate(BaseModel):
             self.impact_filter = [normalize_impact(value) for value in self.impact_filter if value.strip()]
         if self.affected_symbols is not None:
             self.affected_symbols = [value.strip().upper() for value in self.affected_symbols if value.strip()]
+        if self.provider is not None:
+            self.provider = self.provider.strip().upper()
+            if self.provider not in {"FINNHUB", "MANUAL"}:
+                raise ValueError("provider must be FINNHUB or MANUAL")
         return self
 
 
@@ -137,3 +152,28 @@ class NewsImportResponse(BaseModel):
     saved: int
     zones_generated: int
     errors: list[str] = Field(default_factory=list)
+
+
+class NewsProviderSyncResponse(NewsImportResponse):
+    provider: str
+    started_at: datetime
+    finished_at: datetime
+    status: str
+
+
+class NewsProviderStatusRead(BaseModel):
+    provider: str
+    provider_enabled: bool
+    auto_sync_enabled: bool
+    sync_interval_minutes: int
+    days_ahead: int
+    block_trading_during_news: bool
+    draw_news_zones_enabled: bool
+    minutes_before: int
+    minutes_after: int
+    last_sync_at: datetime | None
+    last_sync_status: str | None
+    last_sync_error: str | None
+    next_event: NewsEventRead | None = None
+    imported_events: int
+    generated_zones: int

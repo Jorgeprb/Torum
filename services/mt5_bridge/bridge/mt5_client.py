@@ -28,10 +28,27 @@ class MT5Client:
             return
         if self.mt5 is None:
             raise MT5ClientError("MetaTrader5 package is not installed. Run: pip install -r requirements.txt")
-        if not self.mt5.initialize():
+        path = self.settings.mt5_terminal_path.strip() or None
+        kwargs: dict[str, object] = {
+            "timeout": self.settings.mt5_timeout_ms,
+            "portable": self.settings.mt5_portable,
+        }
+        if self.settings.mt5_login is not None:
+            kwargs["login"] = self.settings.mt5_login
+        if self.settings.mt5_password is not None:
+            kwargs["password"] = self.settings.mt5_password.get_secret_value()
+        if self.settings.mt5_server.strip():
+            kwargs["server"] = self.settings.mt5_server.strip()
+
+        initialized = bool(self.mt5.initialize(path, **kwargs)) if path else bool(self.mt5.initialize(**kwargs))
+        if not initialized:
             raise MT5ClientError(f"MT5 initialize failed: {self.mt5.last_error()}")
         self._initialized = True
-        logger.info("MT5 initialized")
+        logger.info(
+            "MT5 initialized%s%s",
+            f" path={path}" if path else "",
+            f" login={self.settings.mt5_login}" if self.settings.mt5_login is not None else "",
+        )
 
     def shutdown(self) -> None:
         if self.mt5 is not None:

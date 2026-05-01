@@ -1,8 +1,8 @@
-import { Activity, BarChart3, Gauge, History, Settings, Shield, X, type LucideIcon } from "lucide-react";
+import { Activity, BarChart3, CalendarClock, Gauge, History, Settings, Shield, X, type LucideIcon } from "lucide-react";
 
 import type { MT5Status } from "../../services/market";
 
-export type MobileView = "chart" | "strategies" | "indicators" | "settings" | "history";
+export type MobileView = "chart" | "strategies" | "indicators" | "settings" | "history" | "news";
 
 interface AccountDrawerProps {
   activeView: MobileView;
@@ -14,12 +14,13 @@ interface AccountDrawerProps {
   open: boolean;
 }
 
-const navItems: Array<{ id: MobileView; label: string; icon: LucideIcon }> = [
+export const accountNavItems: Array<{ id: MobileView; label: string; icon: LucideIcon }> = [
   { id: "chart", label: "Grafico", icon: BarChart3 },
+  { id: "history", label: "Historial", icon: History },
+  { id: "news", label: "Noticias", icon: CalendarClock },
   { id: "strategies", label: "Estrategias", icon: Activity },
   { id: "indicators", label: "Indicadores", icon: Gauge },
-  { id: "settings", label: "Ajustes", icon: Settings },
-  { id: "history", label: "Historial", icon: History }
+  { id: "settings", label: "Ajustes", icon: Settings }
 ];
 
 export function AccountDrawer({ activeView, backendOk, marketSource, mt5Status, onClose, onNavigate, open }: AccountDrawerProps) {
@@ -72,7 +73,7 @@ export function AccountDrawer({ activeView, backendOk, marketSource, mt5Status, 
         </section>
 
         <nav className="drawer-nav" aria-label="Navegacion movil">
-          {navItems.map((item) => {
+          {accountNavItems.map((item) => {
             const Icon = item.icon;
             return (
               <button

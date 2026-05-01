@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -12,6 +14,7 @@ from app.drawings.models import ChartDrawing
 from app.drawings.routes import router as drawings_router
 from app.drawings.schemas import ChartDrawingCreate, ChartDrawingUpdate
 from app.drawings.service import ChartDrawingService
+from app.no_trade_zones.models import NoTradeZone
 from app.symbols.models import SymbolMapping
 from app.users.models import User, UserRole
 
@@ -262,3 +265,41 @@ def test_chart_overlays_include_drawing_created_on_other_timeframe() -> None:
 
     assert response.status_code == 200
     assert response.json()["drawings"][0]["drawing_type"] == "rectangle"
+
+
+def test_chart_overlays_hides_finished_news_zones() -> None:
+    db = _session()
+    user = _user(db)
+    now = datetime.now(UTC)
+    db.add_all(
+        [
+            NoTradeZone(
+                source="TEST",
+                reason="finished",
+                internal_symbol="XAUUSD",
+                start_time=now - timedelta(hours=2),
+                end_time=now - timedelta(minutes=1),
+                enabled=True,
+                blocks_trading=False,
+                visual_only=True,
+            ),
+            NoTradeZone(
+                source="TEST",
+                reason="active tail",
+                internal_symbol="XAUUSD",
+                start_time=now - timedelta(minutes=30),
+                end_time=now + timedelta(minutes=30),
+                enabled=True,
+                blocks_trading=False,
+                visual_only=True,
+            ),
+        ]
+    )
+    db.commit()
+    client = _client(db, user)
+
+    response = client.get("/api/chart/overlays?symbol=XAUUSD&timeframe=H1")
+
+    assert response.status_code == 200
+    zones = response.json()["no_trade_zones"]
+    assert [zone["reason"] for zone in zones] == ["active tail"]

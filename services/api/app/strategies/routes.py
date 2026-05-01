@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,8 +18,10 @@ from app.strategies.schemas import (
     StrategySettingsRead,
     StrategySettingsUpdate,
     StrategySignalRead,
+    TorumV1StatusRead,
 )
 from app.strategies.service import StrategyCatalogService
+from app.strategies.torum_v1 import TorumV1StatusService
 from app.users.models import User
 
 router = APIRouter(tags=["strategies"])
@@ -35,6 +38,15 @@ def register_strategy_defaults(
     _current_user: Annotated[User, Depends(get_current_user)],
 ) -> list[StrategyDefinitionRead]:
     return [StrategyDefinitionRead.model_validate(item) for item in StrategyCatalogService(db).register_defaults()]
+
+
+@router.get("/strategies/torum-v1/status", response_model=TorumV1StatusRead)
+def get_torum_v1_status(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> TorumV1StatusRead:
+    status_payload = asdict(TorumV1StatusService(db).status_for_user(current_user.id))
+    return TorumV1StatusRead.model_validate(status_payload)
 
 
 @router.get("/strategy-configs", response_model=list[StrategyConfigRead])

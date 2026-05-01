@@ -29,14 +29,24 @@ Torum guarda ticks crudos en TimescaleDB y construye internamente las velas `M1`
 
 ## Decision de noticias
 
-Torum no depende de scraping fragil como unica fuente de calendario economico. Fase 5 permite importar noticias por JSON/CSV, normalizarlas, crear zonas de no operar y bloquear trading manual si el usuario lo activa.
+Torum no depende de scraping fragil como unica fuente de calendario economico. Fase 5 permite importar noticias por JSON/CSV o sincronizar un provider autorizado, normalizarlas, crear zonas de no operar y bloquear aperturas manuales si el usuario lo activa.
 
 Por defecto:
 
 - se pintan zonas de noticias;
+- se pueden ver zonas futuras como overlays con padding temporal invisible;
 - no se bloquea trading;
 - filtro inicial `USD` + `HIGH`;
 - ventana 60 minutos antes y 60 minutos despues.
+
+Providers:
+
+- `FINNHUB`: calendario economico automatico.
+- `MANUAL`: importacion JSON/CSV.
+
+Torum filtra Finnhub localmente con la logica de `proba.py`: EEUU/USD y eventos macro de alto impacto.
+
+En grafico, `candles` son datos reales hasta la ultima vela generada desde ticks. `future overlays` son zonas visuales futuras. `Centrar/latest` siempre vuelve a la ultima vela real, no al futuro.
 
 ## Decision de indicadores
 
@@ -320,6 +330,47 @@ $settings = @{
 Invoke-RestMethod -Method Patch -ContentType "application/json" -Headers $headers -Uri http://localhost:8000/api/news/settings -Body $settings
 ```
 
+Configurar provider Finnhub:
+
+```text
+FINNHUB_CALENDAR_URL=https://finnhub.io/api/v1/calendar/economic
+FINNHUB_API_KEY=<token-finnhub>
+NEWS_PROVIDER_TIMEOUT_SECONDS=10
+```
+
+Activar sync automatico:
+
+```powershell
+$settings = @{
+  provider = "FINNHUB"
+  provider_enabled = $true
+  auto_sync_enabled = $true
+  sync_interval_minutes = 1440
+  days_ahead = 14
+  block_trading_during_news = $true
+  draw_news_zones_enabled = $true
+  minutes_before = 60
+  minutes_after = 60
+} | ConvertTo-Json
+Invoke-RestMethod -Method Patch -ContentType "application/json" -Headers $headers -Uri http://localhost:8000/api/news/settings -Body $settings
+```
+
+Sincronizar ahora:
+
+```powershell
+Invoke-RestMethod -Method Post -Headers $headers http://localhost:8000/api/news/providers/sync
+Invoke-RestMethod -Headers $headers http://localhost:8000/api/news/providers/status
+```
+
+Comprobar zonas en grafico:
+
+```powershell
+Invoke-RestMethod -Headers $headers "http://localhost:8000/api/no-trade-zones?symbol=XAUUSD"
+Invoke-RestMethod -Headers $headers "http://localhost:8000/api/chart/overlays?symbol=XAUUSD&timeframe=M5"
+```
+
+Para probar bloqueo: activa `block_trading_during_news=true`, crea o importa una noticia HIGH USD con hora actual y envia una orden nueva. Debe rechazarse. Cerrar una posicion abierta sigue permitido.
+
 Calcular SMA30 de DXY:
 
 ```powershell
@@ -428,9 +479,9 @@ Incluido:
 - Risk manager inicial para modo, cuenta MT5, simbolo, volumen, precio fresco y SL/TP basico.
 - Ordenes y posiciones persistidas en base de datos.
 - Servidor HTTP local del `mt5_bridge` para ejecucion de ordenes preparado con `MT5_ALLOW_ORDER_EXECUTION=false` por defecto.
-- News engine con importacion JSON/CSV.
+- News engine con importacion JSON/CSV y provider automatico Finnhub configurable.
 - Zonas de no operar pintadas sobre el grafico.
-- Bloqueo operativo por noticias integrado en risk manager, desactivado por defecto.
+- Bloqueo operativo por noticias integrado en risk manager solo para aperturas, desactivado por defecto.
 - DXY como activo de analisis no operable.
 - Indicadores backend con plugin SMA.
 - SMA30 DXY/D1 como overlay de grafico.

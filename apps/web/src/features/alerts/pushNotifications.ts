@@ -1,9 +1,10 @@
 import { getPushSubscriptions, getVapidPublicKey, sendPushTest, subscribePush } from "../../services/alerts";
+import { canUseServiceWorker, ensureServiceWorkerRegistration } from "../../pwa/registerServiceWorker";
 
 export type PushStatus = "unsupported" | "denied" | "permission-required" | "subscribed" | "ready" | "missing-vapid";
 
 export function isPushSupported(): boolean {
-  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  return canUseServiceWorker() && "PushManager" in window && "Notification" in window;
 }
 
 export function currentPushPermission(): NotificationPermission | "unsupported" {
@@ -37,13 +38,18 @@ export async function activatePushNotifications(): Promise<PushStatus> {
   if (!publicKey) {
     return "missing-vapid";
   }
-  const registration = await navigator.serviceWorker.register("/sw.js");
-  const existing = await registration.pushManager.getSubscription();
+  const applicationServerKey = urlBase64ToArrayBuffer(publicKey);
+  const registration = await ensureServiceWorkerRegistration();
+  let existing = await registration.pushManager.getSubscription();
+  if (existing && !subscriptionUsesKey(existing, applicationServerKey)) {
+    await existing.unsubscribe();
+    existing = null;
+  }
   const subscription =
     existing ??
     (await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToArrayBuffer(publicKey)
+      applicationServerKey
     }));
   await subscribePush({
     ...subscription.toJSON(),
@@ -51,6 +57,14 @@ export async function activatePushNotifications(): Promise<PushStatus> {
     device_name: navigator.platform || "browser"
   });
   return "subscribed";
+}
+
+export async function activatePushForPriceAlert(): Promise<PushStatus> {
+  if (!isPushSupported() || Notification.permission === "denied") {
+    return getPushStatus();
+  }
+
+  return activatePushNotifications();
 }
 
 export async function sendTestPushNotification() {
@@ -66,4 +80,29 @@ function urlBase64ToArrayBuffer(base64String: string): ArrayBuffer {
     outputArray[index] = rawData.charCodeAt(index);
   }
   return outputArray.buffer.slice(outputArray.byteOffset, outputArray.byteOffset + outputArray.byteLength);
+}
+
+function subscriptionUsesKey(subscription: PushSubscription, applicationServerKey: ArrayBuffer): boolean {
+  const currentKey = subscription.options.applicationServerKey;
+  if (!currentKey) {
+    return true;
+  }
+
+  return arrayBuffersEqual(currentKey, applicationServerKey);
+}
+
+function arrayBuffersEqual(left: ArrayBuffer, right: ArrayBuffer): boolean {
+  if (left.byteLength !== right.byteLength) {
+    return false;
+  }
+
+  const leftView = new Uint8Array(left);
+  const rightView = new Uint8Array(right);
+  for (let index = 0; index < leftView.length; index += 1) {
+    if (leftView[index] !== rightView[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }

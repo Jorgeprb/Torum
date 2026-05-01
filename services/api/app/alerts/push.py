@@ -72,6 +72,8 @@ class PushNotificationService:
                 data=json.dumps(payload),
                 vapid_private_key=private_key,
                 vapid_claims={"sub": subject},
+                ttl=60,
+                headers={"Urgency": "high"},
             )
             subscription.last_used_at = datetime.now(UTC)
             return True

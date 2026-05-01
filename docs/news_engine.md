@@ -55,10 +55,18 @@ Campos principales:
 
 ```json
 {
+  "provider": "FINNHUB",
+  "provider_enabled": true,
+  "auto_sync_enabled": true,
+  "sync_interval_minutes": 1440,
+  "days_ahead": 14,
   "draw_news_zones_enabled": true,
   "block_trading_during_news": false,
   "minutes_before": 60,
   "minutes_after": 60,
+  "last_sync_at": null,
+  "last_sync_status": null,
+  "last_sync_error": null,
   "currencies_filter": ["USD"],
   "countries_filter": ["US", "United States"],
   "impact_filter": ["HIGH"],
@@ -66,7 +74,76 @@ Campos principales:
 }
 ```
 
-`block_trading_during_news=false` por defecto. Asi las zonas se pintan, pero no bloquean ordenes hasta que el usuario lo active.
+`block_trading_during_news=false` por defecto. Asi las zonas se pintan, pero no bloquean aperturas hasta que el usuario lo active. Cerrar posiciones sigue permitido aunque exista noticia activa.
+
+## Provider automatico
+
+Torum soporta:
+
+- `FINNHUB`
+- `MANUAL`
+
+La opcion automatica es `FINNHUB`. Torum descarga el calendario economico, filtra localmente EEUU/USD + noticias de alto impacto y guarda solo noticias reales importadas desde el provider.
+
+Variables:
+
+```text
+FINNHUB_CALENDAR_URL=https://finnhub.io/api/v1/calendar/economic
+FINNHUB_API_KEY=
+NEWS_PROVIDER_TIMEOUT_SECONDS=10
+```
+
+Endpoints:
+
+```text
+GET /api/news/providers/status
+POST /api/news/providers/sync
+```
+
+El sync automatico corre al arrancar y cada `sync_interval_minutes`, si:
+
+- `provider_enabled=true`;
+- `auto_sync_enabled=true`;
+- `provider` no es `MANUAL`.
+
+El sync usa el mismo filtrado de `proba.py`:
+
+- EEUU por `country`, `countryName`, `region` o `currency=USD`;
+- alto impacto por patrones como NFP, CPI, PPI, PCE, FOMC, tipos, GDP, retail sales, ISM, JOLTS, ADP y similares;
+- excluye eventos como permisos de construccion, ventas de casas y PMI final.
+
+Luego crea o actualiza `news_events` y regenera `no_trade_zones` para:
+
+```text
+XAUUSD, XAUEUR, XAUAUD, XAUJPY
+```
+
+La deduplicacion usa primero:
+
+```text
+source + external_id
+```
+
+Si no existe `external_id`, usa fingerprint:
+
+```text
+source + currency + title + event_time
+```
+
+## Pagina Noticias
+
+En el burger menu movil hay pagina `Noticias`.
+
+Permite:
+
+- elegir `FINNHUB` o `MANUAL`;
+- activar provider y sync automatico;
+- cambiar intervalo y dias hacia delante;
+- activar bloqueo operativo;
+- cambiar minutos antes/despues;
+- activar o desactivar dibujado en grafico;
+- sincronizar ahora;
+- ver ultima sync, proxima noticia HIGH USD, errores, noticias importadas y zonas generadas.
 
 ## Importar JSON
 
@@ -129,9 +206,44 @@ La zona se pinta como:
 - linea vertical de fin;
 - color mas intenso cuando `blocks_trading=true`.
 
+Si `draw_news_zones_enabled=false`, `/api/chart/overlays` no devuelve zonas de noticias para el grafico. Las zonas siguen existiendo para risk manager y para la pagina Noticias.
+
+## Futuro visual
+
+Las velas siguen siendo reales. Solo nacen desde ticks guardados por Torum. No se crean candles futuras.
+
+Las zonas futuras de noticias son overlays visuales. Para que `timeToCoordinate(...)` pueda pintar una zona que todavia no tiene velas, el grafico crea una serie invisible de padding temporal. Esa serie:
+
+- no tiene OHLC;
+- no se muestra;
+- no alimenta indicadores;
+- no cambia datos reales;
+- solo extiende el eje temporal.
+
+Opciones visuales locales:
+
+```text
+showFutureNewsZones=true
+autoExtendToFutureNews=true
+```
+
+Estan en Ajustes:
+
+- `Zonas futuras`;
+- `Extender tiempo futuro`.
+
+Aunque el eje se extienda, el viewport inicial se conserva. Al abrir app, cambiar activo, cambiar timeframe o pulsar centrar, Torum centra la ultima vela real, no el ultimo overlay futuro.
+
+El usuario ve zonas futuras solo si:
+
+- hace scroll manual hacia la derecha;
+- pulsa el boton del grafico `Ver proximas noticias`.
+
+El boton mueve el viewport a la siguiente zona futura y desactiva el auto-follow. El boton de centrar vuelve a la ultima vela real.
+
 ## Risk manager
 
-El risk manager consulta zonas activas antes de ejecutar orden manual.
+El risk manager consulta zonas activas antes de ejecutar orden manual de apertura.
 
 Si:
 
@@ -139,26 +251,15 @@ Si:
 - existe zona activa para el simbolo;
 - la zona tiene `blocks_trading=true`;
 
-la orden se rechaza con motivo claro.
+la apertura se rechaza con motivo claro.
 
 Si el bloqueo esta desactivado, la orden no se bloquea y se devuelve un warning.
 
-## Proveedores
-
-Torum incluye estas interfaces:
-
-- `BaseNewsProvider`
-- `CsvNewsProvider`
-- `JsonNewsProvider`
-- `MyfxbookProvider`
-- `FutureApiNewsProvider`
-
-`MyfxbookProvider` queda como placeholder hasta configurar una fuente autorizada y estable. Torum no usa scraping fragil como unica via obligatoria porque el calendario economico alimenta decisiones de riesgo y bloqueo operativo.
+El cierre de posiciones no pasa por este bloqueo. Una BUY abierta puede cerrarse durante noticia.
 
 ## Futuro
 
-- scheduler con Redis/Celery o servicio async;
-- proveedor economico con contrato/licencia estable;
+- scheduler avanzado con Redis/Celery si hace falta escalar;
 - alertas push PWA antes de zonas;
 - configuracion por usuario/simbolo;
 - zonas por divisa no USD.

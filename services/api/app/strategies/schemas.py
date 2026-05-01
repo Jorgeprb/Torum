@@ -130,3 +130,25 @@ class StrategyRunResult(BaseModel):
     order_id: int | None = None
     reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class TorumV1AssetStatusRead(BaseModel):
+    symbol: str
+    enabled: bool
+    status: Literal["LOCKED", "UNLOCKED"]
+    reason: str
+    timeframe: str
+    session_start: str
+    session_end: str
+    unlocked_at: datetime | None
+    blocked_by_news: bool
+    active_config_id: int | None
+
+
+class TorumV1StatusRead(BaseModel):
+    strategy_key: str
+    enabled: bool
+    use_news: bool
+    server_time: datetime
+    madrid_time: datetime
+    assets: dict[str, TorumV1AssetStatusRead]

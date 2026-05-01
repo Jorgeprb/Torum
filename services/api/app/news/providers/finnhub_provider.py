@@ -1,20 +1,16 @@
-import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
 
-
-FINNHUB_API_KEY = os.getenv(
-    "FINNHUB_API_KEY",
-    "d7p2inpr01qr68pbfq1gd7p2inpr01qr68pbfq20",
-)
+from app.news.providers.base import BaseNewsProvider, RawNewsEvent
+from app.news.schemas import NewsEventCreate
 
 FINNHUB_URL = "https://finnhub.io/api/v1/calendar/economic"
+FINHUB_APIKEY = "d7p2inpr01qr68pbfq1gd7p2inpr01qr68pbfq20"
 SPAIN_TZ = ZoneInfo("Europe/Madrid")
-
 
 NOT_HIGH_PATTERNS = [
     r"\bbuilding permits\b",
@@ -28,7 +24,6 @@ NOT_HIGH_PATTERNS = [
     r"\bservices pmi final\b",
     r"\bcomposite pmi final\b",
 ]
-
 
 HIGH_IMPACT_PATTERNS = [
     r"\bnon[-\s]?farm payrolls?\b",
@@ -72,11 +67,68 @@ HIGH_IMPACT_PATTERNS = [
 ]
 
 
-def current_week_range_spain() -> tuple[str, str]:
-    today = datetime.now(SPAIN_TZ).date()
-    monday = today - timedelta(days=today.weekday())
-    sunday = monday + timedelta(days=14)
-    return monday.isoformat(), sunday.isoformat()
+class FinnhubProvider(BaseNewsProvider):
+    name = "FINNHUB"
+
+    def __init__(
+        self,
+        *,
+        api_key: str = FINHUB_APIKEY,
+        url: str = FINNHUB_URL,
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self.api_key = api_key
+        self.url = url
+        self.timeout_seconds = timeout_seconds
+
+    def fetch_events(self, start_date: datetime, end_date: datetime) -> list[RawNewsEvent]:
+        if not self.api_key:
+            raise RuntimeError("FINNHUB_API_KEY is required")
+
+        raw_events = fetch_finnhub_events(
+            start_date=_date_param(start_date),
+            end_date=_date_param(end_date),
+            api_key=self.api_key,
+            url=self.url,
+            timeout_seconds=self.timeout_seconds,
+        )
+        news = [
+            normalized
+            for event in raw_events
+            if is_us_event(event) and is_high_impact(event)
+            if (normalized := normalize_event(event, input_tz=UTC)) is not None
+        ]
+        return dedupe_same_time(news)
+
+    def normalize(self, raw_event: RawNewsEvent) -> NewsEventCreate:
+        return NewsEventCreate.model_validate(raw_event)
+
+
+def fetch_finnhub_events(
+    *,
+    start_date: str,
+    end_date: str,
+    api_key: str,
+    url: str,
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    response = requests.get(
+        url,
+        params={
+            "from": start_date,
+            "to": end_date,
+            "token": api_key,
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+
+    data = response.json()
+
+    if isinstance(data, dict) and isinstance(data.get("economicCalendar"), list):
+        return [event for event in data["economicCalendar"] if isinstance(event, dict)]
+
+    raise RuntimeError(f"Respuesta inesperada de Finnhub: {data}")
 
 
 def first_present(event: dict[str, Any], keys: list[str]) -> Any:
@@ -130,7 +182,7 @@ def is_us_event(event: dict[str, Any]) -> bool:
 
 def parse_datetime_to_spain(
     value: Any,
-    input_tz: timezone | ZoneInfo = timezone.utc,
+    input_tz: timezone | ZoneInfo = UTC,
 ) -> str:
     raw = str(value).strip()
 
@@ -158,33 +210,9 @@ def parse_datetime_to_spain(
     return parsed.astimezone(SPAIN_TZ).isoformat()
 
 
-def fetch_finnhub_events(
-    start_date: str,
-    end_date: str,
-    api_key: str = FINNHUB_API_KEY,
-) -> list[dict[str, Any]]:
-    response = requests.get(
-        FINNHUB_URL,
-        params={
-            "from": start_date,
-            "to": end_date,
-            "token": api_key,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    data = response.json()
-
-    if isinstance(data, dict) and isinstance(data.get("economicCalendar"), list):
-        return data["economicCalendar"]
-
-    raise RuntimeError(f"Respuesta inesperada de Finnhub: {data}")
-
-
 def normalize_event(
     event: dict[str, Any],
-    input_tz: timezone | ZoneInfo = timezone.utc,
+    input_tz: timezone | ZoneInfo = UTC,
 ) -> dict[str, Any] | None:
     title = first_present(event, ["event", "title", "name", "indicator", "category"])
     raw_time = first_present(event, ["time", "date", "datetime", "event_time"])
@@ -199,53 +227,38 @@ def normalize_event(
 
     return {
         "source": "FINNHUB",
+        "external_id": optional_str(first_present(event, ["id", "eventId", "event_id"])),
         "country": "United States",
         "currency": "USD",
         "impact": "HIGH",
-        "title": title,
+        "title": str(title),
         "event_time": event_time_es,
-        "previous_value": first_present(event, ["prev", "previous"]),
-        "forecast_value": first_present(event, ["forecast", "estimate", "consensus"]),
-        "actual_value": first_present(event, ["actual"]),
+        "previous_value": optional_str(first_present(event, ["prev", "previous"])),
+        "forecast_value": optional_str(first_present(event, ["forecast", "estimate", "consensus"])),
+        "actual_value": optional_str(first_present(event, ["actual"])),
+        "raw_payload_json": event,
     }
+
+
+def optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def dedupe_same_time(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_time: dict[str, dict[str, Any]] = {}
 
     for event in events:
-        key = event["event_time"]
+        key = str(event["event_time"])
         if key not in by_time:
             by_time[key] = event
 
-    return sorted(by_time.values(), key=lambda item: item["event_time"])
+    return sorted(by_time.values(), key=lambda item: str(item["event_time"]))
 
 
-def get_finnhub_us_high_impact_news(
-    start_date: str | None = None,
-    end_date: str | None = None,
-    input_tz: timezone | ZoneInfo = timezone.utc,
-) -> list[dict[str, Any]]:
-    """
-    Devuelve noticias HIGH de EEUU/USD desde Finnhub en hora española.
-    El campo event_time se guarda directamente en Europe/Madrid.
-    Elimina duplicados si varias noticias caen exactamente a la misma hora.
-    """
-    if start_date is None or end_date is None:
-        start_date, end_date = current_week_range_spain()
-
-    raw_events = fetch_finnhub_events(start_date, end_date)
-
-    news = [
-        normalized
-        for event in raw_events
-        if is_us_event(event) and is_high_impact(event)
-        if (normalized := normalize_event(event, input_tz=input_tz)) is not None
-    ]
-
-    return dedupe_same_time(news)
-
-
-# Variable que puede recoger Torum directamente.
-finnhub_news = get_finnhub_us_high_impact_news()
-print(finnhub_news)
+def _date_param(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(SPAIN_TZ).date().isoformat()

@@ -19,6 +19,13 @@ export interface NewsSettings {
   affected_symbols: string[];
   provider_enabled: boolean;
   provider_name: string;
+  provider: "FINNHUB" | "MANUAL";
+  auto_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  days_ahead: number;
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
 }
 
 export interface NewsEvent {
@@ -54,6 +61,31 @@ export interface NewsImportResponse {
   saved: number;
   zones_generated: number;
   errors: string[];
+}
+
+export interface NewsProviderSyncResponse extends NewsImportResponse {
+  provider: string;
+  started_at: string;
+  finished_at: string;
+  status: string;
+}
+
+export interface NewsProviderStatus {
+  provider: "FINNHUB" | "MANUAL";
+  provider_enabled: boolean;
+  auto_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  days_ahead: number;
+  block_trading_during_news: boolean;
+  draw_news_zones_enabled: boolean;
+  minutes_before: number;
+  minutes_after: number;
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+  next_event: NewsEvent | null;
+  imported_events: number;
+  generated_zones: number;
 }
 
 interface RequestOptions extends RequestInit {
@@ -112,4 +144,12 @@ export function getNoTradeZones(symbol: string, from: string, to: string): Promi
 
 export function regenerateNoTradeZones(): Promise<{ regenerated: number }> {
   return request<{ regenerated: number }>("/api/no-trade-zones/regenerate", { method: "POST" });
+}
+
+export function getNewsProviderStatus(): Promise<NewsProviderStatus> {
+  return request<NewsProviderStatus>("/api/news/providers/status");
+}
+
+export function syncNewsProvider(): Promise<NewsProviderSyncResponse> {
+  return request<NewsProviderSyncResponse>("/api/news/providers/sync", { method: "POST" });
 }
