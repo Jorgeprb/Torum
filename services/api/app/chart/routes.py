@@ -16,6 +16,9 @@ from app.no_trade_zones.schemas import NoTradeZoneRead
 from app.no_trade_zones.service import NoTradeZoneService
 from app.positions.schemas import PositionRead
 from app.positions.service import PositionService
+from app.candles.models import Candle
+from app.strategies.models import StrategyConfig
+from app.strategies.torum_v1 import TORUM_V1_KEY, pullback_debug_payload
 from app.users.models import User
 
 router = APIRouter(prefix="/chart", tags=["chart"])
@@ -84,6 +87,32 @@ def chart_overlays(
         for position in PositionService(db).list_with_prices(status="OPEN", symbol=symbol, limit=200)
         if _is_really_open_position(position)
     ]
+    strategy_debug_pullbacks = []
+    if current_user is not None:
+        config = (
+            db.query(StrategyConfig)
+            .filter(
+                StrategyConfig.user_id == current_user.id,
+                StrategyConfig.strategy_key == TORUM_V1_KEY,
+                StrategyConfig.internal_symbol == symbol.upper(),
+                StrategyConfig.enabled.is_(True),
+            )
+            .order_by(StrategyConfig.id)
+            .first()
+        )
+        params = config.params_json if config is not None else {}
+        if config is not None and bool(params.get("show_pullback_debug", False)):
+            candles_m5 = list(
+                db.query(Candle)
+                .filter(
+                    Candle.internal_symbol == symbol.upper(),
+                    Candle.timeframe == "M5",
+                    Candle.time >= start,
+                    Candle.time <= end,
+                )
+                .order_by(Candle.time)
+            )
+            strategy_debug_pullbacks = pullback_debug_payload(candles_m5, params)
     return ChartOverlaysResponse(
         symbol=symbol.upper(),
         timeframe=timeframe,
@@ -92,4 +121,5 @@ def chart_overlays(
         drawings=drawings,
         price_alerts=price_alerts,
         positions=positions,
+        strategy_debug_pullbacks=strategy_debug_pullbacks,
     )

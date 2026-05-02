@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth.router import router as auth_router
 from app.alerts.routes import router as alerts_router
+from app.admin.system import router as admin_system_router
 from app.candles.router import router as candles_router
 from app.chart.routes import router as chart_router
 from app.core.config import get_settings
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(chart_router, prefix="/api")
     app.include_router(strategies_router, prefix="/api")
     app.include_router(alerts_router, prefix="/api")
+    app.include_router(admin_system_router, prefix="/api")
     app.include_router(trading_router, prefix="/api")
     app.include_router(orders_router, prefix="/api")
     app.include_router(positions_router, prefix="/api")

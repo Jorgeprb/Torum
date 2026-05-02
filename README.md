@@ -143,6 +143,8 @@ Los ticks guardan `time_msc` y Torum resuelve el ultimo precio por `time_msc DES
 
 La PWA usa un WebSocket manager centralizado con heartbeat `ping/pong`, backoff y deteccion de datos `stale`. Al volver de segundo plano, recuperar red o reconectar el socket, Torum recarga velas, ultimo tick, estado MT5, posiciones, historial, alertas y overlays.
 
+Si API, bridge, MT5 y WebSocket siguen vivos pero los ticks quedan viejos porque el mercado esta cerrado, la UI muestra `Mercado cerrado` en vez de `Reconectando`. Si falla socket/backend/bridge/MT5, mantiene el aviso de reconexion.
+
 En `DEMO` y `LIVE`, las acciones de compra, cierre y modificacion de TP se bloquean si el stream esta desconectado, reconectando o desactualizado. Ver [reconnection.md](docs/reconnection.md).
 
 La sincronizacion de cierres MT5 usa `positions_get()` como verdad de posiciones abiertas y `history_deals_get()` para completar cierres por `deal.position_id`, guardando `close_price`, `closed_at`, `profit`, `swap`, `commission` y `closing_deal_ticket`.
@@ -154,6 +156,39 @@ VAPID_PUBLIC_KEY=
 VAPID_PRIVATE_KEY=
 VAPID_SUBJECT=mailto:admin@torum.dev
 ```
+
+## Watchdog local
+
+Torum incluye un watchdog Windows local en `services/watchdog`. El frontend nunca ejecuta comandos: abre el popup `Estado del sistema`, llama al backend, y el backend llama al watchdog con `WATCHDOG_ADMIN_TOKEN`.
+
+No hace falta `.env` para watchdog. La config vive en variables de Windows.
+El script tambien pone `COMPOSE_DISABLE_ENV_FILE=true`, asi Docker Compose no carga `.env` aunque exista.
+
+Instalar y arrancar:
+
+```powershell
+cd c:\Users\steel\Documents\Codex\Torum_App\torum
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\set_torum_system_config.ps1 -WatchdogAdminToken "pon-token-largo" -Mt5Path "C:\Program Files\MetaTrader 5\terminal64.exe"
+
+cd c:\Users\steel\Documents\Codex\Torum_App\torum\services\watchdog
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 127.0.0.1 --port 9200
+```
+
+Registrar autoarranque Windows:
+
+```powershell
+cd c:\Users\steel\Documents\Codex\Torum_App\torum
+.\scripts\windows\register_startup_task.ps1
+```
+
+Desinstalar autoarranque:
+
+```powershell
+.\scripts\windows\register_startup_task.ps1 -Unregister
+```
+
+El watchdog permite reiniciar MT5, API, bridge, frontend, todo, o PC. Cada accion requiere confirmacion escrita desde la UI. Reiniciar PC requiere `REINICIAR PC`.
 
 ## Roles
 
@@ -178,7 +213,6 @@ Desde PowerShell:
 
 ```powershell
 cd c:\Users\steel\Documents\Codex\Torum_App\torum
-Copy-Item .env.example .env
 docker compose up --build
 ```
 
@@ -186,7 +220,6 @@ En otra terminal:
 
 ```powershell
 cd c:\Users\steel\Documents\Codex\Torum_App\torum\apps\web
-Copy-Item .env.example .env.local
 npm install
 npm run dev
 ```
@@ -535,10 +568,7 @@ Con MT5 abierto y backend levantado:
 
 ```powershell
 cd c:\Users\steel\Documents\Codex\Torum_App\torum\services\mt5_bridge
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
+python -m pip install -r requirements.txt
 python -m bridge.main
 ```
 

@@ -18,8 +18,10 @@ interface MobileTopBarProps {
   onChartSplitChange: (count: 1 | 2 | 3, orientation: "vertical" | "horizontal") => void;
   onDrawingMenuClick: () => void;
   onMenuClick: () => void;
+  onSystemStatusClick: () => void;
   onSymbolChange: (symbol: string) => void;
   onTimeframeChange: (timeframe: Timeframe) => void;
+  marketClosed?: boolean;
   selectedSymbol: string;
   selectedTimeframe: Timeframe;
   symbolLabels?: Record<string, string>;
@@ -39,8 +41,10 @@ export function MobileTopBar({
   onChartSplitChange,
   onDrawingMenuClick,
   onMenuClick,
+  onSystemStatusClick,
   onSymbolChange,
   onTimeframeChange,
+  marketClosed = false,
   selectedSymbol,
   selectedTimeframe,
   symbolLabels,
@@ -49,13 +53,17 @@ export function MobileTopBar({
   const [openMenu, setOpenMenu] = useState<"symbol" | "timeframe" | "split" | null>(null);
   const dropdownRootRef = useRef<HTMLDivElement | null>(null);
   const statusClass =
-    connectionStatus === "connected"
+    marketClosed
+      ? "mobile-status mobile-status--warning"
+      : connectionStatus === "connected"
       ? "mobile-status mobile-status--ok"
       : connectionStatus === "connecting" || connectionStatus === "reconnecting" || connectionStatus === "stale"
         ? "mobile-status mobile-status--warning"
         : "mobile-status mobile-status--error";
   const statusTitle =
-    connectionStatus === "connected"
+    marketClosed
+      ? "Mercado cerrado"
+      : connectionStatus === "connected"
       ? "Stream conectado"
       : connectionStatus === "connecting"
         ? "Conectando"
@@ -222,9 +230,9 @@ export function MobileTopBar({
       >
         <Bell size={22} />
       </button>
-      <span className={statusClass} title={statusTitle}>
+      <button className={`${statusClass} mobile-status-button`} title={statusTitle} type="button" onClick={onSystemStatusClick}>
         <Signal size={18} />
-      </span>
+      </button>
     </header>
   );
 }

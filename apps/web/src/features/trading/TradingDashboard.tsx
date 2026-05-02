@@ -12,6 +12,7 @@ import { NewsProviderPage } from "../news/NewsProviderPage";
 import { StrategyPanel } from "../strategies/StrategyPanel";
 import { PriceAlertPanel } from "../alerts/PriceAlertPanel";
 import { activatePushForPriceAlert, type PushStatus } from "../alerts/pushNotifications";
+import { SystemStatusModal } from "../admin/SystemStatusModal";
 import { AccountDrawer, type MobileView } from "../mobile/AccountDrawer";
 import { MobileTopBar } from "../mobile/MobileTopBar";
 import { TradingSettingsPage } from "../settings/TradingSettingsPage";
@@ -59,7 +60,7 @@ import {
   getTradingSettings,
   modifyPositionTp
 } from "../../services/trading";
-import { type IndicatorLineOutput, getChartOverlays, isLineOutput } from "../../services/indicators";
+import { type IndicatorLineOutput, type StrategyPullbackDebug, getChartOverlays, isLineOutput } from "../../services/indicators";
 import { type NoTradeZone } from "../../services/news";
 import { type TorumV1Status, getTorumV1Status } from "../../services/strategies";
 import {
@@ -108,6 +109,10 @@ function readInitialSymbol(): string {
   } catch {
     return "XAUUSD";
   }
+}
+
+function sourceLabelForStatus(mt5Status: MT5Status | null, mockStatus: MockMarketStatus | null, streamSource: string): string {
+  return mt5Status?.connected_to_mt5 ? "MT5" : mockStatus?.running ? "MOCK" : streamSource;
 }
 
 function drawingToolText(tool: DrawingTool): string {
@@ -449,6 +454,7 @@ interface SplitMarketChartProps {
   showBidLine: boolean;
   showFutureNewsZones: boolean;
   autoExtendToFutureNews: boolean;
+  strategyDebugPullbacks?: StrategyPullbackDebug[];
 }
 
 function SplitMarketChart({
@@ -469,13 +475,15 @@ function SplitMarketChart({
   showAskLine,
   showBidLine,
   showFutureNewsZones,
-  autoExtendToFutureNews
+  autoExtendToFutureNews,
+  strategyDebugPullbacks = []
 }: SplitMarketChartProps) {
   const [candles, setCandles] = useState<Candle[]>([]);
   const [latestTick, setLatestTick] = useState<Tick | null>(null);
   const [loadingCandles, setLoadingCandles] = useState(false);
   const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
   const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
+  const [localStrategyDebugPullbacks, setLocalStrategyDebugPullbacks] = useState<StrategyPullbackDebug[]>([]);
   const [priceAlerts, setPriceAlerts] = useState<PriceAlertRead[]>([]);
   const [drawings, setDrawings] = useState<ChartDrawingRead[]>([]);
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
@@ -496,6 +504,7 @@ function SplitMarketChart({
     setCandles([]);
     setNoTradeZones([]);
     setIndicatorLines([]);
+    setLocalStrategyDebugPullbacks([]);
     setPriceAlerts([]);
     setDrawings([]);
     setSelectedDrawingId(null);
@@ -520,6 +529,7 @@ function SplitMarketChart({
         setLatestTick(ticks[ticks.length - 1] ?? null);
         setNoTradeZones(overlays?.no_trade_zones ?? []);
         setIndicatorLines(overlays?.indicators.filter(isLineOutput) ?? []);
+        setLocalStrategyDebugPullbacks(overlays?.strategy_debug_pullbacks ?? []);
         setPriceAlerts(overlays?.price_alerts ?? []);
         setDrawings(nextDrawings);
         setSelectedDrawingId((current) => (current && nextDrawings.some((drawing) => drawing.id === current) ? current : null));
@@ -532,6 +542,7 @@ function SplitMarketChart({
         setLatestTick(null);
         setNoTradeZones([]);
         setIndicatorLines([]);
+        setLocalStrategyDebugPullbacks([]);
         setPriceAlerts([]);
         setDrawings([]);
         setSelectedDrawingId(null);
@@ -677,6 +688,7 @@ function SplitMarketChart({
           drawingTool={drawingTool}
           drawings={drawingsVisible ? drawings.filter((drawing) => drawing.visible) : []}
           indicatorLines={indicatorLines}
+          strategyDebugPullbacks={strategyDebugPullbacks.length > 0 ? strategyDebugPullbacks : localStrategyDebugPullbacks}
           loadingCandles={loadingCandles}
           noTradeZones={noTradeZones}
           onCancelPriceAlert={(alertId) => void handleCancelPriceAlert(alertId)}
@@ -735,11 +747,13 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [closingPosition, setClosingPosition] = useState(false);
   const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
   const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
+  const [strategyDebugPullbacks, setStrategyDebugPullbacks] = useState<StrategyPullbackDebug[]>([]);
   const [drawings, setDrawings] = useState<ChartDrawingRead[]>([]);
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("select");
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const [drawingsVisible, setDrawingsVisible] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [systemStatusOpen, setSystemStatusOpen] = useState(false);
   const [internalActiveView, setInternalActiveView] = useState<MobileView>("chart");
   const [alertToolActive, setAlertToolActive] = useState(false);
   const [drawingMenuOpen, setDrawingMenuOpen] = useState(false);
@@ -890,12 +904,23 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const latestAsk = latestTick?.ask ?? null;
   const lastPrice = latestBid ?? undefined;
   const frontendTickAgeMs = latestTick ? Math.max(0, Date.now() - latestTick.time_msc) : null;
-  const marketDataStale = socketStatus === "stale" || socketStatus === "reconnecting" || socketStatus === "disconnected" || (frontendTickAgeMs !== null && frontendTickAgeMs > 30000);
+  const mt5LastTickTime = mt5Status?.last_tick_time_by_symbol[selectedSymbol] ?? null;
+  const mt5LastTickAgeMs = mt5LastTickTime ? Math.max(0, Date.now() - Date.parse(mt5LastTickTime)) : null;
+  const backendTickAgeMs = backendLatestTick?.age_ms ?? null;
+  const effectiveTickAgeMs = frontendTickAgeMs ?? mt5LastTickAgeMs ?? backendTickAgeMs;
+  const mt5StatusAgeMs = mt5Status?.updated_at ? Math.max(0, Date.now() - Date.parse(mt5Status.updated_at)) : null;
+  const mt5HeartbeatHealthy =
+    Boolean(mt5Status?.connected_to_mt5 && mt5Status.connected_to_backend) && mt5StatusAgeMs !== null && mt5StatusAgeMs <= 45000;
+  const tickOldOrMissing = effectiveTickAgeMs === null || effectiveTickAgeMs > 30000;
+  const marketClosedWarning = socketStatus === "connected" && mt5HeartbeatHealthy && tickOldOrMissing && sourceLabelForStatus(mt5Status, mockStatus, streamSource) === "MT5";
+  const marketDataStale = socketStatus === "stale" || socketStatus === "reconnecting" || socketStatus === "disconnected" || tickOldOrMissing;
   const marketConnectionHealthy = socketStatus === "connected" && !marketDataStale;
-  const staleTradingReason = "Datos desconectados o desactualizados. Reconectando...";
+  const staleTradingReason = marketClosedWarning ? "Mercado cerrado" : "Datos desconectados o desactualizados. Reconectando...";
   const sourceLabel = mt5Status?.connected_to_mt5 ? "MT5" : mockStatus?.running ? "MOCK" : streamSource;
   const streamStatusLabel =
-    socketStatus === "connected"
+    marketClosedWarning
+      ? "Mercado cerrado"
+      : socketStatus === "connected"
       ? "Stream conectado"
       : socketStatus === "reconnecting"
         ? "Reconectando"
@@ -904,10 +929,15 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
           : socketStatus === "connecting"
             ? "Conectando"
             : "Stream desconectado";
-  const streamStatusTone = socketStatus === "connected" ? "success" : socketStatus === "reconnecting" || socketStatus === "stale" || socketStatus === "connecting" ? "warning" : "danger";
+  const streamStatusTone = marketClosedWarning
+    ? "warning"
+    : socketStatus === "connected"
+      ? "success"
+      : socketStatus === "reconnecting" || socketStatus === "stale" || socketStatus === "connecting"
+        ? "warning"
+        : "danger";
   const accountMode = mt5Status?.account_trade_mode ?? "UNKNOWN";
   const accountCurrency = mt5Status?.account?.currency ?? "EUR";
-  const mt5LastTickTime = mt5Status?.last_tick_time_by_symbol[selectedSymbol] ?? null;
   const symbolTradable = selectedMapping ? selectedMapping.tradable && !selectedMapping.analysis_only : true;
   const symbolTradingNotice = selectedMapping?.analysis_only
     ? `${selectedSymbol} es un activo de analisis. Trading deshabilitado.`
@@ -1070,6 +1100,7 @@ useEffect(() => {
   setCandles([]);
   setNoTradeZones([]);
   setIndicatorLines([]);
+  setStrategyDebugPullbacks([]);
   setPriceAlerts([]);
   setDrawings([]);
   setSelectedDrawingId(null);
@@ -1382,6 +1413,7 @@ useEffect(() => {
 
     setNoTradeZones(response.no_trade_zones);
     setIndicatorLines(response.indicators.filter(isLineOutput));
+    setStrategyDebugPullbacks(response.strategy_debug_pullbacks ?? []);
     setPriceAlerts(response.price_alerts ?? []);
 
     // if (response.positions?.length) {
@@ -1394,6 +1426,7 @@ useEffect(() => {
 
     setNoTradeZones([]);
     setIndicatorLines([]);
+    setStrategyDebugPullbacks([]);
     setPriceAlerts([]);
   }
 }
@@ -2191,10 +2224,12 @@ useEffect(() => {
         connectionStatus={socketStatus}
         drawingTool={drawingTool}
         drawingMenuOpen={drawingMenuOpen}
+        marketClosed={marketClosedWarning}
         onAlertClick={toggleAlertTool}
         onChartSplitChange={handleChartSplitChange}
         onDrawingMenuClick={() => setDrawingMenuOpen((current) => !current)}
         onMenuClick={() => setDrawerOpen(true)}
+        onSystemStatusClick={() => setSystemStatusOpen(true)}
         onSymbolChange={setSelectedSymbol}
         onTimeframeChange={setSelectedTimeframe}
         selectedSymbol={selectedSymbol}
@@ -2211,6 +2246,7 @@ useEffect(() => {
         onNavigate={setActiveMobileView}
         open={drawerOpen}
       />
+      <SystemStatusModal open={systemStatusOpen} onClose={() => setSystemStatusOpen(false)} />
       <div className={drawingMenuOpen ? "mobile-drawing-menu mobile-drawing-menu--open" : "mobile-drawing-menu"}>
         {mobileDrawingTools.map((tool) => (
           <button
@@ -2320,6 +2356,9 @@ useEffect(() => {
             </div>
             <div className="price-cluster">
               <span className="price-value">{typeof lastPrice === "number" ? `BID ${lastPrice.toFixed(2)}` : "BID --"}</span>
+              <button className="system-status-open-button" title="Estado del sistema" type="button" onClick={() => setSystemStatusOpen(true)}>
+                <RadioTower size={16} />
+              </button>
               <StatusPill
                 label={streamStatusLabel}
                 tone={streamStatusTone}
@@ -2351,6 +2390,7 @@ useEffect(() => {
             drawingTool={drawingTool}
             drawings={drawingsVisible ? drawings.filter((drawing) => drawing.visible) : []}
             indicatorLines={indicatorLines}
+            strategyDebugPullbacks={strategyDebugPullbacks}
             noTradeZones={noTradeZones}
             alertToolActive={alertToolActive}
             onCreateDrawing={(drawing) => void handleCreateDrawing(drawing)}

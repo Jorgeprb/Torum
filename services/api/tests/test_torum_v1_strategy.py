@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.candles.models import Candle
+from app.drawings.models import ChartDrawing
 from app.db.base import Base
 from app.news.models import NewsEvent, NewsSettings  # noqa: F401
 from app.news.service import get_global_news_settings
@@ -16,7 +17,16 @@ from app.risk.manager import RiskManager
 from app.settings.trading_settings import TradingSettings
 from app.strategies.models import StrategyConfig
 from app.strategies.repository import get_global_strategy_settings
-from app.strategies.torum_v1 import TorumV1StatusService
+from app.strategies.runner import StrategyRunner
+from app.strategies.torum_v1 import (
+    TorumV1OperationZone,
+    TorumV1StatusService,
+    detect_pullbacks,
+    is_bullish_confirmation,
+    is_candle_inside_operation_zone,
+    operation_zones_from_drawings,
+    should_buy_torum_v1,
+)
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.trading.schemas import ManualOrderRequest
@@ -106,6 +116,41 @@ def _h1(db: Session, symbol: str, start_local: datetime, open_: float, close: fl
             open=open_,
             high=max(open_, close) + 1,
             low=min(open_, close) - 1 if low is None else low,
+            close=close,
+            volume=0.0,
+            tick_count=1,
+            source="TEST",
+        )
+    )
+
+
+def _m5_candle(start_local: datetime, open_: float, high: float, low: float, close: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        time=start_local.astimezone(UTC),
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+    )
+
+
+def _m5(
+    db: Session,
+    symbol: str,
+    start_local: datetime,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+) -> None:
+    db.add(
+        Candle(
+            time=start_local.astimezone(UTC).replace(tzinfo=None),
+            internal_symbol=symbol,
+            timeframe="M5",
+            open=open_,
+            high=high,
+            low=low,
             close=close,
             volume=0.0,
             tick_count=1,
@@ -245,3 +290,177 @@ def test_daily_reset_yesterday_unlock_does_not_unlock_today() -> None:
     status = TorumV1StatusService(db).status_for_user(1, _madrid(2, 11, 5)).assets["XAUEUR"]
 
     assert status.status == "LOCKED"
+
+
+def test_pullback_019_not_detected() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.81, 99.9),
+    ]
+
+    assert detect_pullbacks(candles, threshold=0.20, lookback=12) == []
+
+
+def test_pullback_021_detected() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.79, 99.9),
+    ]
+
+    pullbacks = detect_pullbacks(candles, threshold=0.20, lookback=12)
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].pullback_pct > 0.20
+
+
+def test_pullback_detected_next_bearish_no_buy() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.85, 99.6, 99.7),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99, 101)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_threshold_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is False
+    assert decision.reason == "waiting_bullish_confirmation"
+
+
+def test_pullback_detected_bullish_outside_zone_no_buy() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 90, 95)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_threshold_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is False
+    assert decision.reason == "confirmation_outside_operation_zone"
+
+
+def test_pullback_detected_bullish_inside_zone_buy() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99, 101)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_threshold_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is True
+    assert decision.zone is zone
+
+
+def test_rectangle_not_activated_does_not_count() -> None:
+    drawing = ChartDrawing(
+        id="zone-1",
+        user_id=1,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        drawing_type="rectangle",
+        name=None,
+        payload_json={"time1": int(_madrid(1, 9).timestamp()), "time2": int(_madrid(1, 10).timestamp()), "price1": 99, "price2": 101},
+        style_json={},
+        metadata_json={},
+        locked=False,
+        visible=True,
+        source="MANUAL",
+    )
+
+    assert operation_zones_from_drawings([drawing]) == []
+
+
+def test_active_zone_time_price_outside_no_buy() -> None:
+    candle = _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9)
+    price_zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 80, 90)
+    time_zone = TorumV1OperationZone("z2", "rectangle", int(_madrid(1, 11).timestamp()), int(_madrid(1, 12).timestamp()), 99, 101)
+
+    assert is_bullish_confirmation(candle) is True
+    assert is_candle_inside_operation_zone(candle, price_zone) is False
+    assert is_candle_inside_operation_zone(candle, time_zone) is False
+
+
+def test_duplicate_same_signal_candle_no_buy() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99, 101)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"last_signal_candle_time": int(_madrid(1, 9, 10).timestamp())},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is False
+    assert decision.reason == "duplicate_signal_candle"
+
+
+def test_locked_asset_rejects_strategy_order_no_manual_block() -> None:
+    db = _session()
+    config = _config(db, "XAUUSD", "H2")
+    config.params_json = {
+        **config.params_json,
+        "enable_operation_zones": True,
+        "require_zone": True,
+        "pullback_threshold_pct": 0.2,
+        "pullback_lookback_bars": 12,
+    }
+    db.add(
+        ChartDrawing(
+            user_id=1,
+            internal_symbol="XAUUSD",
+            timeframe="M5",
+            drawing_type="rectangle",
+            name=None,
+            payload_json={"time1": int(_madrid(1, 9).timestamp()), "time2": int(_madrid(1, 10).timestamp()), "price1": 99, "price2": 101},
+            style_json={},
+            metadata_json={"torum_v1_zone_enabled": True, "zone_type": "OPERATION_ZONE", "direction": "BUY"},
+            locked=False,
+            visible=True,
+            source="MANUAL",
+        )
+    )
+    _m5(db, "XAUUSD", _madrid(1, 9), 100, 100, 99.9, 99.95)
+    _m5(db, "XAUUSD", _madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8)
+    _m5(db, "XAUUSD", _madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9)
+    db.commit()
+
+    result = StrategyRunner(db).run_config(config, db.get(User, 1))
+    manual = RiskManager(db).evaluate(
+        ManualOrderRequest(internal_symbol="XAUUSD", side="BUY", volume=0.01),
+        db.query(TradingSettings).one(),
+        db.query(SymbolMapping).filter(SymbolMapping.internal_symbol == "XAUUSD").one(),
+        SimpleNamespace(connected_to_mt5=False, updated_at=None, account_trade_mode="UNKNOWN"),
+        120,
+    )
+
+    assert result.ok is False
+    assert result.order_id is None
+    assert manual.allowed is True

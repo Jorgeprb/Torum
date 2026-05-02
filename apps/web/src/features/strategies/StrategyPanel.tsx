@@ -30,7 +30,14 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
     use_news: true,
     timeframe: "H2",
     session_start: symbol === "XAUEUR" ? "09:00" : "15:30",
-    session_end: symbol === "XAUEUR" ? "15:00" : "21:00"
+    session_end: symbol === "XAUEUR" ? "15:00" : "21:00",
+    enable_operation_zones: true,
+    entry_timeframe: "M5",
+    pullback_threshold_pct: 0.20,
+    pullback_lookback_bars: 12,
+    show_pullback_debug: false,
+    require_zone: true,
+    one_position_per_symbol: true
   };
 }
 
@@ -51,6 +58,10 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
     [configs]
   );
   const torumEnabled = torumSymbols.every((symbol) => torumConfigs.some((config) => config.internal_symbol === symbol && config.enabled));
+  const torumParams = useMemo(
+    () => ({ ...defaultTorumParams("XAUUSD"), ...(torumConfigs[0]?.params_json ?? {}) }),
+    [torumConfigs]
+  );
 
   useEffect(() => {
     void refresh();
@@ -127,6 +138,33 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
     }
   }
 
+  async function updateTorumParams(patch: Record<string, unknown>) {
+    try {
+      const readyConfigs = await Promise.all(torumSymbols.map((symbol) => ensureTorumConfig(symbol, torumEnabled)));
+      const updated = await Promise.all(
+        readyConfigs.map((config) =>
+          patchStrategyConfig(config.id, {
+            params_json: {
+              ...defaultTorumParams(config.internal_symbol),
+              ...config.params_json,
+              ...patch
+            }
+          })
+        )
+      );
+      setConfigs((current) => {
+        const byId = new Map(current.map((config) => [config.id, config]));
+        for (const config of updated) {
+          byId.set(config.id, config);
+        }
+        return [...byId.values()].sort((left, right) => left.id - right.id);
+      });
+      onChanged?.();
+    } catch {
+      // Silencio simple. La card refresca en siguiente carga.
+    }
+  }
+
   return (
     <section className="strategy-workbench">
       <section className="table-panel strategy-card strategy-card--torum">
@@ -164,6 +202,64 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
               <span>XAUEUR 09:00-15:00</span>
               <span>XAUUSD 15:30-21:00</span>
               <span>Noticias bloquean solo BOT</span>
+            </div>
+            <div className="strategy-torum-settings">
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.enable_operation_zones === true}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ enable_operation_zones: event.target.checked })}
+                />
+                Zonas operativas
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.show_pullback_debug === true}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ show_pullback_debug: event.target.checked })}
+                />
+                Mostrar pullbacks M5 calculados
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.require_zone !== false}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ require_zone: event.target.checked })}
+                />
+                Requerir zona
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.one_position_per_symbol !== false}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ one_position_per_symbol: event.target.checked })}
+                />
+                Una posicion por activo
+              </label>
+              <label>
+                Pullback %
+                <input
+                  min="0.01"
+                  step="0.01"
+                  type="number"
+                  value={Number(torumParams.pullback_threshold_pct ?? 0.2)}
+                  onChange={(event) => void updateTorumParams({ pullback_threshold_pct: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                Lookback M5
+                <input
+                  min="2"
+                  step="1"
+                  type="number"
+                  value={Number(torumParams.pullback_lookback_bars ?? 12)}
+                  onChange={(event) => void updateTorumParams({ pullback_lookback_bars: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                Entrada
+                <input disabled value="M5" readOnly />
+              </label>
             </div>
           </div>
         ) : null}

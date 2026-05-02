@@ -19,7 +19,10 @@ class StrategyContextBuilder:
         self.db = db
 
     def build(self, config: StrategyConfig, *, limit: int = 300) -> StrategyContext:
-        candles = self._load_candles(config.internal_symbol, config.timeframe, limit)
+        params = config.params_json or {}
+        entry_timeframe = str(params.get("entry_timeframe") or "M5").upper()
+        candle_timeframe = entry_timeframe if config.strategy_key == "torum_v1" else config.timeframe
+        candles = self._load_candles(config.internal_symbol, candle_timeframe, limit)
         latest_tick = self._latest_tick(config.internal_symbol)
         indicators = self._load_indicators()
         return StrategyContext(
@@ -35,7 +38,7 @@ class StrategyContextBuilder:
             no_trade_zones=NoTradeZoneService(self.db).get_active_zones(config.internal_symbol),
             manual_zones=self._manual_zones(config),
             open_positions=self._open_positions(config.internal_symbol),
-            params=config.params_json or {},
+            params=params,
         )
 
     def _load_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]:
@@ -70,7 +73,7 @@ class StrategyContextBuilder:
                 select(ChartDrawing).where(
                     ChartDrawing.user_id == config.user_id,
                     ChartDrawing.internal_symbol == config.internal_symbol,
-                    ChartDrawing.drawing_type == "manual_zone",
+                    ChartDrawing.drawing_type.in_(("rectangle", "manual_zone")),
                     ChartDrawing.visible.is_(True),
                     ChartDrawing.source == "MANUAL",
                     ChartDrawing.deleted_at.is_(None),

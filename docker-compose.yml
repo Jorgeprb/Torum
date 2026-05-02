@@ -38,11 +38,43 @@ services:
       context: ./services/api
     container_name: torum-api
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
+      PROJECT_NAME: ${PROJECT_NAME:-Torum}
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      TAILSCALE_ENABLED: ${TAILSCALE_ENABLED:-false}
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      API_V1_PREFIX: ${API_V1_PREFIX:-/api/v1}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://torum:change-postgres-password@timescaledb:5432/torum}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://100.124.49.118:4173,http://172.27.176.1:4173,http://172.18.64.1:4173,http://192.168.1.86:4173,https://pc-oficina.tail652fa7.ts.net}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-replace-with-a-long-random-secret}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-720}
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-admin}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-admin@torum.dev}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-change-admin-password}
+      INITIAL_TRADER_USERNAME: ${INITIAL_TRADER_USERNAME:-trader}
+      INITIAL_TRADER_EMAIL: ${INITIAL_TRADER_EMAIL:-trader@torum.dev}
+      INITIAL_TRADER_PASSWORD: ${INITIAL_TRADER_PASSWORD:-change-trader-password}
+      TRADING_MODE: ${TRADING_MODE:-PAPER}
+      MT5_BRIDGE_BASE_URL: ${MT5_BRIDGE_BASE_URL:-http://host.docker.internal:9100}
+      PRICE_STALE_AFTER_SECONDS: ${PRICE_STALE_AFTER_SECONDS:-30}
+      CANDLE_PRICE_SOURCE: ${CANDLE_PRICE_SOURCE:-BID}
+      MOCK_MARKET_TICK_INTERVAL_SECONDS: ${MOCK_MARKET_TICK_INTERVAL_SECONDS:-1.0}
+      LIVE_TRADING_ENABLED: ${LIVE_TRADING_ENABLED:-false}
+      DEFAULT_MAGIC_NUMBER: ${DEFAULT_MAGIC_NUMBER:-260426}
+      DEFAULT_DEVIATION_POINTS: ${DEFAULT_DEVIATION_POINTS:-20}
+      NEWS_BLOCK_ENABLED: ${NEWS_BLOCK_ENABLED:-false}
+      NEWS_BLOCK_MINUTES_BEFORE: ${NEWS_BLOCK_MINUTES_BEFORE:-60}
+      NEWS_BLOCK_MINUTES_AFTER: ${NEWS_BLOCK_MINUTES_AFTER:-60}
+      FINNHUB_CALENDAR_URL: ${FINNHUB_CALENDAR_URL:-https://finnhub.io/api/v1/calendar/economic}
+      NEWS_PROVIDER_TIMEOUT_SECONDS: ${NEWS_PROVIDER_TIMEOUT_SECONDS:-10}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@torum.dev}
+      WATCHDOG_BASE_URL: ${WATCHDOG_BASE_URL:-http://host.docker.internal:9200}
+      WATCHDOG_ADMIN_TOKEN: ${WATCHDOG_ADMIN_TOKEN:-}
+      WATCHDOG_TIMEOUT_SECONDS: ${WATCHDOG_TIMEOUT_SECONDS:-5}
     ports:
       - "${API_BIND_HOST:-0.0.0.0}:${API_PORT:-8000}:8000"
     depends_on:

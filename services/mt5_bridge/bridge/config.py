@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BridgeSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", env_ignore_empty=True)
+    model_config = SettingsConfigDict(extra="ignore", env_ignore_empty=True)
 
     torum_api_base_url: str = "http://127.0.0.1:8000"
     torum_ticks_batch_endpoint: str = "/api/ticks/batch"

@@ -1,5 +1,5 @@
 import { type CSSProperties, type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Bell, LocateFixed, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Bell, Bot, LocateFixed, SlidersHorizontal, Trash2 } from "lucide-react";
 import {
   type CandlestickData,
   type IChartApi,
@@ -17,6 +17,7 @@ import type { Candle } from "../../services/market";
 import type { PriceAlertRead } from "../../services/alerts";
 import type { NoTradeZone } from "../../services/news";
 import { type IndicatorLineOutput } from "../../services/indicators";
+import type { StrategyPullbackDebug } from "../../services/indicators";
 import type { ChartDrawingCreate, ChartDrawingRead, ChartDrawingUpdate, DrawingTool } from "../../services/drawings";
 import { DrawingLayer } from "../drawings/DrawingLayer";
 import type { DrawingCoordinate, DrawingDragAction, DrawingPoint, DrawingShape } from "../drawings/drawingTypes";
@@ -29,6 +30,7 @@ interface MarketChartProps {
   hardResetToken?: number;
   noTradeZones?: NoTradeZone[];
   indicatorLines?: IndicatorLineOutput[];
+  strategyDebugPullbacks?: StrategyPullbackDebug[];
   drawings?: ChartDrawingRead[];
   drawingTool?: DrawingTool;
   selectedDrawingId?: string | null;
@@ -114,6 +116,14 @@ interface PriceAlertOverlay {
   alert: PriceAlertRead;
   y: number;
   targetPrice: number;
+}
+
+interface PullbackDebugOverlay {
+  debug: StrategyPullbackDebug;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
 }
 
 function normalizeUnixSeconds(value: unknown): UTCTimestamp | null {
@@ -646,6 +656,16 @@ function normalizeAlertVisualStyle(value: unknown): PriceAlertVisualStyle {
   };
 }
 
+function isTorumV1OperationZone(drawing: ChartDrawingRead): boolean {
+  const metadata = drawing.metadata ?? {};
+  const payload = drawing.payload ?? {};
+  return metadata.torum_v1_zone_enabled === true || payload.torum_v1_zone_enabled === true;
+}
+
+function canBeTorumV1OperationZone(drawing: ChartDrawingRead | null): drawing is ChartDrawingRead {
+  return Boolean(drawing && (drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone"));
+}
+
 function loadAlertVisualStyles(): Record<string, PriceAlertVisualStyle> {
   try {
     if (typeof window === "undefined") {
@@ -1110,6 +1130,7 @@ export function MarketChart({
   hardResetToken = 0,
   noTradeZones = [],
   indicatorLines = [],
+  strategyDebugPullbacks = [],
   drawings = [],
   drawingTool = "select",
   selectedDrawingId = null,
@@ -1161,6 +1182,7 @@ export function MarketChart({
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
   const [tradeMarkerOverlays, setTradeMarkerOverlays] = useState<TradeMarkerOverlay[]>([]);
   const [priceAlertOverlays, setPriceAlertOverlays] = useState<PriceAlertOverlay[]>([]);
+  const [pullbackDebugOverlays, setPullbackDebugOverlays] = useState<PullbackDebugOverlay[]>([]);
   const [draggingAlertId, setDraggingAlertId] = useState<string | null>(null);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   const [draftAlertPrices, setDraftAlertPrices] = useState<Record<string, number>>({});
@@ -1257,6 +1279,7 @@ export function MarketChart({
       setTradeLineOverlays([]);
       setTradeMarkerOverlays([]);
       setPriceAlertOverlays([]);
+      setPullbackDebugOverlays([]);
       return;
     }
 
@@ -1305,16 +1328,17 @@ export function MarketChart({
 
     const shapes = drawings
       .map((drawing): DrawingShape | null => {
-        const color = styleValue(drawing.style, "color", "#f5c542");
+        const operationZone = isTorumV1OperationZone(drawing);
+        const color = operationZone ? "#2f8cff" : styleValue(drawing.style, "color", "#f5c542");
         const lineWidth = numericStyleValue(drawing.style, "lineWidth", 2);
-        const lineStyle = lineStyleValue(drawing.style);
-        const glow = clampedNumericStyleValue(drawing.style, "glow", 0, 0, 18);
-        const opacity = clampedNumericStyleValue(drawing.style, "opacity", drawing.drawing_type === "manual_zone" ? 0.16 : 0.13, 0, 1);
+        const lineStyle = operationZone ? "dashed" : lineStyleValue(drawing.style);
+        const glow = operationZone ? Math.max(6, clampedNumericStyleValue(drawing.style, "glow", 0, 0, 18)) : clampedNumericStyleValue(drawing.style, "glow", 0, 0, 18);
+        const opacity = operationZone ? 0.18 : clampedNumericStyleValue(drawing.style, "opacity", drawing.drawing_type === "manual_zone" ? 0.16 : 0.13, 0, 1);
         const fallbackBackgroundColor = styleValue(drawing.style, "backgroundColor", "rgba(245,197,66,0.15)");
         const backgroundColor = drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone" ? hexToRgba(color, opacity) : fallbackBackgroundColor;
         const textColor = styleValue(drawing.style, "textColor", "#edf2ef");
         const fontSize = clampedNumericStyleValue(drawing.style, "fontSize", 14, 8, 48);
-        const label = drawingLabel(drawing);
+        const label = operationZone ? "TORUM V1 BUY ZONE" : drawingLabel(drawing);
 
         const base = {
           id: drawing.id,
@@ -1527,6 +1551,18 @@ export function MarketChart({
         .filter((line): line is PriceAlertOverlay => line !== null)
     );
 
+    setPullbackDebugOverlays(
+      strategyDebugPullbacks
+        .map((debug): PullbackDebugOverlay | null => {
+          const x1 = timeToChartX(chart, sortedCandles, debug.swing_high_time, Number.NaN);
+          const x2 = timeToChartX(chart, sortedCandles, debug.pullback_low_time, Number.NaN);
+          const y1 = series.priceToCoordinate(debug.swing_high);
+          const y2 = series.priceToCoordinate(debug.pullback_low);
+          return Number.isNaN(x1) || Number.isNaN(x2) || y1 === null || y2 === null ? null : { debug, x1, y1, x2, y2 };
+        })
+        .filter((overlay): overlay is PullbackDebugOverlay => overlay !== null)
+    );
+
     if (pendingPoint) {
       const x = timeToChartX(chart, sortedCandles, pendingPoint.time, Number.NaN);
       const y = series.priceToCoordinate(pendingPoint.price);
@@ -1543,6 +1579,7 @@ export function MarketChart({
   pendingPoint,
   priceAlerts,
   showFutureNewsZones,
+  strategyDebugPullbacks,
   timeframe,
   tradeLines,
   tradeMarkers
@@ -1830,6 +1867,7 @@ export function MarketChart({
   setTradeLineOverlays([]);
   setPriceAlertOverlays([]);
   setTradeMarkerOverlays([]);
+  setPullbackDebugOverlays([]);
   priceScaleManuallyAdjustedRef.current = false;
   resetPriceScale(chart, series);
 }
@@ -3114,6 +3152,7 @@ if (!series) {
     : selectedAlert
       ? { kind: "alert" as const, id: selectedAlert.id }
       : null;
+  const canToggleTorumZone = canBeTorumV1OperationZone(selectedDrawing) && Boolean(onUpdateDrawing && !selectedDrawing.locked);
   const canStyleSelectedObject = selectedDrawing ? Boolean(onUpdateDrawing && !selectedDrawing.locked) : Boolean(selectedAlert);
   const canDeleteSelectedObject = selectedDrawing ? Boolean(onDeleteDrawing) : Boolean(selectedAlert && onCancelPriceAlert);
 
@@ -3143,6 +3182,25 @@ if (!series) {
     setStyleEditorTarget((current) =>
       current?.kind === selectedObject.kind && current.id === selectedObject.id ? null : selectedObject
     );
+  }
+
+  function handleTorumZoneToggle(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation?.();
+    if (!selectedDrawing || !onUpdateDrawing || selectedDrawing.locked || !canBeTorumV1OperationZone(selectedDrawing)) {
+      return;
+    }
+
+    const enabled = !isTorumV1OperationZone(selectedDrawing);
+    void onUpdateDrawing(selectedDrawing, {
+      metadata: {
+        ...selectedDrawing.metadata,
+        torum_v1_zone_enabled: enabled,
+        zone_type: enabled ? "OPERATION_ZONE" : null,
+        direction: "BUY"
+      }
+    });
   }
 
   function handleSelectedDeleteButton(event: PointerEvent<HTMLButtonElement>) {
@@ -3365,6 +3423,31 @@ if (!series) {
         ))}
       </div>
 
+      <div className="pullback-debug-layer" aria-hidden="true">
+        {pullbackDebugOverlays.map((overlay) => {
+          const dx = overlay.x2 - overlay.x1;
+          const dy = overlay.y2 - overlay.y1;
+          const length = Math.max(2, Math.hypot(dx, dy));
+          const angle = Math.atan2(dy, dx);
+          return (
+            <div className="pullback-debug" key={`${overlay.debug.swing_high_time}:${overlay.debug.pullback_low_time}`}>
+              <span
+                className="pullback-debug__line"
+                style={{
+                  left: overlay.x1,
+                  top: overlay.y1,
+                  width: length,
+                  transform: `rotate(${angle}rad)`
+                }}
+              />
+              <span className="pullback-debug__label" style={{ left: overlay.x2 + 6, top: overlay.y2 - 14 }}>
+                {overlay.debug.label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
       <DrawingLayer
         interactive={false}
         onSelect={(drawingId) => onSelectDrawing?.(drawingId)}
@@ -3373,6 +3456,29 @@ if (!series) {
         shapes={drawingShapes}
       />
       {renderDrawingHitLayer()}
+
+      {canToggleTorumZone ? (
+        <button
+          aria-label={selectedDrawing && isTorumV1OperationZone(selectedDrawing) ? "Desactivar zona Torum V1" : "Activar zona Torum V1"}
+          className={
+            selectedDrawing && isTorumV1OperationZone(selectedDrawing)
+              ? "chart-hard-reset-button chart-object-torum-zone-button chart-object-torum-zone-button--active"
+              : "chart-hard-reset-button chart-object-torum-zone-button"
+          }
+          type="button"
+          onClick={handleTorumZoneToggle}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            event.nativeEvent.stopImmediatePropagation?.();
+          }}
+          onPointerUp={(event) => {
+            event.stopPropagation();
+            event.nativeEvent.stopImmediatePropagation?.();
+          }}
+        >
+          <Bot size={16} />
+        </button>
+      ) : null}
 
       {selectedObject && canStyleSelectedObject ? (
         <button

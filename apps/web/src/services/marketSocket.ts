@@ -30,7 +30,7 @@ export class MarketSocketManager {
 
   constructor(private readonly options: MarketSocketManagerOptions) {
     this.heartbeatMs = options.heartbeatMs ?? 5000;
-    this.staleAfterMs = options.staleAfterMs ?? 12000;
+    this.staleAfterMs = options.staleAfterMs ?? 45000;
     this.maxBackoffMs = options.maxBackoffMs ?? 5000;
   }
 
@@ -59,7 +59,8 @@ export class MarketSocketManager {
     if (this.closedByUser) {
       return;
     }
-    const stale = Date.now() - this.lastMessageAt > this.staleAfterMs;
+    const lastActivityAt = Math.max(this.lastMessageAt, this.lastPongAt);
+    const stale = Date.now() - lastActivityAt > this.staleAfterMs;
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN || stale) {
       this.reconnect(reason);
     }
@@ -178,7 +179,8 @@ export class MarketSocketManager {
     }, this.heartbeatMs);
 
     this.staleTimer = window.setInterval(() => {
-      if (Date.now() - this.lastMessageAt > this.staleAfterMs) {
+      const lastActivityAt = Math.max(this.lastMessageAt, this.lastPongAt);
+      if (Date.now() - lastActivityAt > this.staleAfterMs) {
         this.setStatus("stale");
         this.reconnect("stale");
       }

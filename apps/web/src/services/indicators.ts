@@ -29,6 +29,15 @@ export interface IndicatorLineOutput {
 
 export type IndicatorOutput = IndicatorLineOutput | Record<string, unknown>;
 
+export interface StrategyPullbackDebug {
+  swing_high_time: number;
+  swing_high: number;
+  pullback_low_time: number;
+  pullback_low: number;
+  pullback_pct: number;
+  label: string;
+}
+
 export interface IndicatorRead {
   id: number;
   name: string;
@@ -59,6 +68,7 @@ export interface ChartOverlays {
   drawings: ChartDrawingRead[];
   price_alerts: PriceAlertRead[];
   positions: PositionRead[];
+  strategy_debug_pullbacks: StrategyPullbackDebug[];
 }
 
 interface RequestOptions extends RequestInit {

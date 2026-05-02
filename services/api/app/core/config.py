@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(extra="ignore")
 
     project_name: str = "Torum"
     environment: str = "local"
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str
 
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://100.124.49.118:5173,http://localhost:4173,http://127.0.0.1:4173,http://100.124.49.118:4173,https://pc-oficina.tail652fa7.ts.net"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://100.124.49.118:4173,http://172.27.176.1:4173,http://172.18.64.1:4173,http://192.168.1.86:4173,https://pc-oficina.tail652fa7.ts.net"
 
     jwt_secret_key: SecretStr
     jwt_algorithm: str = "HS256"
@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     vapid_public_key: str | None = None
     vapid_private_key: SecretStr | None = None
     vapid_subject: str = "mailto:admin@torum.dev"
+
+    watchdog_base_url: str | None = "http://host.docker.internal:9200"
+    watchdog_admin_token: SecretStr | None = None
+    watchdog_timeout_seconds: float = 5.0
 
     @property
     def cors_origins_list(self) -> list[str]:
