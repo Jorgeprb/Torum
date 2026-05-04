@@ -16,7 +16,7 @@ class BridgeSettings(BaseSettings):
     torum_http_timeout_seconds: float = 10.0
     torum_http_max_retries: int = 3
 
-    mt5_poll_interval_ms: int = 250
+    mt5_poll_interval_ms: int = 50
     mt5_batch_max_size: int = 500
     mt5_batch_flush_interval_ms: int = 1000
     mt5_buffer_max_size: int = 50000
