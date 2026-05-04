@@ -1180,6 +1180,8 @@ export function MarketChart({
   const DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX = 8;
   const [localHardResetToken, setLocalHardResetToken] = useState(0);
   const [localRecenterToken, setLocalRecenterToken] = useState(0);
+  const suppressNextChartPointerUpRef = useRef(false);
+  const suppressNextChartClickRef = useRef(false);
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
   const [tradeMarkerOverlays, setTradeMarkerOverlays] = useState<TradeMarkerOverlay[]>([]);
@@ -2316,7 +2318,171 @@ if (!series) {
     setPendingPoint(null);
     setPendingCoordinate(null);
   }
+  function handleChartPointerDownCapture(event: PointerEvent<HTMLDivElement>) {
+      if (event.button !== 0) {
+        return;
+      }
 
+      const container = containerRef.current;
+
+      if (!container) {
+        return;
+      }
+
+      const bounds = container.getBoundingClientRect();
+
+      const x = event.clientX - bounds.left;
+      const y = event.clientY - bounds.top;
+
+      const shape = [...drawingShapes]
+        .reverse()
+        .find((candidate) => {
+          if (candidate.drawing.locked) {
+            return false;
+          }
+
+          return isPointInsideDrawingShape(candidate, x, y);
+        });
+
+      if (!shape) {
+        return;
+      }
+
+      const startClientX = event.clientX;
+      const startClientY = event.clientY;
+
+      let longPressTriggered = false;
+
+      const timeoutId = window.setTimeout(() => {
+        longPressTriggered = true;
+
+        suppressNextChartPointerUpRef.current = true;
+        suppressNextChartClickRef.current = true;
+
+        setSelectedAlertId(null);
+        onSelectDrawing?.(shape.id);
+
+        if (navigator.vibrate) {
+          navigator.vibrate(20);
+        }
+      }, DRAWING_LONG_PRESS_MS);
+
+      function cleanup() {
+        window.clearTimeout(timeoutId);
+        document.removeEventListener("pointermove", move, true);
+        document.removeEventListener("pointerup", up, true);
+        document.removeEventListener("pointercancel", cancel, true);
+      }
+
+      function move(pointerEvent: globalThis.PointerEvent) {
+        const dx = pointerEvent.clientX - startClientX;
+        const dy = pointerEvent.clientY - startClientY;
+
+        if (
+          !longPressTriggered &&
+          Math.hypot(dx, dy) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX
+        ) {
+          cleanup();
+        }
+      }
+
+      function up() {
+        cleanup();
+      }
+
+      function cancel() {
+        cleanup();
+      }
+
+      document.addEventListener("pointermove", move, {
+        capture: true,
+        passive: true,
+      });
+
+      document.addEventListener("pointerup", up, true);
+      document.addEventListener("pointercancel", cancel, true);
+    }
+  function distancePointToSegment(
+      px: number,
+      py: number,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number
+    ): number {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+
+      if (dx === 0 && dy === 0) {
+        return Math.hypot(px - x1, py - y1);
+      }
+
+      const t = Math.max(
+        0,
+        Math.min(
+          1,
+          ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+        )
+      );
+
+      const nearestX = x1 + t * dx;
+      const nearestY = y1 + t * dy;
+
+      return Math.hypot(px - nearestX, py - nearestY);
+    }
+
+  function isPointInsideDrawingShape(
+      shape: DrawingShape,
+      x: number,
+      y: number
+    ): boolean {
+      const tolerance = 18;
+
+      if (shape.kind === "horizontal_line") {
+        return Math.abs(y - shape.y) <= tolerance;
+      }
+
+      if (shape.kind === "vertical_line") {
+        return Math.abs(x - shape.x) <= tolerance;
+      }
+
+      if (shape.kind === "text") {
+        const width = Math.max(54, shape.text.length * shape.fontSize * 0.58 + 28);
+        const left = shape.x - 12;
+        const top = shape.y - shape.fontSize - 14;
+
+        return (
+          x >= left &&
+          x <= left + width &&
+          y >= top &&
+          y <= top + shape.fontSize + 20
+        );
+      }
+
+      if (shape.kind === "trend_line") {
+        const distance = distancePointToSegment(
+          x,
+          y,
+          shape.x1,
+          shape.y1,
+          shape.x2,
+          shape.y2
+        );
+
+        return distance <= tolerance;
+      }
+
+      if (shape.kind === "rectangle" || shape.kind === "manual_zone") {
+        return (
+          x >= shape.x &&
+          x <= shape.x + shape.width &&
+          y >= shape.y &&
+          y <= shape.y + shape.height
+        );
+      }
+
+      return false;
+    }
   function handleChartPointerUp(event: PointerEvent<HTMLDivElement>) {
     if (suppressNextChartPointRef.current) {
       suppressNextChartPointRef.current = false;
@@ -2654,59 +2820,21 @@ if (!series) {
     document.addEventListener("pointercancel", cancel, true);
   }
 
-  function drawingHitStyle(shape: DrawingShape): CSSProperties {
-    if (shape.kind === "horizontal_line") {
-      return { left: 0, top: shape.y - 18, width: "100%", height: 36, cursor: "pointer" };
-    }
-
-    if (shape.kind === "vertical_line") {
-      return { left: shape.x - 18, top: 0, width: 36, height: "100%", cursor: "pointer" };
-    }
-
-    if (shape.kind === "text") {
-      return {
-        left: shape.x - 12,
-        top: shape.y - shape.fontSize - 14,
-        width: Math.max(54, shape.text.length * shape.fontSize * 0.58 + 28),
-        height: shape.fontSize + 20,
-        cursor: "pointer"
-      };
-    }
-
-    if (shape.kind === "trend_line") {
-      const dx = shape.x2 - shape.x1;
-      const dy = shape.y2 - shape.y1;
-      const length = Math.max(32, Math.hypot(dx, dy));
-      const angle = Math.atan2(dy, dx);
-
-      return {
-        left: shape.x1,
-        top: shape.y1 - 18,
-        width: length,
-        height: 36,
-        transform: `rotate(${angle}rad)`,
-        transformOrigin: "0 18px",
-        cursor: "pointer"
-      };
-    }
-
-    return {
-      left: shape.x,
-      top: shape.y,
-      width: Math.max(18, shape.width),
-      height: Math.max(18, shape.height),
-      cursor: "pointer"
-    };
-  }
-
-  function drawingHandleStyle(x: number, y: number, cursor: CSSProperties["cursor"], size = 18, color?: string): CSSProperties {
+  function drawingHandleStyle(
+  x: number,
+  y: number,
+  cursor: CSSProperties["cursor"],
+  size = 18,
+  color?: string
+  ): CSSProperties {
     return {
       backgroundColor: color,
       cursor,
       height: size,
       left: x - size / 2,
+      pointerEvents: "auto",
       top: y - size / 2,
-      width: size
+      width: size,
     };
   }
 
@@ -2867,113 +2995,29 @@ if (!series) {
 
   function renderDrawingHitLayer() {
     return (
-      <div className="drawing-html-hit-layer" aria-hidden={drawingShapes.length === 0 ? "true" : undefined}>
+      <div
+        className="drawing-html-hit-layer"
+        aria-hidden={drawingShapes.length === 0 ? "true" : undefined}
+        style={{
+          pointerEvents: "none",
+        }}
+      >
         {drawingShapes.map((shape) => {
           const selected = effectiveSelectedDrawingId === shape.id;
 
           return (
-            <div key={shape.id}>
-              <button
-                aria-label="Mover dibujo"
-                className={selected ? "drawing-html-hit drawing-html-hit--selected" : "drawing-html-hit"}
-                style={drawingHitStyle(shape)}
-                type="button"
-                onPointerDown={(event) => startDrawingLongPress(event, shape)}
-                onPointerUp={() => undefined}
-              />
+            <div
+              key={shape.id}
+              style={{
+                pointerEvents: "none",
+              }}
+            >
               {selected ? renderDrawingHtmlHandles(shape) : null}
             </div>
           );
         })}
       </div>
     );
-  }
-
-  function transformDrawingPayload(
-    drawing: ChartDrawingRead,
-    payload: Record<string, unknown>,
-    startPoint: DrawingPoint,
-    nextPoint: DrawingPoint,
-    action: DrawingDragAction
-  ): Record<string, unknown> {
-    const timeDelta = nextPoint.time - startPoint.time;
-    const priceDelta = nextPoint.price - startPoint.price;
-    const withNumber = (value: unknown, delta: number) => Number(((numberValue(value) ?? 0) + delta).toFixed(5));
-    const withTime = (value: unknown, delta: number) => Math.max(0, Math.floor((numberValue(value) ?? 0) + delta));
-
-    if (drawing.drawing_type === "horizontal_line") {
-      return { ...payload, price: Number(nextPoint.price.toFixed(5)) };
-    }
-
-    if (drawing.drawing_type === "vertical_line") {
-      return { ...payload, time: nextPoint.time };
-    }
-
-    if (drawing.drawing_type === "text") {
-      return {
-        ...payload,
-        time: action === "move" ? withTime(payload.time, timeDelta) : nextPoint.time,
-        price: action === "move" ? withNumber(payload.price, priceDelta) : Number(nextPoint.price.toFixed(5))
-      };
-    }
-
-    if (drawing.drawing_type === "trend_line") {
-      const points = Array.isArray(payload.points) ? payload.points : [];
-      const first = typeof points[0] === "object" && points[0] !== null ? { ...(points[0] as Record<string, unknown>) } : {};
-      const second = typeof points[1] === "object" && points[1] !== null ? { ...(points[1] as Record<string, unknown>) } : {};
-      if (action === "p1") {
-        first.time = nextPoint.time;
-        first.price = Number(nextPoint.price.toFixed(5));
-      } else if (action === "p2") {
-        second.time = nextPoint.time;
-        second.price = Number(nextPoint.price.toFixed(5));
-      } else {
-        first.time = withTime(first.time, timeDelta);
-        first.price = withNumber(first.price, priceDelta);
-        second.time = withTime(second.time, timeDelta);
-        second.price = withNumber(second.price, priceDelta);
-      }
-      return { ...payload, points: [first, second] };
-    }
-
-    if (drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone") {
-      const isManualZone = drawing.drawing_type === "manual_zone";
-      const time1Key = "time1";
-      const time2Key = "time2";
-      const lowKey = isManualZone ? "price_min" : "price1";
-      const highKey = isManualZone ? "price_max" : "price2";
-      let time1 = numberValue(payload[time1Key]) ?? startPoint.time;
-      let time2 = numberValue(payload[time2Key]) ?? nextPoint.time;
-      let price1 = numberValue(payload[lowKey]) ?? startPoint.price;
-      let price2 = numberValue(payload[highKey]) ?? nextPoint.price;
-
-      if (action === "move") {
-        time1 += timeDelta;
-        time2 += timeDelta;
-        price1 += priceDelta;
-        price2 += priceDelta;
-      } else {
-        if (action.includes("left")) time1 = timeframeBucketStart(nextPoint.time, timeframe);
-        if (action.includes("right")) time2 = timeframeBucketStart(nextPoint.time, timeframe) + timeframeToSeconds(timeframe);
-        if (action.includes("top")) price2 = nextPoint.price;
-        if (action.includes("bottom")) price1 = nextPoint.price;
-      }
-
-      const normalizedTime1 = Math.floor(Math.min(time1, time2));
-      const normalizedTime2 = Math.floor(Math.max(time1, time2));
-      const safeTime2 = normalizedTime2 <= normalizedTime1 ? normalizedTime1 + timeframeToSeconds(timeframe) : normalizedTime2;
-      const low = Number(Math.min(price1, price2).toFixed(5));
-      const high = Number(Math.max(price1, price2).toFixed(5));
-      return {
-        ...payload,
-        [time1Key]: normalizedTime1,
-        [time2Key]: safeTime2,
-        [lowKey]: low,
-        [highKey]: high
-      };
-    }
-
-    return payload;
   }
 
   function startAlertDrag(event: PointerEvent<HTMLDivElement>, alert: PriceAlertRead) {
@@ -3454,6 +3498,7 @@ if (!series) {
       }
       ref={containerRef}
       onPointerUp={handleChartPointerUp}
+      onPointerDownCapture={handleChartPointerDownCapture}
     >
       <div className="news-zone-layer" aria-hidden="true">
         {overlays.map((overlay) => (
