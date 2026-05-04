@@ -1176,6 +1176,8 @@ export function MarketChart({
   const overlayRecalculateFrameRef = useRef<number | null>(null);
   const chartPointerActiveRef = useRef(false);
   const priceScaleWidthRef = useRef(64);
+  const DRAWING_LONG_PRESS_MS = 550;
+  const DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX = 8;
   const [localHardResetToken, setLocalHardResetToken] = useState(0);
   const [localRecenterToken, setLocalRecenterToken] = useState(0);
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
@@ -2728,12 +2730,63 @@ if (!series) {
     return { x: shape.x + shape.width / 2, y: shape.y + shape.height / 2 };
   }
 
-  function selectDrawingForEdit(event: PointerEvent<HTMLElement>, shape: DrawingShape) {
-    event.preventDefault();
-    event.stopPropagation();
-    event.nativeEvent.stopImmediatePropagation?.();
-    setSelectedAlertId(null);
-    onSelectDrawing?.(shape.id);
+  function startDrawingLongPress(event: PointerEvent, shape: DrawingShape) {
+    if (shape.drawing.locked) {
+      return;
+    }
+
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    let longPressTriggered = false;
+
+    const timeoutId = window.setTimeout(() => {
+      longPressTriggered = true;
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation?.();
+
+      setSelectedAlertId(null);
+      onSelectDrawing?.(shape.id);
+
+      if (navigator.vibrate) {
+        navigator.vibrate(20);
+      }
+    }, DRAWING_LONG_PRESS_MS);
+
+    function cancel() {
+      window.clearTimeout(timeoutId);
+      document.removeEventListener("pointermove", move, true);
+      document.removeEventListener("pointerup", up, true);
+      document.removeEventListener("pointercancel", pointerCancel, true);
+    }
+
+    function move(pointerEvent: globalThis.PointerEvent) {
+      const dx = pointerEvent.clientX - startClientX;
+      const dy = pointerEvent.clientY - startClientY;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX && !longPressTriggered) {
+        cancel();
+      }
+    }
+
+    function up(pointerEvent: globalThis.PointerEvent) {
+      if (longPressTriggered) {
+        pointerEvent.preventDefault();
+        pointerEvent.stopPropagation();
+      }
+
+      cancel();
+    }
+
+    function pointerCancel() {
+      cancel();
+    }
+
+    document.addEventListener("pointermove", move, { capture: true, passive: true });
+    document.addEventListener("pointerup", up, true);
+    document.addEventListener("pointercancel", pointerCancel, true);
   }
 
   function renderDrawingHtmlHandles(shape: DrawingShape) {
@@ -2825,8 +2878,8 @@ if (!series) {
                 className={selected ? "drawing-html-hit drawing-html-hit--selected" : "drawing-html-hit"}
                 style={drawingHitStyle(shape)}
                 type="button"
-                onPointerDown={(event) => selectDrawingForEdit(event, shape)}
-                onPointerUp={(event) => event.stopPropagation()}
+                onPointerDown={(event) => startDrawingLongPress(event, shape)}
+                onPointerUp={() => undefined}
               />
               {selected ? renderDrawingHtmlHandles(shape) : null}
             </div>

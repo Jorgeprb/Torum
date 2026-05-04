@@ -5,6 +5,8 @@ param(
   [string]$Mt5Path = "C:\Program Files\MetaTrader 5\terminal64.exe",
   [string]$WatchdogHost = "127.0.0.1",
   [int]$WatchdogPort = 9200,
+  [int]$Mt5PollIntervalMs = 50,
+  [int]$Mt5BatchFlushIntervalMs = 100,
   [string]$JwtSecretKey = "replace-with-a-long-random-secret",
   [string]$FrontendStartCmd = "cd apps\web; npm run dev:host",
   [switch]$Machine
@@ -38,7 +40,11 @@ Set-TorumEnv "MAX_TICK_AGE_SECONDS" "30"
 Set-TorumEnv "STARTUP_DELAY_SECONDS" "6"
 Set-TorumEnv "BRIDGE_PYTHON" "python"
 Set-TorumEnv "FRONTEND_START_CMD" $FrontendStartCmd
-Set-TorumEnv "COMPOSE_DISABLE_ENV_FILE" "true"
+
+# Queremos que Docker Compose vuelva a leer .env
+[Environment]::SetEnvironmentVariable("COMPOSE_DISABLE_ENV_FILE", $null, $scope)
+Remove-Item Env:COMPOSE_DISABLE_ENV_FILE -ErrorAction SilentlyContinue
 
 Write-Host "Config Torum guardada en variables de Windows ($scope)."
+Write-Host "Docker Compose leerá el archivo .env desde la raíz del repo."
 Write-Host "Cierra y abre PowerShell antes de arrancar Docker/watchdog."

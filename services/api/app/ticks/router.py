@@ -84,8 +84,9 @@ def ingest_ticks_batch(
     mt5_status_store.update_from_tick_batch(
         source=payload.source,
         inserted_ticks=inserted_ticks,
-        last_tick_time_by_symbol=last_tick_time_by_symbol,  # type: ignore[arg-type]
+        last_tick_time_by_symbol=last_tick_time_by_symbol,
         account_trade_mode=account_trade_mode,
+        account=payload.account,
     )
     if inserted_rows:
         last_tick_time = max(row["time"] for row in inserted_rows)

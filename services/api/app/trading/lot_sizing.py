@@ -33,11 +33,11 @@ def calculate_lot_size(
         source = "minimum_lot_lot_per_equity_disabled"
     elif available_equity is None or available_equity <= 0:
         base_lot = safe_minimum
-        source = "minimum_lot_no_equity"
+        source = "minimum_lot_no_balance"
     else:
         calculated = floor(available_equity / safe_equity_unit) * 0.01
         base_lot = _round_to_step(max(calculated, safe_minimum), safe_step)
-        source = "account_equity"
+        source = "account_balance"
 
     effective_lot = _round_to_step(base_lot * safe_multiplier, safe_step)
     return LotSizeCalculation(

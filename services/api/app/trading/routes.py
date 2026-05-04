@@ -91,16 +91,23 @@ def get_lot_size(
     multiplier: int = 1,
 ) -> LotSizeResponse:
     del symbol
+
     settings = get_global_trading_settings(db)
     account = mt5_status_store.get().account
-    available_equity = account.margin_free if account and account.margin_free is not None else account.equity if account else None
+
+    # IMPORTANTE:
+    # El lotaje base se calcula sobre BALANCE, no sobre equity ni margin_free.
+    # Así las operaciones abiertas no modifican el tamaño base del lote.
+    available_balance = account.balance if account and account.balance is not None else None
+
     calculation = calculate_lot_size(
-        available_equity=available_equity,
+        available_equity=available_balance,
         equity_per_0_01_lot=settings.equity_per_0_01_lot,
         minimum_lot=settings.minimum_lot,
         multiplier=multiplier,
         enabled=settings.lot_per_equity_enabled,
     )
+
     return LotSizeResponse(**calculation.__dict__)
 
 

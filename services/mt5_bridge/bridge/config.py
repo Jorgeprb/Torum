@@ -5,7 +5,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class BridgeSettings(BaseSettings):
-    model_config = SettingsConfigDict(extra="ignore", env_ignore_empty=True)
+    model_config = SettingsConfigDict(
+    env_file=("../../.env", ".env"),
+    env_file_encoding="utf-8",
+    extra="ignore",
+)
 
     torum_api_base_url: str = "http://127.0.0.1:8000"
     torum_ticks_batch_endpoint: str = "/api/ticks/batch"
@@ -18,7 +22,7 @@ class BridgeSettings(BaseSettings):
 
     mt5_poll_interval_ms: int = 50
     mt5_batch_max_size: int = 500
-    mt5_batch_flush_interval_ms: int = 1000
+    mt5_batch_flush_interval_ms: int = 100
     mt5_buffer_max_size: int = 50000
     mt5_lookback_seconds_on_start: int = 10
     mt5_copy_ticks_max_count: int = 10000

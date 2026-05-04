@@ -19,11 +19,12 @@ class MT5StatusStore:
             return self._status.model_copy(deep=True)
 
     def update_from_tick_batch(
-        self,
-        source: str,
-        inserted_ticks: int,
-        last_tick_time_by_symbol: dict[str, datetime],
-        account_trade_mode: str = "UNKNOWN",
+    self,
+    source: str,
+    inserted_ticks: int,
+    last_tick_time_by_symbol: dict[str, datetime],
+    account_trade_mode: str = "UNKNOWN",
+    account=None,
     ) -> MT5StatusRead | None:
         if source.upper() != "MT5":
             return None
@@ -32,13 +33,19 @@ class MT5StatusStore:
             current = self._status.model_copy(deep=True)
             merged_tick_times = dict(current.last_tick_time_by_symbol)
             merged_tick_times.update(last_tick_time_by_symbol)
+
             current.connected_to_mt5 = True
             current.connected_to_backend = True
             current.account_trade_mode = account_trade_mode  # type: ignore[assignment]
+
+            if account is not None:
+                current.account = account
+
             current.last_tick_time_by_symbol = merged_tick_times
             current.ticks_sent_total += inserted_ticks
             current.last_batch_sent_at = datetime.now(UTC)
             current.updated_at = datetime.now(UTC)
+
             self._status = current
             return current.model_copy(deep=True)
 
