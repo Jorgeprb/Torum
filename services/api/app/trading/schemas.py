@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -8,6 +9,7 @@ OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET"]
 OrderStatus = Literal["CREATED", "VALIDATING", "REJECTED", "SENT", "EXECUTED", "FAILED", "CANCELLED", "CLOSED"]
 PositionStatus = Literal["OPEN", "CLOSED"]
+AthMode = Literal["auto", "manual"]
 
 
 class ClientConfirmation(BaseModel):
@@ -44,6 +46,41 @@ class ManualOrderResponse(BaseModel):
     message: str
     warnings: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
+
+
+class RiskPreviewRequest(BaseModel):
+    internal_symbol: str = Field(min_length=3, max_length=32)
+    side: OrderSide = "BUY"
+    volume: float = Field(gt=0)
+    price: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def normalize_symbol(self) -> "RiskPreviewRequest":
+        self.internal_symbol = self.internal_symbol.upper()
+        return self
+
+
+class RiskPreviewResponse(BaseModel):
+    balance: float | None
+    potential_loss: float | None
+    projected_balance: float | None
+    breaches_bot_limit: bool
+    positions_count: int
+    message: str | None = None
+
+
+class AthLevelRead(BaseModel):
+    internal_symbol: str
+    ath_price: float | None
+    mode: AthMode
+    source: str
+    calculated_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class AthLevelUpdate(BaseModel):
+    mode: AthMode
+    ath_price: float | None = Field(default=None, gt=0)
 
 
 class TradingSettingsRead(BaseModel):

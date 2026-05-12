@@ -9,20 +9,14 @@ interface PriceAlertsOverlayProps {
   priceAlertOverlays: PriceAlertOverlay[];
   alertVisualStyles: Record<string, PriceAlertVisualStyle>;
   selectedAlertId: string | null;
-  onCancelPriceAlert?: (alertId: string) => void;
   onDragStart: (event: PointerEvent<HTMLDivElement>, alert: PriceAlertRead) => void;
-  onPointerUp: (event: PointerEvent<HTMLDivElement>) => void;
-  onAlertCancel: (alertId: string) => void;
 }
 
 export function PriceAlertsOverlay({
   priceAlertOverlays,
   alertVisualStyles,
   selectedAlertId,
-  onCancelPriceAlert,
-  onDragStart,
-  onPointerUp,
-  onAlertCancel
+  onDragStart
 }: PriceAlertsOverlayProps) {
   return (
     <div className="price-alert-layer">
@@ -47,23 +41,6 @@ export function PriceAlertsOverlay({
           >
             <span style={{ borderColor: alertStyle.color, color: alertStyle.color }}>
               <Bell aria-hidden="true" size={13} strokeWidth={3} />
-              {onCancelPriceAlert ? (
-                <button
-                  aria-label="Cancelar alerta"
-                  className="inline-delete"
-                  type="button"
-                  onPointerDown={(event) => {
-                    event.stopPropagation();
-                    event.nativeEvent.stopImmediatePropagation?.();
-                  }}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onAlertCancel(overlay.alert.id);
-                  }}
-                >
-                  x
-                </button>
-              ) : null}
             </span>
           </div>
         );

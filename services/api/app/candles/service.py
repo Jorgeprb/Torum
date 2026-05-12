@@ -64,7 +64,7 @@ def build_candle_rows_from_ticks(
         tick_volume = float(volume) if isinstance(volume, (int, float)) else 0.0
 
         for timeframe in timeframes:
-            bucket = bucket_start(tick_time, timeframe)
+            bucket = bucket_start(tick_time, timeframe, symbol=symbol)
             key = (symbol, timeframe, bucket)
             candle = buckets.get(key)
             if candle is None:

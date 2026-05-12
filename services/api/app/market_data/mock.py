@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.settings.trading_service import get_global_trading_settings
 from app.strategies.auto_runner import run_torum_v1_for_symbols
+from app.strategies.notifications import notify_torum_v1_unlocks_for_symbols
 from app.symbols.models import SymbolMapping
 from app.ticks.schemas import TickBatchRequest, TickInput
 from app.ticks.service import ingest_tick_batch
@@ -110,7 +111,9 @@ class MockMarketService:
         for event in alert_events:
             await market_ws_manager.broadcast_price_alert_triggered(event.model_dump(mode="json"))
         if inserted_rows:
-            run_torum_v1_for_symbols(sorted({str(row["internal_symbol"]) for row in inserted_rows}))
+            inserted_symbols = sorted({str(row["internal_symbol"]) for row in inserted_rows})
+            notify_torum_v1_unlocks_for_symbols(inserted_symbols)
+            run_torum_v1_for_symbols(inserted_symbols)
         await market_ws_manager.broadcast_market_status(True, "MOCK", self._last_tick_time)
 
     def _build_tick(self, mapping: SymbolMapping, now: datetime) -> TickInput:

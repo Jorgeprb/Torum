@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.alerts.models import PushSubscription
 from app.candles.models import Candle
 from app.drawings.models import ChartDrawing
 from app.db.base import Base
@@ -15,7 +16,9 @@ from app.no_trade_zones.models import NoTradeZone
 from app.orders.models import Order  # noqa: F401
 from app.risk.manager import RiskManager
 from app.settings.trading_settings import TradingSettings
+from app.strategies.ath import ath_price_zones, get_or_update_symbol_ath, set_symbol_ath_level
 from app.strategies.models import StrategyConfig
+from app.strategies.notifications import send_torum_v1_unlock_notifications
 from app.strategies.repository import get_global_strategy_settings
 from app.strategies.runner import StrategyRunner
 from app.strategies.torum_v1 import (
@@ -33,6 +36,7 @@ from app.trading.schemas import ManualOrderRequest
 from app.users.models import User, UserRole
 
 MADRID = ZoneInfo("Europe/Madrid")
+BROKER = ZoneInfo("Etc/GMT-3")
 
 
 def _session() -> Session:
@@ -110,7 +114,7 @@ def _config(db: Session, symbol: str, timeframe: str = "H2") -> StrategyConfig:
 def _h1(db: Session, symbol: str, start_local: datetime, open_: float, close: float, low: float | None = None) -> None:
     db.add(
         Candle(
-            time=start_local.astimezone(UTC).replace(tzinfo=None),
+            time=_broker_chart_time(start_local),
             internal_symbol=symbol,
             timeframe="H1",
             open=open_,
@@ -122,6 +126,10 @@ def _h1(db: Session, symbol: str, start_local: datetime, open_: float, close: fl
             source="TEST",
         )
     )
+
+
+def _broker_chart_time(start_local: datetime) -> datetime:
+    return start_local.astimezone(BROKER).replace(tzinfo=None)
 
 
 def _m5_candle(start_local: datetime, open_: float, high: float, low: float, close: float) -> SimpleNamespace:
@@ -168,11 +176,78 @@ def _two_hour_window(
     close: float,
     low: float,
     previous_low: float,
+    previous_bearish: bool = False,
 ) -> None:
-    _h1(db, symbol, start_local - timedelta(hours=2), 90, 91, previous_low)
-    _h1(db, symbol, start_local - timedelta(hours=1), 91, 92, previous_low + 1)
+    previous_open = 92 if previous_bearish else 90
+    previous_mid = 91
+    previous_close = 90 if previous_bearish else 92
+    _h1(db, symbol, start_local - timedelta(hours=2), previous_open, previous_mid, previous_low)
+    _h1(db, symbol, start_local - timedelta(hours=1), previous_mid, previous_close, previous_low + 1)
     _h1(db, symbol, start_local, open_, (open_ + close) / 2, low)
     _h1(db, symbol, start_local + timedelta(hours=1), (open_ + close) / 2, close, low + 1)
+    db.commit()
+
+
+def test_manual_ath_overrides_imported_candle_high() -> None:
+    db = _session()
+    db.add(
+        Candle(
+            time=datetime(2026, 5, 1, tzinfo=UTC),
+            internal_symbol="XAUUSD",
+            timeframe="H1",
+            open=2000,
+            high=2200,
+            low=1990,
+            close=2100,
+            volume=0.0,
+            tick_count=1,
+            source="TEST",
+        )
+    )
+    db.commit()
+
+    set_symbol_ath_level(db, "XAUUSD", "manual", 2500)
+    db.add(
+        Candle(
+            time=datetime(2026, 5, 2, tzinfo=UTC),
+            internal_symbol="XAUUSD",
+            timeframe="H1",
+            open=2600,
+            high=3000,
+            low=2500,
+            close=2700,
+            volume=0.0,
+            tick_count=1,
+            source="TEST",
+        )
+    )
+    db.commit()
+
+    assert get_or_update_symbol_ath(db, "XAUUSD") == 2500
+    assert ath_price_zones(db, "XAUUSD")[0]["ath_price"] == 2500
+
+    set_symbol_ath_level(db, "XAUUSD", "auto")
+
+    assert get_or_update_symbol_ath(db, "XAUUSD") == 3000
+
+
+def _three_hour_window(
+    db: Session,
+    symbol: str,
+    start_local: datetime,
+    *,
+    open_: float,
+    close: float,
+    low: float,
+    previous_low: float,
+    previous_bearish: bool = False,
+) -> None:
+    previous_values = (96, 94, 92, 90) if previous_bearish else (90, 92, 94, 96)
+    for index, offset in enumerate(range(3, 0, -1)):
+        _h1(db, symbol, start_local - timedelta(hours=offset), previous_values[index], previous_values[index + 1], previous_low + index)
+    _h1(db, symbol, start_local, open_, (open_ * 2 + close) / 3, low)
+    _h1(db, symbol, start_local + timedelta(hours=1), (open_ * 2 + close) / 3, (open_ + close * 2) / 3, low + 1)
+    _h1(db, symbol, start_local + timedelta(hours=2), (open_ + close * 2) / 3, close, low + 2)
     db.commit()
 
 
@@ -187,10 +262,36 @@ def test_xaueur_2h_bullish_unlocks() -> None:
     assert status.reason == "bullish_closed_candle"
 
 
+def test_xaueur_visual_status_unlocks_even_when_strategy_off() -> None:
+    db = _session()
+    config = _config(db, "XAUEUR", "H2")
+    config.enabled = False
+    config.params_json = {**config.params_json, "enabled": False, "timeframe": "H3"}
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=110, low=99, previous_low=90)
+    db.commit()
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
+
+    assert status.enabled is False
+    assert status.timeframe == "H2"
+    assert status.status == "UNLOCKED"
+    assert status.reason == "bullish_closed_candle"
+
+
+def test_xaueur_visual_status_unlocks_without_config() -> None:
+    db = _session()
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=110, low=99, previous_low=90)
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
+
+    assert status.enabled is False
+    assert status.status == "UNLOCKED"
+
+
 def test_xaueur_2h_bearish_holds_previous_low_unlocks() -> None:
     db = _session()
     _config(db, "XAUEUR", "H2")
-    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=98, low=95, previous_low=90)
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=98, low=95, previous_low=90, previous_bearish=True)
 
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
 
@@ -198,10 +299,21 @@ def test_xaueur_2h_bearish_holds_previous_low_unlocks() -> None:
     assert status.reason == "held_previous_low"
 
 
+def test_xaueur_2h_bearish_holds_previous_low_but_previous_bullish_stays_locked() -> None:
+    db = _session()
+    _config(db, "XAUEUR", "H2")
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=98, low=95, previous_low=90)
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
+
+    assert status.status == "LOCKED"
+    assert status.reason == "previous_candle_not_bearish"
+
+
 def test_xaueur_2h_bearish_breaks_previous_low_stays_locked() -> None:
     db = _session()
     _config(db, "XAUEUR", "H2")
-    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=98, low=80, previous_low=90)
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=98, low=80, previous_low=90, previous_bearish=True)
 
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
 
@@ -238,6 +350,50 @@ def test_xauusd_15_17_bullish_unlocks() -> None:
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 17, 5)).assets["XAUUSD"]
 
     assert status.status == "UNLOCKED"
+
+
+def test_xauusd_2h_uses_broker_chart_time_for_spanish_window() -> None:
+    db = _session()
+    _config(db, "XAUUSD", "H2")
+    _two_hour_window(db, "XAUUSD", _madrid(1, 15), open_=110, close=100, low=95, previous_low=90, previous_bearish=True)
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 17, 5)).assets["XAUUSD"]
+
+    assert status.status == "UNLOCKED"
+    assert status.reason == "held_previous_low"
+
+
+def test_xauusd_2h_bearish_holds_previous_low_but_previous_bullish_stays_locked() -> None:
+    db = _session()
+    _config(db, "XAUUSD", "H2")
+    _two_hour_window(db, "XAUUSD", _madrid(1, 15), open_=110, close=100, low=95, previous_low=90)
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 17, 5)).assets["XAUUSD"]
+
+    assert status.status == "LOCKED"
+    assert status.reason == "previous_candle_not_bearish"
+
+
+def test_xauusd_3h_uses_broker_chart_time_for_spanish_window() -> None:
+    db = _session()
+    _config(db, "XAUUSD", "H3")
+    _three_hour_window(db, "XAUUSD", _madrid(1, 15), open_=110, close=100, low=80, previous_low=90, previous_bearish=True)
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 18, 5)).assets["XAUUSD"]
+
+    assert status.status == "LOCKED"
+    assert status.reason == "broke_previous_low"
+
+
+def test_xauusd_3h_bearish_holds_previous_low_but_previous_bullish_stays_locked() -> None:
+    db = _session()
+    _config(db, "XAUUSD", "H3")
+    _three_hour_window(db, "XAUUSD", _madrid(1, 15), open_=110, close=100, low=95, previous_low=90)
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 18, 5)).assets["XAUUSD"]
+
+    assert status.status == "LOCKED"
+    assert status.reason == "previous_candle_not_bearish"
 
 
 def test_xauusd_after_21_locked() -> None:
@@ -290,6 +446,36 @@ def test_daily_reset_yesterday_unlock_does_not_unlock_today() -> None:
     status = TorumV1StatusService(db).status_for_user(1, _madrid(2, 11, 5)).assets["XAUEUR"]
 
     assert status.status == "LOCKED"
+
+
+def test_unlock_push_is_sent_once_per_symbol_and_day(monkeypatch) -> None:
+    db = _session()
+    _config(db, "XAUEUR", "H2")
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=110, low=99, previous_low=90)
+    db.add(
+        PushSubscription(
+            user_id=1,
+            endpoint="https://push.example.test/1",
+            p256dh="key",
+            auth="auth",
+            enabled=True,
+        )
+    )
+    db.commit()
+    sent: list[tuple[int, str, str]] = []
+
+    def fake_send(self, user_id: int, symbol: str, unlock_day: str) -> tuple[int, int]:
+        sent.append((user_id, symbol, unlock_day))
+        return 1, 0
+
+    monkeypatch.setattr("app.alerts.push.PushNotificationService.send_torum_v1_unlocked", fake_send)
+
+    first = send_torum_v1_unlock_notifications(db, symbols=["XAUEUR"], at_time=_madrid(1, 11, 5))
+    second = send_torum_v1_unlock_notifications(db, symbols=["XAUEUR"], at_time=_madrid(1, 11, 10))
+
+    assert first == 1
+    assert second == 0
+    assert sent == [(1, "XAUEUR", "2026-05-01")]
 
 
 def test_pullback_019_not_detected() -> None:

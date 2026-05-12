@@ -54,7 +54,7 @@ export function NewsProviderPage({ onChanged }: NewsProviderPageProps) {
         getNewsSettings(),
         getNewsProviderStatus(),
         getNewsEvents(),
-        getNoTradeZones("XAUUSD", now.toISOString(), to.toISOString())
+        getNoTradeZones(null, now.toISOString(), to.toISOString())
       ]);
       setSettings(settingsResponse);
       setStatus(statusResponse);

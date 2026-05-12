@@ -1,10 +1,7 @@
 import { getAuthToken } from "../stores/authStore";
+import { resolveApiBaseUrl } from "./runtime";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (window.location.protocol === "https:"
-    ? window.location.origin
-    : `http://${window.location.hostname === "localhost" ? "localhost" : window.location.hostname}:8000`);
+const API_BASE_URL = resolveApiBaseUrl();
 
 export type SystemHealthStatus = "OK" | "WARN" | "FAIL" | "RESTARTING" | "UNKNOWN";
 export type RestartTarget = "mt5" | "api" | "frontend" | "bridge" | "all" | "pc";

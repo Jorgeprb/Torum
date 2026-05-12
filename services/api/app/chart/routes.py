@@ -17,7 +17,9 @@ from app.no_trade_zones.service import NoTradeZoneService
 from app.positions.schemas import PositionRead
 from app.positions.service import PositionService
 from app.candles.models import Candle
+from app.ticks.models import Tick
 from app.strategies.models import StrategyConfig
+from app.strategies.ath import ath_price_zones
 from app.strategies.torum_v1 import TORUM_V1_KEY, pullback_debug_payload
 from app.users.models import User
 
@@ -112,7 +114,27 @@ def chart_overlays(
                 )
                 .order_by(Candle.time)
             )
-            strategy_debug_pullbacks = pullback_debug_payload(candles_m5, params)
+
+            latest_tick = (
+                db.query(Tick)
+                .filter(Tick.internal_symbol == symbol.upper())
+                .order_by(Tick.time_msc.desc().nullslast(), Tick.time.desc())
+                .first()
+            )
+
+            live_price = None
+            live_time = None
+
+            if latest_tick is not None:
+                live_price = latest_tick.bid or latest_tick.last or latest_tick.ask
+                live_time = latest_tick.time
+
+            strategy_debug_pullbacks = pullback_debug_payload(
+                candles_m5,
+                params,
+                live_price=live_price,
+                live_time=live_time,
+            )
     return ChartOverlaysResponse(
         symbol=symbol.upper(),
         timeframe=timeframe,
@@ -122,4 +144,5 @@ def chart_overlays(
         price_alerts=price_alerts,
         positions=positions,
         strategy_debug_pullbacks=strategy_debug_pullbacks,
+        ath_zones=ath_price_zones(db, symbol.upper()),
     )

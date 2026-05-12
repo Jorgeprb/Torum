@@ -94,6 +94,29 @@ function DrawingHtmlHandles({
     );
   }
 
+  if (shape.kind === "horizontal_line" && shape.supportEnabled !== false && shape.supportLevel && shape.supportUpperY !== undefined && shape.supportLowerY !== undefined) {
+    const x = center.x;
+    return (
+      <>
+        {centerHandle}
+        <button
+          aria-label="Mover limite superior soporte"
+          className="drawing-html-handle drawing-html-handle--support"
+          style={drawingHandleStyle(x, shape.supportUpperY, "ns-resize", 13, shape.color)}
+          type="button"
+          onPointerDown={(event) => onDragStart(event, shape, "support-upper")}
+        />
+        <button
+          aria-label="Mover limite inferior soporte"
+          className="drawing-html-handle drawing-html-handle--support"
+          style={drawingHandleStyle(x, shape.supportLowerY, "ns-resize", 13, shape.color)}
+          type="button"
+          onPointerDown={(event) => onDragStart(event, shape, "support-lower")}
+        />
+      </>
+    );
+  }
+
   if (shape.kind !== "rectangle" && shape.kind !== "manual_zone") {
     return centerHandle;
   }

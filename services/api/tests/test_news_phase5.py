@@ -13,6 +13,7 @@ from app.news.schemas import NewsEventCreate, NewsJsonImportRequest, NewsSetting
 from app.news.service import NewsService, get_global_news_settings
 from app.no_trade_zones.models import NoTradeZone
 from app.no_trade_zones.service import NoTradeZoneService
+from app.chart.routes import chart_overlays
 from app.orders.models import Order  # noqa: F401
 from app.risk.manager import RiskManager
 from app.settings.trading_settings import TradingSettings
@@ -108,6 +109,41 @@ def test_import_json_generates_default_usd_high_zones() -> None:
     assert response.zones_generated == 4
     assert db.query(NewsEvent).count() == 1
     assert db.query(NoTradeZone).count() == 4
+
+
+def test_existing_news_settings_adds_missing_xaueur_zone() -> None:
+    db = _session()
+    settings = get_global_news_settings(db)
+    settings.affected_symbols = ["XAUUSD"]
+    db.commit()
+
+    response = NewsService(db).import_json(_news_payload(datetime.now(UTC) + timedelta(hours=1)))
+
+    assert response.zones_generated == 4
+    assert "XAUEUR" in get_global_news_settings(db).affected_symbols
+    assert db.query(NoTradeZone).filter(NoTradeZone.internal_symbol == "XAUEUR").count() == 1
+
+
+def test_authenticated_chart_overlays_returns_future_news_zones_without_debug_config() -> None:
+    db = _session()
+    user = User(username="chart-user", email="chart-user@torum.dev", hashed_password="x")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    event_time = datetime.now(UTC) + timedelta(hours=2)
+    NewsService(db).import_json(_news_payload(event_time))
+
+    response = chart_overlays(
+        db=db,
+        current_user=user,
+        symbol="XAUUSD",
+        timeframe="M5",
+        from_time=datetime.now(UTC) - timedelta(days=1),
+        to_time=datetime.now(UTC) + timedelta(days=1),
+    )
+
+    assert len(response.no_trade_zones) == 1
+    assert response.strategy_debug_pullbacks == []
 
 
 def test_news_deduplicates_by_source_external_id_and_fingerprint() -> None:

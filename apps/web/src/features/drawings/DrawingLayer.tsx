@@ -22,8 +22,8 @@ interface DragState {
 }
 
 function moveShape(shape: DrawingShape, dx: number, dy: number, action: DrawingDragAction): DrawingShape {
-  if (shape.kind === "horizontal_line") {
-    return { ...shape, y: shape.y + dy };
+    if (shape.kind === "horizontal_line") {
+      return { ...shape, y: shape.y + dy };
   }
 
   if (shape.kind === "vertical_line") {
@@ -210,11 +210,28 @@ export function DrawingLayer({ interactive = true, shapes, pendingPoint, selecte
         const selected = selectedDrawingId === shape.id;
         const className = selected ? "drawing-shape drawing-shape--selected" : "drawing-shape";
         if (shape.kind === "horizontal_line") {
+          const supportTop = shape.supportUpperY !== undefined && shape.supportLowerY !== undefined ? Math.min(shape.supportUpperY, shape.supportLowerY) : null;
+          const supportBottom = shape.supportUpperY !== undefined && shape.supportLowerY !== undefined ? Math.max(shape.supportUpperY, shape.supportLowerY) : null;
           return (
             <g key={shape.id} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => start(event, shape, "move")}>
+              {supportTop !== null && supportBottom !== null && shape.supportEnabled !== false ? (
+                <>
+                  <rect
+                    className="drawing-support-zone"
+                    fill={shape.color}
+                    height={Math.max(2, supportBottom - supportTop)}
+                    opacity={shape.supportOpacity ?? 0.20}
+                    width={shape.x2 - shape.x1}
+                    x={shape.x1}
+                    y={supportTop}
+                  />
+                  <line className="drawing-support-boundary" x1={shape.x1} x2={shape.x2} y1={shape.supportUpperY} y2={shape.supportUpperY} stroke={shape.color} />
+                  <line className="drawing-support-boundary" x1={shape.x1} x2={shape.x2} y1={shape.supportLowerY} y2={shape.supportLowerY} stroke={shape.color} />
+                </>
+              ) : null}
               <line className="drawing-hit-area" x1={shape.x1} x2={shape.x2} y1={shape.y} y2={shape.y} stroke="rgba(0,0,0,0)" strokeWidth={Math.max(26, shape.lineWidth + 18)} />
               <line className={className} style={glowStyle(shape, selected)} strokeDasharray={lineDash(shape)} x1={shape.x1} x2={shape.x2} y1={shape.y} y2={shape.y} stroke={shape.color} strokeWidth={shape.lineWidth} />
-              {shape.label ? <text className="drawing-label" x={shape.x2 - 120} y={shape.y - 6}>{shape.label}</text> : null}
+              {shape.label ? <text className="drawing-label" x={shape.x2 - 120} y={shape.y - 6}>{shape.supportLevel ? `S${shape.supportLevel}` : shape.label}</text> : null}
               {handles(shape)}
             </g>
           );

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from dataclasses import asdict
 from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from app.mt5.status_store import mt5_status_store
 from app.orders.service import OrderManager
 from app.risk.manager import RiskManager
 from app.settings.trading_service import get_global_trading_settings
+from app.strategies.ath import latest_executable_price, plan_torum_v1_bot_exposure
 from app.strategies.engine import StrategyContextBuilder
 from app.strategies.models import StrategyConfig, StrategyRun, StrategySignal
 from app.strategies.registry import strategy_registry
@@ -70,6 +72,37 @@ class StrategyRunner:
                     message=signal.reason,
                 )
 
+            if signal.strategy_key == "torum_v1" and signal.signal_type == "ENTRY" and signal.side == "BUY":
+                trading_settings = _strategy_trading_settings(get_global_trading_settings(self.db), config.mode)
+                latest_price = latest_executable_price(context.latest_tick, "BUY")
+                account = mt5_status_store.get().account
+                plan = plan_torum_v1_bot_exposure(
+                    self.db,
+                    symbol=signal.internal_symbol,
+                    user_id=config.user_id,
+                    desired_multiplier=int((signal.metadata_json or {}).get("desired_multiplier") or 1),
+                    current_price=latest_price,
+                    balance=account.balance if account is not None else None,
+                    trading_settings=trading_settings,
+                    symbol_mapping=get_symbol_by_internal(self.db, signal.internal_symbol),
+                )
+                signal.metadata_json = {**(signal.metadata_json or {}), "bot_exposure_plan": asdict(plan)}
+                if not plan.allowed:
+                    signal.status = "REJECTED_BY_RISK"
+                    signal.risk_result_json = {"allowed": False, "reasons": [plan.reason], "warnings": []}
+                    run.status = "FINISHED"
+                    run.finished_at = datetime.now(UTC)
+                    self.db.commit()
+                    return StrategyRunResult(
+                        ok=False,
+                        run=StrategyRunRead.model_validate(run),
+                        signal=StrategySignalRead.model_validate(signal),
+                        message="Signal rejected by Torum V1 risk",
+                        reasons=[plan.reason],
+                    )
+                signal.suggested_volume = plan.volume
+                self.db.commit()
+
             order_payload = ManualOrderRequest(
                 internal_symbol=signal.internal_symbol,
                 side=signal.side,  # type: ignore[arg-type]
@@ -88,6 +121,7 @@ class StrategyRunner:
                 mt5_status=mt5_status_store.get(),
                 price_stale_after_seconds=get_settings().price_stale_after_seconds,
                 user_id=config.user_id,
+                strategy_key=config.strategy_key,
             )
             signal.risk_result_json = risk_decision.model_dump()
             if not risk_decision.allowed:
@@ -175,4 +209,15 @@ def _strategy_trading_settings(trading_settings: object, mode: str) -> object:
         allow_market_orders=getattr(trading_settings, "allow_market_orders", True),
         allow_pending_orders=getattr(trading_settings, "allow_pending_orders", False),
         is_paused=getattr(trading_settings, "is_paused", False),
+        long_only=getattr(trading_settings, "long_only", True),
+        default_take_profit_percent=getattr(trading_settings, "default_take_profit_percent", 0.09),
+        use_stop_loss=getattr(trading_settings, "use_stop_loss", False),
+        lot_per_equity_enabled=getattr(trading_settings, "lot_per_equity_enabled", True),
+        equity_per_0_01_lot=getattr(trading_settings, "equity_per_0_01_lot", 2500.0),
+        minimum_lot=getattr(trading_settings, "minimum_lot", 0.01),
+        allow_manual_lot_adjustment=getattr(trading_settings, "allow_manual_lot_adjustment", True),
+        show_bid_line=getattr(trading_settings, "show_bid_line", True),
+        show_ask_line=getattr(trading_settings, "show_ask_line", True),
+        mt5_order_execution_enabled=getattr(trading_settings, "mt5_order_execution_enabled", False),
+        market_data_source=getattr(trading_settings, "market_data_source", "MT5"),
     )

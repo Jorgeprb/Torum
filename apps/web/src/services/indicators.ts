@@ -3,12 +3,9 @@ import type { ChartDrawingRead } from "./drawings";
 import type { PriceAlertRead } from "./alerts";
 import type { PositionRead } from "./trading";
 import { getAuthToken } from "../stores/authStore";
+import { resolveApiBaseUrl } from "./runtime";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (window.location.protocol === "https:"
-    ? window.location.origin
-    : "http://localhost:8000");
+const API_BASE_URL = resolveApiBaseUrl();
 
 export interface IndicatorPoint {
   time: number;
@@ -35,7 +32,20 @@ export interface StrategyPullbackDebug {
   pullback_low_time: number;
   pullback_low: number;
   pullback_pct: number;
+  threshold_pct?: number;
+  threshold_touched?: boolean;
+  is_live?: boolean;
   label: string;
+}
+
+export interface AthPriceZone {
+  key: string;
+  label: string;
+  ath_price: number;
+  price_min: number | null;
+  price_max: number;
+  color: string;
+  max_lot_equivalents: number;
 }
 
 export interface IndicatorRead {
@@ -69,6 +79,7 @@ export interface ChartOverlays {
   price_alerts: PriceAlertRead[];
   positions: PositionRead[];
   strategy_debug_pullbacks: StrategyPullbackDebug[];
+  ath_zones: AthPriceZone[];
 }
 
 interface RequestOptions extends RequestInit {

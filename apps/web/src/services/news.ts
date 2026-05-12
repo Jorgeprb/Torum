@@ -1,10 +1,7 @@
 import { getAuthToken } from "../stores/authStore";
+import { resolveApiBaseUrl } from "./runtime";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (window.location.protocol === "https:"
-    ? window.location.origin
-    : "http://localhost:8000");
+const API_BASE_URL = resolveApiBaseUrl();
 
 export interface NewsSettings {
   id: number;
@@ -137,8 +134,11 @@ export function getNewsEvents(): Promise<NewsEvent[]> {
   return request<NewsEvent[]>("/api/news/events?limit=100");
 }
 
-export function getNoTradeZones(symbol: string, from: string, to: string): Promise<NoTradeZone[]> {
-  const params = new URLSearchParams({ symbol, from, to });
+export function getNoTradeZones(symbol: string | null | undefined, from: string, to: string): Promise<NoTradeZone[]> {
+  const params = new URLSearchParams({ from, to });
+  if (symbol) {
+    params.set("symbol", symbol);
+  }
   return request<NoTradeZone[]>(`/api/no-trade-zones?${params.toString()}`);
 }
 

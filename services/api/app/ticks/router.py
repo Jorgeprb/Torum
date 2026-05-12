@@ -11,6 +11,7 @@ from app.mt5.status_store import mt5_status_store
 from app.market_data.tick_time import tick_time_msc_from_datetime
 from app.settings.trading_service import get_global_trading_settings
 from app.strategies.auto_runner import run_torum_v1_for_symbols
+from app.strategies.notifications import notify_torum_v1_unlocks_for_symbols
 from app.ticks.schemas import TickBatchRequest, TickBatchResponse, TickInput, TickRead
 from app.ticks.service import TickIngestionError, get_recent_ticks, ingest_tick_batch
 from app.websockets.manager import market_ws_manager
@@ -74,7 +75,9 @@ def ingest_ticks_batch(
     for event in alert_events:
         background_tasks.add_task(market_ws_manager.broadcast_price_alert_triggered, event.model_dump(mode="json"))
     if inserted_rows:
-        background_tasks.add_task(run_torum_v1_for_symbols, sorted({str(row["internal_symbol"]) for row in inserted_rows}))
+        inserted_symbols = sorted({str(row["internal_symbol"]) for row in inserted_rows})
+        background_tasks.add_task(notify_torum_v1_unlocks_for_symbols, inserted_symbols)
+        background_tasks.add_task(run_torum_v1_for_symbols, inserted_symbols)
 
     last_tick_time_by_symbol: dict[str, object] = {}
     for row in inserted_rows:

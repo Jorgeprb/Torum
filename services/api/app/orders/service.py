@@ -121,6 +121,7 @@ class OrderManager:
                 mt5_status=mt5_status,
                 price_stale_after_seconds=app_settings.price_stale_after_seconds,
                 user_id=user.id,
+                strategy_key=strategy_key,
             )
         else:
             risk_decision = risk_manager.evaluate(

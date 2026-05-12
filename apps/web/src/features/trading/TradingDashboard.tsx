@@ -60,7 +60,7 @@ import {
   getTradingSettings,
   modifyPositionTp
 } from "../../services/trading";
-import { type IndicatorLineOutput, type StrategyPullbackDebug, getChartOverlays, isLineOutput } from "../../services/indicators";
+import { type AthPriceZone, type IndicatorLineOutput, type StrategyPullbackDebug, getChartOverlays, isLineOutput } from "../../services/indicators";
 import { type NoTradeZone } from "../../services/news";
 import { type TorumV1Status, getTorumV1Status } from "../../services/strategies";
 import {
@@ -86,6 +86,7 @@ const showFutureNewsZonesStorageKey = "torum.showFutureNewsZones";
 const autoExtendToFutureNewsStorageKey = "torum.autoExtendToFutureNews";
 const futureNewsVisualsChangedEvent = "torum-future-news-visuals-changed";
 const futureOverlayLookaheadDays = 90;
+const torumTopbarStatusSymbols = new Set(["XAUUSD", "XAUEUR"]);
 
 function readSpyModePreference(): boolean {
   try {
@@ -105,10 +106,37 @@ function readDefaultTruePreference(key: string): boolean {
 
 function readInitialSymbol(): string {
   try {
-    return new URLSearchParams(window.location.search).get("symbol")?.toUpperCase() || "XAUUSD";
+    return new URLSearchParams(window.location.search).get("symbol")?.toUpperCase() || defaultSymbolForMadridSession();
   } catch {
+    return defaultSymbolForMadridSession();
+  }
+}
+
+function madridMinutes(date = new Date()): number {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Europe/Madrid"
+  }).formatToParts(date);
+
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  return hour * 60 + minute;
+}
+
+function defaultSymbolForMadridSession(date = new Date()): string {
+  const minutes = madridMinutes(date);
+
+  if (minutes >= 9 * 60 && minutes < 15 * 60) {
+    return "XAUEUR";
+  }
+
+  if (minutes >= 15 * 60 + 30) {
     return "XAUUSD";
   }
+
+  return "XAUUSD";
 }
 
 function sourceLabelForStatus(mt5Status: MT5Status | null, mockStatus: MockMarketStatus | null, streamSource: string): string {
@@ -151,12 +179,28 @@ function torumAssetIcon(status: TorumV1Status | null, symbol: string): string {
   if (!asset) {
     return "";
   }
-  return asset.status === "UNLOCKED" ? "✅" : "❌";
+  if (asset.status === "UNLOCKED") {
+    return "\u2705";
+  }
+  return "\u274c";
 }
 
 function torumAssetLabel(status: TorumV1Status | null, symbol: string): string {
   const icon = torumAssetIcon(status, symbol);
   return icon ? `${icon} ${symbol}` : symbol;
+}
+
+function torumTopbarAssetTone(status: TorumV1Status | null, symbol: string): "unlocked" | "locked" | null {
+  if (!torumTopbarStatusSymbols.has(symbol)) {
+    return null;
+  }
+
+  const asset = status?.assets?.[symbol];
+  if (!asset) {
+    return null;
+  }
+
+  return asset.status === "UNLOCKED" ? "unlocked" : "locked";
 }
 
 function translateTradeMessage(message: string): string {
@@ -484,6 +528,7 @@ function SplitMarketChart({
   const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
   const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
   const [localStrategyDebugPullbacks, setLocalStrategyDebugPullbacks] = useState<StrategyPullbackDebug[]>([]);
+  const [athZones, setAthZones] = useState<AthPriceZone[]>([]);
   const [priceAlerts, setPriceAlerts] = useState<PriceAlertRead[]>([]);
   const [drawings, setDrawings] = useState<ChartDrawingRead[]>([]);
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
@@ -505,6 +550,7 @@ function SplitMarketChart({
     setNoTradeZones([]);
     setIndicatorLines([]);
     setLocalStrategyDebugPullbacks([]);
+    setAthZones([]);
     setPriceAlerts([]);
     setDrawings([]);
     setSelectedDrawingId(null);
@@ -530,6 +576,7 @@ function SplitMarketChart({
         setNoTradeZones(overlays?.no_trade_zones ?? []);
         setIndicatorLines(overlays?.indicators.filter(isLineOutput) ?? []);
         setLocalStrategyDebugPullbacks(overlays?.strategy_debug_pullbacks ?? []);
+        setAthZones(overlays?.ath_zones ?? []);
         setPriceAlerts(overlays?.price_alerts ?? []);
         setDrawings(nextDrawings);
         setSelectedDrawingId((current) => (current && nextDrawings.some((drawing) => drawing.id === current) ? current : null));
@@ -543,6 +590,7 @@ function SplitMarketChart({
         setNoTradeZones([]);
         setIndicatorLines([]);
         setLocalStrategyDebugPullbacks([]);
+        setAthZones([]);
         setPriceAlerts([]);
         setDrawings([]);
         setSelectedDrawingId(null);
@@ -688,6 +736,7 @@ function SplitMarketChart({
           drawingTool={drawingTool}
           drawings={drawingsVisible ? drawings.filter((drawing) => drawing.visible) : []}
           indicatorLines={indicatorLines}
+          athZones={athZones}
           strategyDebugPullbacks={strategyDebugPullbacks.length > 0 ? strategyDebugPullbacks : localStrategyDebugPullbacks}
           loadingCandles={loadingCandles}
           noTradeZones={noTradeZones}
@@ -748,6 +797,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
   const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
   const [strategyDebugPullbacks, setStrategyDebugPullbacks] = useState<StrategyPullbackDebug[]>([]);
+  const [athZones, setAthZones] = useState<AthPriceZone[]>([]);
   const [drawings, setDrawings] = useState<ChartDrawingRead[]>([]);
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("select");
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
@@ -889,6 +939,15 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   );
   const strategySymbolLabels = useMemo(
     () => Object.fromEntries(chartSymbols.map((symbol) => [symbol, torumAssetLabel(torumV1Status, symbol)])),
+    [chartSymbols, torumV1Status]
+  );
+  const topbarSymbolStatusTones = useMemo(
+    () =>
+      Object.fromEntries(
+        chartSymbols
+          .map((symbol) => [symbol, torumTopbarAssetTone(torumV1Status, symbol)] as const)
+          .filter((entry): entry is readonly [string, "unlocked" | "locked"] => entry[1] !== null)
+      ),
     [chartSymbols, torumV1Status]
   );
   useEffect(() => {
@@ -1101,6 +1160,7 @@ useEffect(() => {
   setNoTradeZones([]);
   setIndicatorLines([]);
   setStrategyDebugPullbacks([]);
+  setAthZones([]);
   setPriceAlerts([]);
   setDrawings([]);
   setSelectedDrawingId(null);
@@ -1414,6 +1474,7 @@ useEffect(() => {
     setNoTradeZones(response.no_trade_zones);
     setIndicatorLines(response.indicators.filter(isLineOutput));
     setStrategyDebugPullbacks(response.strategy_debug_pullbacks ?? []);
+    setAthZones(response.ath_zones ?? []);
     setPriceAlerts(response.price_alerts ?? []);
 
     // if (response.positions?.length) {
@@ -1427,6 +1488,7 @@ useEffect(() => {
     setNoTradeZones([]);
     setIndicatorLines([]);
     setStrategyDebugPullbacks([]);
+    setAthZones([]);
     setPriceAlerts([]);
   }
 }
@@ -2235,6 +2297,7 @@ useEffect(() => {
         selectedSymbol={selectedSymbol}
         selectedTimeframe={selectedTimeframe}
         symbolLabels={strategySymbolLabels}
+        symbolStatusTones={topbarSymbolStatusTones}
         timeframes={timeframes}
       />
       <AccountDrawer
@@ -2263,7 +2326,16 @@ useEffect(() => {
       </div>
 
       <div className="mobile-view-panel">
-        {activeMobileView === "strategies" ? <StrategyPanel symbols={chartSymbols} timeframes={timeframes} onChanged={() => void refreshTorumV1Status()} /> : null}
+        {activeMobileView === "strategies" ? (
+          <StrategyPanel
+            symbols={chartSymbols}
+            timeframes={timeframes}
+            onChanged={() => {
+              void refreshTorumV1Status();
+              void refreshChartOverlays();
+            }}
+          />
+        ) : null}
         {activeMobileView === "indicators" ? (
           <IndicatorsPanel
             indicatorLines={indicatorLines}
@@ -2274,7 +2346,12 @@ useEffect(() => {
         ) : null}
         {activeMobileView === "settings" ? (
           <>
-            <TradingSettingsPage />
+            <TradingSettingsPage
+              onChanged={() => {
+                void refreshTorumV1Status();
+                void refreshChartOverlays();
+              }}
+            />
             {renderMarketDiagnosticPanel()}
           </>
         ) : null}
@@ -2390,6 +2467,7 @@ useEffect(() => {
             drawingTool={drawingTool}
             drawings={drawingsVisible ? drawings.filter((drawing) => drawing.visible) : []}
             indicatorLines={indicatorLines}
+            athZones={athZones}
             strategyDebugPullbacks={strategyDebugPullbacks}
             noTradeZones={noTradeZones}
             alertToolActive={alertToolActive}

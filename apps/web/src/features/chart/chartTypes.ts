@@ -2,7 +2,7 @@ import type { Time } from "lightweight-charts";
 
 import type { PriceAlertRead } from "../../services/alerts";
 import type { NoTradeZone } from "../../services/news";
-import type { IndicatorLineOutput, StrategyPullbackDebug } from "../../services/indicators";
+import type { AthPriceZone, IndicatorLineOutput, StrategyPullbackDebug } from "../../services/indicators";
 import type { ChartDrawingCreate, ChartDrawingRead, ChartDrawingUpdate, DrawingTool } from "../../services/drawings";
 
 export interface MarketChartProps {
@@ -13,6 +13,7 @@ export interface MarketChartProps {
   noTradeZones?: NoTradeZone[];
   indicatorLines?: IndicatorLineOutput[];
   strategyDebugPullbacks?: StrategyPullbackDebug[];
+  athZones?: AthPriceZone[];
   drawings?: ChartDrawingRead[];
   drawingTool?: DrawingTool;
   selectedDrawingId?: string | null;
@@ -103,4 +104,13 @@ export interface PullbackDebugOverlay {
   y1: number;
   x2: number;
   y2: number;
+}
+
+export interface AthPriceZoneOverlay {
+  id: string;
+  top: number;
+  height: number;
+  color: string;
+  label: string;
+  maxLotEquivalents: number;
 }

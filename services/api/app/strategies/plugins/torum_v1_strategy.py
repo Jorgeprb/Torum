@@ -2,7 +2,8 @@ from typing import Any
 
 from app.strategies.context import StrategyContext
 from app.strategies.signals import StrategySignalData
-from app.strategies.torum_v1 import TORUM_V1_KEY, operation_zones_from_drawings, should_buy_torum_v1
+from app.strategies.ath import latest_executable_price
+from app.strategies.torum_v1 import TORUM_V1_KEY, operation_zones_from_drawings, should_buy_torum_v1, support_zones_from_drawings
 
 
 class TorumV1Strategy:
@@ -46,8 +47,10 @@ class TorumV1Strategy:
             symbol=context.symbol,
             candles_m5=context.candles,
             operation_zones=operation_zones_from_drawings(context.manual_zones),
+            support_zones=support_zones_from_drawings(context.manual_zones),
             params=params,
             now=context.now,
+            current_price=latest_executable_price(context.latest_tick, "BUY"),
             open_positions=context.open_positions if params.get("one_position_per_symbol", True) else [],
         )
         if not decision.should_buy:

@@ -22,7 +22,25 @@ if ([string]::IsNullOrWhiteSpace($Mt5Path)) {
 }
 
 Set-Location $TorumRoot
+$envFile = Join-Path $TorumRoot ".env"
 
+if (Test-Path $envFile) {
+    Get-Content $envFile | ForEach-Object {
+        $line = $_.Trim()
+
+        if ($line -eq "" -or $line.StartsWith("#")) {
+            return
+        }
+
+        $parts = $line -split "=", 2
+
+        if ($parts.Count -eq 2) {
+            $name = $parts[0].Trim()
+            $value = $parts[1].Trim().Trim('"').Trim("'")
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    }
+}
 # IMPORTANTE:
 # No desactivar .env. Docker Compose debe leer .env desde la raíz del repo.
 Remove-Item Env:COMPOSE_DISABLE_ENV_FILE -ErrorAction SilentlyContinue

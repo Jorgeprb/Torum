@@ -17,6 +17,7 @@ interface DrawingStyleEditorProps {
   defaultAlertStyle: PriceAlertVisualStyle;
   onClose: () => void;
   onUpdateDrawingStyle: (drawing: ChartDrawingRead, patch: Record<string, unknown>) => void;
+  onUpdateDrawingMetadata: (drawing: ChartDrawingRead, patch: Record<string, unknown>) => void;
   onUpdateAlertStyle: (alertId: string, patch: Partial<PriceAlertVisualStyle>) => void;
 }
 
@@ -33,6 +34,7 @@ export function DrawingStyleEditor({
   defaultAlertStyle,
   onClose,
   onUpdateDrawingStyle,
+  onUpdateDrawingMetadata,
   onUpdateAlertStyle
 }: DrawingStyleEditorProps) {
   if (!styleEditorTarget) {
@@ -44,6 +46,7 @@ export function DrawingStyleEditor({
     if (!drawing) {
       return null;
     }
+    const activeDrawing = drawing;
 
     const isLine =
       drawing.drawing_type === "horizontal_line" ||
@@ -52,6 +55,7 @@ export function DrawingStyleEditor({
     const isBox =
       drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone";
     const isText = drawing.drawing_type === "text";
+    const isHorizontalLine = drawing.drawing_type === "horizontal_line";
 
     const color = colorInputValue(
       styleValue(drawing.style, "color", isText ? "#edf2ef" : "#f5c542"),
@@ -68,6 +72,17 @@ export function DrawingStyleEditor({
       1
     );
     const fontSize = clampedNumericStyleValue(drawing.style, "fontSize", 14, 8, 48);
+    const support = typeof drawing.metadata.support === "object" && drawing.metadata.support !== null ? drawing.metadata.support as Record<string, unknown> : drawing.metadata;
+    const supportLevel = Number(support.supportLevel || 0);
+    const supportEnabled = support.enabled !== false;
+    const basePrice = Number(drawing.payload.price || 0);
+    const supportUpperPrice = Number(support.supportUpperPrice || (basePrice ? basePrice * 1.001 : 0));
+    const supportLowerPrice = Number(support.supportLowerPrice || (basePrice ? basePrice * 0.999 : 0));
+    const supportOpacity = clampedNumericStyleValue(support, "opacity", 0.20, 0, 1);
+
+    function updateSupport(patch: Record<string, unknown>) {
+      onUpdateDrawingMetadata(activeDrawing, { ...activeDrawing.metadata, ...patch });
+    }
 
     return (
       <div
@@ -117,6 +132,74 @@ export function DrawingStyleEditor({
               <span>{glow}</span>
             </label>
           </>
+        ) : null}
+
+        {isHorizontalLine ? (
+          <div className="chart-style-popover__group">
+            <label>
+              Soporte
+              <select
+                value={supportLevel === 1 || supportLevel === 2 || supportLevel === 3 ? String(supportLevel) : "none"}
+                onChange={(e) => {
+                  const next = e.target.value === "none" ? null : Number(e.target.value);
+                  if (next === null) {
+                    updateSupport({ supportLevel: "none", enabled: false });
+                    return;
+                  }
+                  updateSupport({
+                    supportLevel: next,
+                    enabled: true,
+                    supportUpperPrice: supportUpperPrice || basePrice * 1.001,
+                    supportLowerPrice: supportLowerPrice || basePrice * 0.999,
+                    opacity: supportOpacity
+                  });
+                }}
+              >
+                <option value="none">Sin soporte</option>
+                <option value="1">S1</option>
+                <option value="2">S2</option>
+                <option value="3">S3</option>
+              </select>
+            </label>
+            {supportLevel === 1 || supportLevel === 2 || supportLevel === 3 ? (
+              <>
+                <label className="toggle-line">
+                  <input
+                    checked={supportEnabled}
+                    type="checkbox"
+                    onChange={(e) => updateSupport({ enabled: e.target.checked })}
+                  />
+                  Activo
+                </label>
+                <label>
+                  Limite superior
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={supportUpperPrice}
+                    onChange={(e) => updateSupport({ supportUpperPrice: Number(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  Limite inferior
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={supportLowerPrice}
+                    onChange={(e) => updateSupport({ supportLowerPrice: Number(e.target.value) })}
+                  />
+                </label>
+                <label>
+                  Opacidad
+                  <input
+                    min="0" max="1" step="0.01" type="range" value={supportOpacity}
+                    onChange={(e) => updateSupport({ opacity: Number(e.target.value) })}
+                  />
+                  <span>{Math.round(supportOpacity * 100)}%</span>
+                </label>
+              </>
+            ) : null}
+          </div>
         ) : null}
 
         {isBox ? (

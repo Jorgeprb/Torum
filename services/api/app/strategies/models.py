@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, func
+from datetime import date
+
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -88,3 +90,25 @@ class StrategySettings(Base):
     max_signals_per_run: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class StrategyUnlockNotification(Base):
+    __tablename__ = "strategy_unlock_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "strategy_key",
+            "internal_symbol",
+            "unlock_day",
+            name="uq_strategy_unlock_notifications_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    strategy_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    internal_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    unlock_day: Mapped[date] = mapped_column(Date, nullable=False)
+    unlocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

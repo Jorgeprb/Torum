@@ -11,7 +11,9 @@ from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.ticks.service import latest_tick_order_by
 from app.trading.schemas import ManualOrderRequest
+from app.trading.lot_sizing import calculate_lot_size
 from app.risk.schemas import RiskDecision
+from app.strategies.ath import get_or_update_symbol_ath, ath_zone_for_price, latest_executable_price, plan_torum_v1_bot_exposure
 from app.strategies.torum_v1 import TorumV1StatusService
 
 
@@ -109,6 +111,7 @@ class RiskManager:
         mt5_status: MT5StatusRead,
         price_stale_after_seconds: int,
         user_id: int | None = None,
+        strategy_key: str | None = None,
     ) -> RiskDecision:
         decision = self.evaluate(
             order=order,
@@ -127,6 +130,36 @@ class RiskManager:
             if trading_settings.trading_mode == "LIVE" and not getattr(strategy_settings, "strategy_live_enabled", False):
                 reasons.append("Strategy LIVE execution is disabled")
         reasons.extend(TorumV1StatusService(self.db).bot_block_reasons(order.internal_symbol, user_id))
+        if strategy_key == "torum_v1":
+            current_price = latest_executable_price(latest_tick, order.side)
+            balance = getattr(mt5_status.account, "balance", None) if mt5_status.account is not None else None
+            base_lot = calculate_lot_size(
+                available_equity=balance,
+                equity_per_0_01_lot=getattr(trading_settings, "equity_per_0_01_lot", 2500.0),
+                minimum_lot=getattr(trading_settings, "minimum_lot", 0.01),
+                multiplier=1,
+                enabled=getattr(trading_settings, "lot_per_equity_enabled", True),
+            ).base_lot
+            desired_multiplier = max(1, int(round(order.volume / base_lot))) if base_lot > 0 else 1
+            plan = plan_torum_v1_bot_exposure(
+                self.db,
+                symbol=order.internal_symbol,
+                user_id=user_id,
+                desired_multiplier=desired_multiplier,
+                current_price=current_price,
+                balance=balance,
+                trading_settings=trading_settings,
+                symbol_mapping=symbol_mapping,
+            )
+            if not plan.allowed and plan.reason == "ath_red_zone":
+                reasons.append(f"BOT bloqueado por zona ATH roja en {order.internal_symbol}")
+            elif not plan.allowed:
+                reasons.append(f"BOT bloqueado por riesgo ATH/capital: {plan.reason}")
+            else:
+                ath = get_or_update_symbol_ath(self.db, order.internal_symbol)
+                zone = ath_zone_for_price(ath, current_price)
+                if zone is not None and zone.max_lot_equivalents == 0:
+                    reasons.append(f"BOT bloqueado por zona ATH roja en {order.internal_symbol}")
         return RiskDecision(allowed=not reasons, reasons=reasons, warnings=warnings)
 
     def latest_tick(self, internal_symbol: str) -> Tick | None:

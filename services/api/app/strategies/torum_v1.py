@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.candles.models import Candle
+from app.core.config import get_settings
 from app.drawings.models import ChartDrawing
 from app.news.service import get_global_news_settings
 from app.no_trade_zones.service import NoTradeZoneService
@@ -17,6 +18,7 @@ from app.strategies.repository import get_global_strategy_settings
 
 TORUM_V1_KEY = "torum_v1"
 MADRID_TZ = ZoneInfo("Europe/Madrid")
+DEFAULT_BROKER_TZ = ZoneInfo("Etc/GMT-3")
 SUPPORTED_SYMBOLS = ("XAUEUR", "XAUUSD")
 SUPPORTED_EVALUATION_TIMEFRAMES = ("H2", "H3")
 
@@ -78,12 +80,24 @@ class TorumV1OperationZone:
 
 
 @dataclass(frozen=True, slots=True)
+class TorumV1SupportZone:
+    drawing_id: str
+    level: int
+    price: float
+    lower_price: float
+    upper_price: float
+    opacity: float
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class TorumV1BuyDecision:
     should_buy: bool
     reason: str
     confirmation_candle_time: datetime | None = None
     pullback: TorumV1Pullback | None = None
     zone: TorumV1OperationZone | None = None
+    support: TorumV1SupportZone | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -163,6 +177,43 @@ def operation_zones_from_drawings(drawings: list[ChartDrawing]) -> list[TorumV1O
     return zones
 
 
+def support_zones_from_drawings(drawings: list[ChartDrawing]) -> list[TorumV1SupportZone]:
+    zones: list[TorumV1SupportZone] = []
+    for drawing in drawings:
+        if drawing.drawing_type != "horizontal_line":
+            continue
+        payload = drawing.payload_json or {}
+        metadata = drawing.metadata_json or {}
+        style = drawing.style_json or {}
+        support = metadata.get("support") if isinstance(metadata.get("support"), dict) else metadata
+        level = _support_level(support.get("supportLevel"))
+        enabled = _bool(support.get("enabled"), True)
+        price = _float_or_none(payload.get("price"))
+        if level is None or price is None or not enabled:
+            continue
+        lower = _float_or_none(support.get("supportLowerPrice"))
+        upper = _float_or_none(support.get("supportUpperPrice"))
+        if lower is None or upper is None:
+            width = max(price * 0.0005, 0.5)
+            lower = price - width
+            upper = price + width
+        opacity = _float_or_none(support.get("opacity"))
+        if opacity is None:
+            opacity = _float_or_none(style.get("supportOpacity")) or 0.20
+        zones.append(
+            TorumV1SupportZone(
+                drawing_id=drawing.id,
+                level=level,
+                price=price,
+                lower_price=min(lower, upper),
+                upper_price=max(lower, upper),
+                opacity=max(0.0, min(1.0, opacity)),
+                enabled=enabled,
+            )
+        )
+    return zones
+
+
 def is_candle_inside_operation_zone(candle: object, zone: TorumV1OperationZone, timeframe_seconds: int = 300) -> bool:
     candle_time = int(_as_utc(candle.time).timestamp())
     candle_close_time = candle_time + timeframe_seconds
@@ -180,9 +231,11 @@ def should_buy_torum_v1(
     symbol: str,
     candles_m5: list[object],
     operation_zones: list[TorumV1OperationZone],
+    support_zones: list[TorumV1SupportZone] | None = None,
     params: dict[str, Any],
     now: datetime | None = None,
     open_positions: list[object] | None = None,
+    current_price: float | None = None,
 ) -> TorumV1BuyDecision:
     if not _bool(params.get("enabled"), True):
         return TorumV1BuyDecision(False, "strategy_disabled")
@@ -221,6 +274,21 @@ def should_buy_torum_v1(
     if require_zone and matching_zone is None:
         return TorumV1BuyDecision(False, "confirmation_outside_operation_zone", confirmation_time, pullback)
 
+    confirmation_close = float(confirmation.close)
+    support_price = current_price if current_price is not None else confirmation_close
+    matching_support = next(
+        (
+            support
+            for support in support_zones or []
+            if support.enabled and support.lower_price <= support_price <= support.upper_price
+        ),
+        None,
+    )
+    desired_multiplier = desired_multiplier_for_support(
+        matching_support.level if matching_support is not None else None,
+        open_positions or [],
+    )
+
     metadata = {
         "symbol": symbol.upper(),
         "entry_timeframe": "M5",
@@ -229,24 +297,102 @@ def should_buy_torum_v1(
         "swing_high": pullback.swing_high,
         "pullback_low": pullback.pullback_low,
         "operation_zone_id": matching_zone.drawing_id if matching_zone else None,
+        "support_zone_id": matching_support.drawing_id if matching_support else None,
+        "support_level": matching_support.level if matching_support else None,
+        "desired_multiplier": desired_multiplier,
     }
-    return TorumV1BuyDecision(True, "buy_pullback_confirmed_inside_zone", confirmation_time, pullback, matching_zone, metadata)
+    return TorumV1BuyDecision(True, "buy_pullback_confirmed_inside_zone", confirmation_time, pullback, matching_zone, matching_support, metadata)
 
 
-def pullback_debug_payload(candles_m5: list[object], params: dict[str, Any]) -> list[dict[str, Any]]:
+def desired_multiplier_for_support(level: int | None, open_positions: list[object]) -> int:
+    if level == 2:
+        return 2
+    if level == 3:
+        return 3 if len(open_positions) == 0 else 2
+    return 1
+
+
+def pullback_debug_payload(
+    candles_m5: list[object],
+    params: dict[str, Any],
+    *,
+    live_price: float | None = None,
+    live_time: datetime | None = None,
+) -> list[dict[str, Any]]:
     threshold = _float_param(params.get("pullback_threshold_pct"), 0.20)
     lookback = _int_param(params.get("pullback_lookback_bars"), 12)
-    return [
-        {
-            "swing_high_time": int(pullback.swing_high_time.timestamp()),
-            "swing_high": pullback.swing_high,
-            "pullback_low_time": int(pullback.pullback_low_time.timestamp()),
-            "pullback_low": pullback.pullback_low,
-            "pullback_pct": pullback.pullback_pct,
-            "label": f"PB > {threshold:.2f}% ({pullback.pullback_pct:.2f}%)",
-        }
-        for pullback in detect_pullbacks(candles_m5, threshold, lookback)
-    ]
+
+    candles = _sorted_candles(candles_m5)
+    pullbacks = detect_pullbacks(candles, threshold=0.0, lookback=lookback)
+
+    biggest_by_candle: dict[int, TorumV1Pullback] = {}
+
+    for pullback in pullbacks:
+        candle_time = int(pullback.pullback_low_time.timestamp())
+        previous = biggest_by_candle.get(candle_time)
+
+        if previous is None or pullback.pullback_pct > previous.pullback_pct:
+            biggest_by_candle[candle_time] = pullback
+
+    live_pullback: TorumV1Pullback | None = None
+    live_threshold_touched = False
+
+    if candles and live_price is not None:
+        live_checked_at = _as_utc(live_time or datetime.now(UTC))
+        last_candle = candles[-1]
+        last_candle_time = _as_utc(last_candle.time)
+
+        previous_window = candles[max(0, len(candles) - 1 - lookback):len(candles) - 1]
+
+        if previous_window:
+            swing = max(previous_window, key=lambda candle: float(candle.high))
+            swing_high = float(swing.high)
+            current_price = float(live_price)
+
+            if swing_high > 0 and current_price < swing_high:
+                live_pullback_pct = (swing_high - current_price) / swing_high * 100
+
+                candle_low = float(last_candle.low)
+                touched_low = min(candle_low, current_price)
+                touched_pct = (swing_high - touched_low) / swing_high * 100
+                live_threshold_touched = touched_pct >= threshold
+
+                live_pullback = TorumV1Pullback(
+                    swing_high_time=_as_utc(swing.time),
+                    swing_high=swing_high,
+                    pullback_low_time=last_candle_time,
+                    pullback_low=current_price,
+                    pullback_pct=live_pullback_pct,
+                )
+
+                biggest_by_candle[int(last_candle_time.timestamp())] = live_pullback
+
+    result: list[dict[str, Any]] = []
+
+    for candle_time, pullback in sorted(biggest_by_candle.items()):
+        is_live = live_pullback is not None and candle_time == int(live_pullback.pullback_low_time.timestamp())
+
+        threshold_touched = (
+            live_threshold_touched
+            if is_live
+            else pullback.pullback_pct >= threshold
+        )
+
+        result.append(
+            {
+                "swing_high_time": int(pullback.swing_high_time.timestamp()),
+                "swing_high": pullback.swing_high,
+                "pullback_low_time": int(pullback.pullback_low_time.timestamp()),
+                "pullback_low": pullback.pullback_low,
+                "pullback_pct": pullback.pullback_pct,
+                "threshold_pct": threshold,
+                "threshold_touched": threshold_touched,
+                "is_live": is_live,
+                "label": f"PB {pullback.pullback_pct:.2f}%",
+            }
+        )
+
+    return result
 
 
 class TorumV1StatusService:
@@ -280,28 +426,22 @@ class TorumV1StatusService:
     ) -> TorumV1AssetStatus:
         checked_at = _as_utc(at_time or datetime.now(UTC))
         madrid_now = checked_at.astimezone(MADRID_TZ)
-        params = _symbol_params(symbol, config)
+        bot_params = _symbol_params(symbol, config)
+        bot_enabled = bool(strategies_enabled and config is not None and config.enabled and _bool(bot_params.get("enabled"), True))
+        params = bot_params if bot_enabled else _default_status_params(symbol)
         timeframe = _timeframe(params.get("timeframe"))
         session_start = _hhmm(params.get("session_start"), _default_session_start(symbol))
         session_end = _hhmm(params.get("session_end"), _default_session_end(symbol))
-        enabled = bool(strategies_enabled and config is not None and config.enabled and _bool(params.get("enabled"), True))
         base = {
             "symbol": symbol,
-            "enabled": enabled,
+            "enabled": bot_enabled,
             "timeframe": timeframe,
             "session_start": session_start,
             "session_end": session_end,
             "active_config_id": config.id if config is not None else None,
         }
 
-        if not strategies_enabled:
-            return TorumV1AssetStatus(**base, status="LOCKED", reason="engine_disabled", unlocked_at=None, blocked_by_news=False)
-        if config is None:
-            return TorumV1AssetStatus(**base, status="LOCKED", reason="strategy_not_configured", unlocked_at=None, blocked_by_news=False)
-        if not enabled:
-            return TorumV1AssetStatus(**base, status="LOCKED", reason="symbol_disabled", unlocked_at=None, blocked_by_news=False)
-
-        if self._is_news_blocked(symbol, config, checked_at):
+        if self._is_news_blocked(symbol, config if bot_enabled else None, checked_at):
             return TorumV1AssetStatus(**base, status="LOCKED", reason="news_zone", unlocked_at=None, blocked_by_news=True)
 
         session_start_dt = _local_dt(madrid_now.date(), session_start)
@@ -365,15 +505,25 @@ class TorumV1StatusService:
 
             if current.close > current.open:
                 return end_local.astimezone(UTC), "bullish_closed_candle"
-            if previous is not None and current.low >= previous.low:
+            if previous is None:
+                last_reason = "missing_previous_candle"
+                continue
+            current_bearish = current.close < current.open
+            previous_bearish = previous.close < previous.open
+            if current_bearish and previous_bearish and current.low >= previous.low:
                 return end_local.astimezone(UTC), "held_previous_low"
-            last_reason = "broke_previous_low"
+            if not current_bearish:
+                last_reason = "current_candle_not_bearish"
+            elif not previous_bearish:
+                last_reason = "previous_candle_not_bearish"
+            else:
+                last_reason = "broke_previous_low"
 
         return None, last_reason
 
     def _aggregate_window(self, symbol: str, start_local: datetime, end_local: datetime) -> AggregatedCandle | None:
-        start_utc = start_local.astimezone(UTC)
-        end_utc = end_local.astimezone(UTC)
+        start_utc = _madrid_local_to_broker_chart_utc(start_local)
+        end_utc = _madrid_local_to_broker_chart_utc(end_local)
         for timeframe in ("M1", "M5", "H1", "H2", "H3"):
             rows = list(
                 self.db.scalars(
@@ -417,6 +567,15 @@ def _symbol_params(symbol: str, config: StrategyConfig | None) -> dict[str, obje
         if isinstance(symbol_params, dict):
             params.update(symbol_params)
     return params
+
+
+def _default_status_params(symbol: str) -> dict[str, object]:
+    return {
+        "use_news": True,
+        "timeframe": "H2",
+        "session_start": _default_session_start(symbol),
+        "session_end": _default_session_end(symbol),
+    }
 
 
 def _use_news(config: StrategyConfig | None) -> bool:
@@ -519,6 +678,14 @@ def _float_or_none(value: object) -> float | None:
         return None
 
 
+def _support_level(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed in {1, 2, 3} else None
+
+
 def _timeframe(value: object) -> str:
     candidate = str(value or "H2").upper()
     return candidate if candidate in SUPPORTED_EVALUATION_TIMEFRAMES else "H2"
@@ -550,6 +717,18 @@ def _evaluation_starts(symbol: str, timeframe: str) -> tuple[str, ...]:
 def _local_dt(day: object, hhmm: str) -> datetime:
     parsed = time.fromisoformat(hhmm)
     return datetime.combine(day, parsed, tzinfo=MADRID_TZ)
+
+
+def _madrid_local_to_broker_chart_utc(value: datetime) -> datetime:
+    broker_wall_time = value.astimezone(_broker_time_zone())
+    return broker_wall_time.replace(tzinfo=UTC)
+
+
+def _broker_time_zone() -> ZoneInfo:
+    try:
+        return ZoneInfo(get_settings().chart_broker_time_zone)
+    except Exception:
+        return DEFAULT_BROKER_TZ
 
 
 def _as_utc(value: datetime) -> datetime:

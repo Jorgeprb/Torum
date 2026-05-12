@@ -13,11 +13,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$scope = if ($Machine) { "Machine" } else { "User" }
+$targetScope = if ($Machine) { [EnvironmentVariableTarget]::Machine } else { [EnvironmentVariableTarget]::User }
 
 function Set-TorumEnv {
   param([string]$Name, [string]$Value)
-  [Environment]::SetEnvironmentVariable($Name, $Value, $scope)
+  [Environment]::SetEnvironmentVariable($Name, $Value, $targetScope)
   Set-Item -Path "Env:$Name" -Value $Value
 }
 
@@ -42,9 +42,9 @@ Set-TorumEnv "BRIDGE_PYTHON" "python"
 Set-TorumEnv "FRONTEND_START_CMD" $FrontendStartCmd
 
 # Queremos que Docker Compose vuelva a leer .env
-[Environment]::SetEnvironmentVariable("COMPOSE_DISABLE_ENV_FILE", $null, $scope)
+[Environment]::SetEnvironmentVariable("COMPOSE_DISABLE_ENV_FILE", $null, $targetScope)
 Remove-Item Env:COMPOSE_DISABLE_ENV_FILE -ErrorAction SilentlyContinue
 
-Write-Host "Config Torum guardada en variables de Windows ($scope)."
+Write-Host "Config Torum guardada en variables de Windows ($targetScope)."
 Write-Host "Docker Compose leerá el archivo .env desde la raíz del repo."
 Write-Host "Cierra y abre PowerShell antes de arrancar Docker/watchdog."

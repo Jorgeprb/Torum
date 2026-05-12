@@ -15,13 +15,13 @@ interface SystemStatusModalProps {
   onClose: () => void;
 }
 
-const restartTargets: Array<{ target: RestartTarget; label: string; danger?: boolean }> = [
-  { target: "mt5", label: "Reiniciar MT5" },
-  { target: "api", label: "Reiniciar API" },
-  { target: "bridge", label: "Reiniciar bridge" },
-  { target: "frontend", label: "Reiniciar frontend" },
-  { target: "all", label: "Reiniciar todo", danger: true },
-  { target: "pc", label: "Reiniciar PC", danger: true }
+const restartTargets: Array<{ target: RestartTarget; itemKey?: string; label: string; danger?: boolean }> = [
+  { target: "mt5", itemKey: "mt5", label: "MT5 terminal" },
+  { target: "bridge", itemKey: "bridge", label: "mt5_bridge" },
+  { target: "api", itemKey: "api", label: "API/backend" },
+  { target: "frontend", itemKey: "frontend", label: "frontend" },
+  { target: "all", label: "Todo Torum", danger: true },
+  { target: "pc", label: "PC", danger: true }
 ];
 
 function statusIcon(status: SystemHealthStatus) {
@@ -41,29 +41,64 @@ function statusClass(status: SystemHealthStatus) {
   return `system-status-card system-status-card--${status.toLowerCase()}`;
 }
 
+function elapsedLabel(timestamp: number | null, nowMs: number) {
+  if (!timestamp) {
+    return "Sin refrescar";
+  }
+  const seconds = Math.max(0, Math.floor((nowMs - timestamp) / 1000));
+  if (seconds < 2) {
+    return "Refrescado ahora";
+  }
+  if (seconds < 60) {
+    return `Refrescado hace ${seconds}s`;
+  }
+  return `Refrescado hace ${Math.floor(seconds / 60)}m`;
+}
+
 function confirmationText(target: RestartTarget) {
   return target === "pc" ? "REINICIAR PC" : "REINICIAR";
 }
 
 export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
   const [status, setStatus] = useState<SystemStatusResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [actionSubmitting, setActionSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingTarget, setPendingTarget] = useState<RestartTarget | null>(null);
   const [confirmation, setConfirmation] = useState("");
   const [action, setAction] = useState<SystemRestartAction | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now());
 
   const expectedConfirmation = useMemo(() => (pendingTarget ? confirmationText(pendingTarget) : ""), [pendingTarget]);
+  const itemByKey = useMemo(() => new Map(status?.items.map((item) => [item.key, item]) ?? []), [status]);
+  const restartCards = useMemo(
+    () =>
+      restartTargets.map((target) => {
+        const item = target.itemKey ? itemByKey.get(target.itemKey) : null;
+        return {
+          ...target,
+          status: item?.status ?? (target.target === "all" ? status?.status ?? "UNKNOWN" : "UNKNOWN"),
+          message: item?.message ?? (target.target === "pc" ? "Reinicio completo del equipo" : status?.message ?? "Pendiente"),
+        };
+      }),
+    [itemByKey, status]
+  );
+  const passiveItems = useMemo(
+    () => status?.items.filter((item) => !restartTargets.some((target) => target.itemKey === item.key)) ?? [],
+    [status]
+  );
 
   async function refreshStatus() {
-    setLoading(true);
+    setRefreshing(true);
     setError(null);
     try {
       setStatus(await getAdminSystemStatus());
+      setLastRefreshedAt(Date.now());
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo leer estado");
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -73,14 +108,18 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
     }
     void refreshStatus();
     const intervalId = window.setInterval(() => void refreshStatus(), 7000);
-    return () => window.clearInterval(intervalId);
+    const clockId = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => {
+      window.clearInterval(intervalId);
+      window.clearInterval(clockId);
+    };
   }, [open]);
 
   async function confirmRestart() {
     if (!pendingTarget || confirmation.trim().toUpperCase() !== expectedConfirmation) {
       return;
     }
-    setLoading(true);
+    setActionSubmitting(true);
     setError(null);
     try {
       const response = await restartSystemTarget(pendingTarget, confirmation.trim().toUpperCase());
@@ -91,7 +130,7 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo reiniciar");
     } finally {
-      setLoading(false);
+      setActionSubmitting(false);
     }
   }
 
@@ -116,8 +155,9 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
           <Power size={18} />
           <strong>{status?.message ?? "Leyendo estado"}</strong>
           <span>{status?.account_mode ?? "UNKNOWN"}</span>
-          <button className="toolbar-action" disabled={loading} type="button" onClick={() => void refreshStatus()}>
-            {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+          <small>{elapsedLabel(lastRefreshedAt, nowMs)}</small>
+          <button className="toolbar-action" type="button" onClick={() => void refreshStatus()}>
+            <RefreshCw size={16} />
             Refrescar
           </button>
         </div>
@@ -125,8 +165,35 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
         {error ? <div className="compact-error">{error}</div> : null}
 
         <div className="system-status-grid">
-          {status?.items.map((item) => (
-            <article className={statusClass(item.status)} key={item.key}>
+          {status ? (
+            restartCards.map((card) => (
+              <button
+                className={`${statusClass(card.status)} system-status-card--button${card.danger ? " system-status-card--danger" : ""}`}
+                disabled={status.action_running || actionSubmitting}
+                key={card.target}
+                type="button"
+                onClick={() => {
+                  setPendingTarget(card.target);
+                  setConfirmation("");
+                }}
+              >
+                <div>
+                  {statusIcon(card.status)}
+                  <strong>{card.label}</strong>
+                  <span>{card.status}</span>
+                </div>
+                <p>{card.message}</p>
+              </button>
+            ))
+          ) : (
+            <div className="compact-warning">Cargando...</div>
+          )}
+        </div>
+
+        {passiveItems.length > 0 ? (
+          <div className="system-passive-grid">
+            {passiveItems.map((item) => (
+              <article className={statusClass(item.status)} key={item.key}>
               <div>
                 {statusIcon(item.status)}
                 <strong>{item.label}</strong>
@@ -134,25 +201,9 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
               </div>
               <p>{item.message}</p>
             </article>
-          )) ?? <div className="compact-warning">Cargando...</div>}
-        </div>
-
-        <div className="system-restart-grid">
-          {restartTargets.map((target) => (
-            <button
-              className={target.danger ? "system-restart-button system-restart-button--danger" : "system-restart-button"}
-              disabled={loading || status?.action_running}
-              key={target.target}
-              type="button"
-              onClick={() => {
-                setPendingTarget(target.target);
-                setConfirmation("");
-              }}
-            >
-              {target.label}
-            </button>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : null}
 
         {pendingTarget ? (
           <div className="system-confirm-box">
@@ -166,11 +217,11 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
               </button>
               <button
                 className="primary-button"
-                disabled={confirmation.trim().toUpperCase() !== expectedConfirmation || loading}
+                disabled={confirmation.trim().toUpperCase() !== expectedConfirmation || actionSubmitting}
                 type="button"
                 onClick={() => void confirmRestart()}
               >
-                Confirmar
+                {actionSubmitting ? "Enviando" : "Confirmar"}
               </button>
             </div>
             {pendingTarget === "pc" ? <p>Reiniciar PC corta conexion.</p> : null}

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     mt5_bridge_base_url: str | None = "http://host.docker.internal:9100"
     price_stale_after_seconds: int = 30
     candle_price_source: str = "BID"
+    chart_broker_time_zone: str = "Etc/GMT-3"
     mock_market_tick_interval_seconds: float = 1.0
     live_trading_enabled: bool = False
     default_magic_number: int = 260426

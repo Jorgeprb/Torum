@@ -33,10 +33,12 @@ export type DrawingDragAction =
   | "top-left"
   | "top-right"
   | "bottom-left"
-  | "bottom-right";
+  | "bottom-right"
+  | "support-upper"
+  | "support-lower";
 
 export type DrawingShape =
-  | (DrawingShapeBase & { kind: "horizontal_line"; x1: number; x2: number; y: number })
+  | (DrawingShapeBase & { kind: "horizontal_line"; x1: number; x2: number; y: number; supportLevel?: 1 | 2 | 3; supportUpperY?: number; supportLowerY?: number; supportOpacity?: number; supportEnabled?: boolean })
   | (DrawingShapeBase & { kind: "vertical_line"; x: number; y1: number; y2: number })
   | (DrawingShapeBase & { kind: "trend_line"; x1: number; y1: number; x2: number; y2: number })
   | (DrawingShapeBase & { kind: "rectangle"; x: number; y: number; width: number; height: number; backgroundColor: string })

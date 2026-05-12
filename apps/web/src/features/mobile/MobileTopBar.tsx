@@ -25,6 +25,7 @@ interface MobileTopBarProps {
   selectedSymbol: string;
   selectedTimeframe: Timeframe;
   symbolLabels?: Record<string, string>;
+  symbolStatusTones?: Record<string, "unlocked" | "locked">;
   timeframes: Timeframe[];
 }
 
@@ -47,7 +48,7 @@ export function MobileTopBar({
   marketClosed = false,
   selectedSymbol,
   selectedTimeframe,
-  symbolLabels,
+  symbolStatusTones,
   timeframes
 }: MobileTopBarProps) {
   const [openMenu, setOpenMenu] = useState<"symbol" | "timeframe" | "split" | null>(null);
@@ -110,6 +111,13 @@ export function MobileTopBar({
     setOpenMenu((current) => (current === menu ? null : menu));
   }
 
+  function symbolStatusClass(symbol: string): string {
+    const tone = symbolStatusTones?.[symbol];
+    if (tone === "unlocked") return " mobile-symbol-status mobile-symbol-status--unlocked";
+    if (tone === "locked") return " mobile-symbol-status mobile-symbol-status--locked";
+    return "";
+  }
+
   return (
     <header className="mobile-topbar" ref={dropdownRootRef}>
       <button aria-label="Abrir menu" className="mobile-icon-button" type="button" onClick={onMenuClick}>
@@ -119,18 +127,18 @@ export function MobileTopBar({
         <button
           aria-expanded={openMenu === "symbol"}
           aria-label="Simbolo"
-          className="mobile-topbar-dropdown__button"
+          className={`mobile-topbar-dropdown__button${symbolStatusClass(selectedSymbol)}`}
           type="button"
           onClick={() => toggleMenu("symbol")}
         >
-          <span>{symbolLabels?.[selectedSymbol] ?? selectedSymbol}</span>
+          <span>{selectedSymbol}</span>
           <ChevronDown size={14} />
         </button>
         {openMenu === "symbol" ? (
           <div className="mobile-topbar-dropdown__menu">
             {chartSymbols.map((symbol) => (
               <button
-                className={symbol === selectedSymbol ? "mobile-dropdown-item mobile-dropdown-item--active" : "mobile-dropdown-item"}
+                className={`${symbol === selectedSymbol ? "mobile-dropdown-item mobile-dropdown-item--active" : "mobile-dropdown-item"}${symbolStatusClass(symbol)}`}
                 key={symbol}
                 type="button"
                 onClick={() => {
@@ -138,7 +146,7 @@ export function MobileTopBar({
                   setOpenMenu(null);
                 }}
               >
-                {symbolLabels?.[symbol] ?? symbol}
+                {symbol}
               </button>
             ))}
           </div>

@@ -23,6 +23,19 @@ def test_bucket_h2_and_h4_use_hour_multiples() -> None:
     assert bucket_start(value, "H4") == datetime(2026, 4, 26, 12, tzinfo=UTC)
 
 
+def test_bucket_h3_for_xau_symbols_uses_madrid_boundaries() -> None:
+    summer_value = datetime(2026, 5, 1, 9, 59, tzinfo=UTC)
+    summer_next = datetime(2026, 5, 1, 10, 0, tzinfo=UTC)
+    winter_value = datetime(2026, 1, 15, 10, 59, tzinfo=UTC)
+    winter_next = datetime(2026, 1, 15, 11, 0, tzinfo=UTC)
+
+    assert bucket_start(summer_value, "H3", symbol="XAUEUR") == datetime(2026, 5, 1, 7, tzinfo=UTC)
+    assert bucket_start(summer_next, "H3", symbol="XAUUSD") == datetime(2026, 5, 1, 10, tzinfo=UTC)
+    assert bucket_start(winter_value, "H3", symbol="XAUEUR") == datetime(2026, 1, 15, 8, tzinfo=UTC)
+    assert bucket_start(winter_next, "H3", symbol="XAUUSD") == datetime(2026, 1, 15, 11, tzinfo=UTC)
+    assert bucket_start(summer_value, "H3", symbol="XAUAUD") == datetime(2026, 5, 1, 9, tzinfo=UTC)
+
+
 def test_bucket_d1_and_w1_start_at_utc_boundaries() -> None:
     value = datetime(2026, 4, 26, 13, 45, 10, tzinfo=UTC)
 

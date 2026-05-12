@@ -1,8 +1,6 @@
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (window.location.protocol === "https:"
-    ? window.location.origin
-    : "http://localhost:8000");
+import { resolveApiBaseUrl } from "./runtime";
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 export type UserRole = "admin" | "trader";
 

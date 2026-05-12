@@ -9,6 +9,7 @@ from app.db.base import Base
 from app.indicators.models import Indicator, IndicatorConfig, IndicatorValue  # noqa: F401
 from app.drawings.models import ChartDrawing  # noqa: F401
 from app.strategies.models import StrategyConfig, StrategyDefinition, StrategyRun, StrategySettings, StrategySignal  # noqa: F401
+from app.strategies.ath_models import SymbolAthLevel  # noqa: F401
 from app.news.models import NewsEvent, NewsSettings  # noqa: F401
 from app.no_trade_zones.models import NoTradeZone  # noqa: F401
 from app.orders.models import Order  # noqa: F401

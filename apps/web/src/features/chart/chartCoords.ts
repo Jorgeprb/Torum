@@ -405,7 +405,7 @@ export function buildFuturePaddingData(
     times.push(time);
   }
 
-  return times.map((time) => ({
+  return [lastTime, ...times].map((time) => ({
     time: time as UTCTimestamp,
     value: lastClose
   }));

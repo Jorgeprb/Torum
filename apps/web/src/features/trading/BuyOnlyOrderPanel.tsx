@@ -5,9 +5,11 @@ import type { MT5Status } from "../../services/market";
 import {
   type LotSizeResponse,
   type ManualOrderResponse,
+  type RiskPreviewResponse,
   type TradingMode,
   type TradingSettings,
   getLotSize,
+  getManualRiskPreview,
   getTradingSettings,
   submitManualOrder
 } from "../../services/trading";
@@ -62,6 +64,7 @@ export function BuyOnlyOrderPanel({
   const [lotInputText, setLotInputText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [riskPreview, setRiskPreview] = useState<RiskPreviewResponse | null>(null);
   const [liveText, setLiveText] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -83,6 +86,7 @@ export function BuyOnlyOrderPanel({
   useEffect(() => {
     setMultiplier(1);
     setLotInputText("");
+    setRiskPreview(null);
   }, [symbol]);
 
   useEffect(() => {
@@ -153,6 +157,30 @@ export function BuyOnlyOrderPanel({
     }
   }
 
+  async function openBuyModal() {
+    if (selectedLot === null) {
+      return;
+    }
+    setError(null);
+    try {
+      const preview = await getManualRiskPreview({
+        internal_symbol: symbol,
+        side: "BUY",
+        volume: selectedLot,
+        price: lastPrice ?? null
+      });
+      setRiskPreview(preview);
+    } catch {
+      setRiskPreview(null);
+    }
+    setModalOpen(true);
+  }
+
+  const highRiskPreview =
+    riskPreview && riskPreview.breaches_bot_limit && riskPreview.projected_balance !== null ? riskPreview : null;
+  const normalRiskPreview =
+    riskPreview && !riskPreview.breaches_bot_limit && riskPreview.projected_balance !== null ? riskPreview : null;
+
   return (
     <section className="buy-panel" aria-label="Compra rapida">
       <LotSizeControl
@@ -177,7 +205,7 @@ export function BuyOnlyOrderPanel({
         onLotInputChange={setLotInputText}
       />
 
-      <button className="buy-panel__button" disabled={buyDisabled} type="button" onClick={() => setModalOpen(true)}>
+      <button className="buy-panel__button" disabled={buyDisabled} type="button" onClick={() => void openBuyModal()}>
         {submitting ? <Loader2 className="spin" size={18} /> : <ArrowUp size={18} />}
         BUY
       </button>
@@ -223,6 +251,19 @@ export function BuyOnlyOrderPanel({
               </div>
             </dl>
             <p>Esta orden no tendra stop loss. El TP lo recalcula y valida el backend antes de ejecutar.</p>
+            {highRiskPreview ? (
+              <div className="risk-preview-warning">
+                <strong>Riesgo alto</strong>
+                <span>
+                  {highRiskPreview.message ?? `Esta operacion supondra que si el activo desciende un 30% tu capital sera de ${highRiskPreview.projected_balance!.toFixed(2)}`}
+                </span>
+                {highRiskPreview.potential_loss !== null ? <small>Perdida potencial conjunta: {highRiskPreview.potential_loss.toFixed(2)}</small> : null}
+              </div>
+            ) : normalRiskPreview ? (
+              <div className="risk-preview-note">
+                {normalRiskPreview.message}
+              </div>
+            ) : null}
             {mode === "LIVE" ? (
               <label>
                 Escribe CONFIRM LIVE

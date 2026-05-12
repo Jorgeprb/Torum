@@ -2,6 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.alerts.models import PriceAlert, PushSubscription
+from app.users.models import User
 
 
 def get_price_alert(db: Session, alert_id: str) -> PriceAlert | None:
@@ -60,3 +61,15 @@ def list_push_subscriptions(db: Session, *, user_id: int, enabled_only: bool = F
     if enabled_only:
         stmt = stmt.where(PushSubscription.enabled.is_(True))
     return list(db.scalars(stmt.order_by(PushSubscription.created_at.desc())))
+
+
+def list_users_with_enabled_push(db: Session) -> list[User]:
+    return list(
+        db.scalars(
+            select(User)
+            .join(PushSubscription, PushSubscription.user_id == User.id)
+            .where(User.is_active.is_(True), PushSubscription.enabled.is_(True))
+            .distinct()
+            .order_by(User.id)
+        )
+    )

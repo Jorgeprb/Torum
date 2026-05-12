@@ -12,7 +12,7 @@ self.addEventListener("push", (event) => {
     icon: "/pwa-icon-192.png",
     badge: "/pwa-icon-192.png",
     data: payload.data || {},
-    tag: payload.data?.alert_id || "torum-alert",
+    tag: payload.data?.notification_id || payload.data?.alert_id || "torum-alert",
     renotify: false
   };
 

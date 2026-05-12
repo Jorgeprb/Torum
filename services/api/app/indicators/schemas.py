@@ -121,3 +121,4 @@ class ChartOverlaysResponse(BaseModel):
     price_alerts: list[dict[str, Any]] = Field(default_factory=list)
     positions: list[dict[str, Any]] = Field(default_factory=list)
     strategy_debug_pullbacks: list[dict[str, Any]] = Field(default_factory=list)
+    ath_zones: list[dict[str, Any]] = Field(default_factory=list)

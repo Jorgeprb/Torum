@@ -15,6 +15,13 @@ python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --host 127.0.0.1 --port 9200
 ```
 
+Si ves `Invalid watchdog token`:
+
+```powershell
+cd c:\Users\steel\Documents\Codex\Torum_App\torum
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\sync_watchdog_token_from_api.ps1
+```
+
 ## Probar
 
 ```powershell

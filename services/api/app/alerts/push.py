@@ -35,6 +35,21 @@ class PushNotificationService:
         }
         return self._send_to_user(user_id, payload)
 
+    def send_torum_v1_unlocked(self, user_id: int, symbol: str, unlock_day: str) -> tuple[int, int]:
+        normalized_symbol = symbol.upper()
+        notification_id = f"torum-v1-unlock-{user_id}-{normalized_symbol}-{unlock_day}"
+        payload = {
+            "title": f"{normalized_symbol} DESBLOQUEADO",
+            "body": f"{normalized_symbol} DESBLOQUEADO",
+            "url": f"/?symbol={normalized_symbol}",
+            "data": {
+                "type": "torum_v1_asset_unlocked",
+                "symbol": normalized_symbol,
+                "notification_id": notification_id,
+            },
+        }
+        return self._send_to_user(user_id, payload)
+
     def _send_to_user(self, user_id: int, payload: dict[str, Any]) -> tuple[int, int]:
         subscriptions = list_push_subscriptions(self.db, user_id=user_id, enabled_only=True)
         if not subscriptions:
@@ -79,7 +94,8 @@ class PushNotificationService:
             return True
         except Exception as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code in {404, 410}:
+            error_text = str(exc)
+            if status_code in {404, 410} or "404" in error_text or "410" in error_text or "unsubscribed or expired" in error_text:
                 subscription.enabled = False
             if exc.__class__.__name__ == "WebPushException":
                 logger.warning("PWA push failed for subscription %s: %s", subscription.id, exc)

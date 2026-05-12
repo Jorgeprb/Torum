@@ -34,9 +34,19 @@ DEFAULT_SYNC_INTERVAL_MINUTES = 1440
 DEFAULT_DAYS_AHEAD = 14
 
 
+def _merge_default_affected_symbols(symbols: list[str] | None) -> list[str]:
+    merged: list[str] = []
+    for symbol in [*(symbols or []), *DEFAULT_AFFECTED_SYMBOLS]:
+        normalized = str(symbol).strip().upper()
+        if normalized and normalized not in merged:
+            merged.append(normalized)
+    return merged
+
+
 def get_global_news_settings(db: Session) -> NewsSettings:
     settings = get_news_settings(db)
     if settings is not None:
+        changed = False
         if settings.provider.upper() not in {DEFAULT_PROVIDER, "MANUAL"}:
             settings.provider = DEFAULT_PROVIDER
             settings.provider_name = DEFAULT_PROVIDER
@@ -44,8 +54,15 @@ def get_global_news_settings(db: Session) -> NewsSettings:
             settings.days_ahead = max(settings.days_ahead, DEFAULT_DAYS_AHEAD)
             settings.provider_enabled = True
             settings.auto_sync_enabled = True
+            changed = True
+        affected_symbols = _merge_default_affected_symbols(settings.affected_symbols)
+        if affected_symbols != settings.affected_symbols:
+            settings.affected_symbols = affected_symbols
+            changed = True
+        if changed:
             db.commit()
             db.refresh(settings)
+            NoTradeZoneService(db).regenerate_zones(settings)
         return settings
 
     settings = NewsSettings(
@@ -57,7 +74,7 @@ def get_global_news_settings(db: Session) -> NewsSettings:
         currencies_filter=DEFAULT_CURRENCIES,
         countries_filter=DEFAULT_COUNTRIES,
         impact_filter=DEFAULT_IMPACTS,
-        affected_symbols=DEFAULT_AFFECTED_SYMBOLS,
+        affected_symbols=list(DEFAULT_AFFECTED_SYMBOLS),
         provider_enabled=True,
         provider_name=DEFAULT_PROVIDER,
         provider=DEFAULT_PROVIDER,

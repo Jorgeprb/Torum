@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,11 +10,33 @@ from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.positions.service import PositionService
 from app.settings.trading_service import get_global_trading_settings, update_global_trading_settings
 from app.mt5.status_store import mt5_status_store
+from app.risk.manager import RiskManager
+from app.strategies.ath import list_symbol_ath_levels, latest_executable_price, preview_manual_risk, set_symbol_ath_level
+from app.symbols.service import get_symbol_by_internal
 from app.trading.lot_sizing import calculate_lot_size
-from app.trading.schemas import MT5OrderExecutionSettingsRead, LotSizeResponse, TradingSettingsRead, TradingSettingsUpdate
+from app.trading.schemas import AthLevelRead, AthLevelUpdate, MT5OrderExecutionSettingsRead, LotSizeResponse, RiskPreviewRequest, RiskPreviewResponse, TradingSettingsRead, TradingSettingsUpdate
 from app.users.models import User
 
 router = APIRouter(prefix="/trading", tags=["trading"])
+
+
+def _ath_level_read(symbol: str, level: object | None) -> AthLevelRead:
+    if level is None:
+        return AthLevelRead(
+            internal_symbol=symbol,
+            ath_price=None,
+            mode="auto",
+            source="candles",
+        )
+    source = str(getattr(level, "source", "candles") or "candles")
+    return AthLevelRead(
+        internal_symbol=str(getattr(level, "internal_symbol")),
+        ath_price=float(getattr(level, "ath_price")),
+        mode="manual" if source == "manual" else "auto",
+        source=source,
+        calculated_at=getattr(level, "calculated_at", None),
+        updated_at=getattr(level, "updated_at", None),
+    )
 
 
 @router.get("/settings", response_model=TradingSettingsRead)
@@ -109,6 +132,65 @@ def get_lot_size(
     )
 
     return LotSizeResponse(**calculation.__dict__)
+
+
+@router.post("/risk-preview", response_model=RiskPreviewResponse)
+def get_risk_preview(
+    payload: RiskPreviewRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> RiskPreviewResponse:
+    account = mt5_status_store.get().account
+    mapping = get_symbol_by_internal(db, payload.internal_symbol)
+    latest_tick = RiskManager(db).latest_tick(payload.internal_symbol)
+    price = payload.price or latest_executable_price(latest_tick, payload.side)
+    preview = preview_manual_risk(
+        db,
+        symbol=payload.internal_symbol,
+        side=payload.side,
+        volume=payload.volume,
+        price=price,
+        balance=account.balance if account is not None else None,
+        contract_size=mapping.contract_size if mapping is not None else 100.0,
+    )
+    message = None
+    if preview.balance is not None and preview.projected_balance is not None:
+        message = (
+            f"Esta operacion supondra que si el activo desciende un 30% "
+            f"tu capital sera de {preview.projected_balance:.2f}"
+        )
+    return RiskPreviewResponse(**asdict(preview), message=message)
+
+
+@router.get("/ath-levels", response_model=list[AthLevelRead])
+def get_ath_levels(
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> list[AthLevelRead]:
+    symbols = ["XAUEUR", "XAUUSD"]
+    levels = list_symbol_ath_levels(db)
+    by_symbol = {getattr(level, "internal_symbol"): level for level in levels if level is not None}
+    return [_ath_level_read(symbol, by_symbol.get(symbol)) for symbol in symbols]
+
+
+@router.patch("/ath-levels/{symbol}", response_model=AthLevelRead)
+def patch_ath_level(
+    symbol: str,
+    payload: AthLevelUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> AthLevelRead:
+    try:
+        level = set_symbol_ath_level(db, symbol, payload.mode, payload.ath_price)
+    except ValueError as exc:
+        if str(exc) == "manual_ath_required":
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="ATH manual requerido") from exc
+        if str(exc) == "missing_auto_ath":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No hay velas para calcular ATH automatico") from exc
+        if str(exc) == "unsupported_symbol":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simbolo no soportado") from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Modo ATH invalido") from exc
+    return _ath_level_read(symbol.upper(), level)
 
 
 @router.post("/pause", response_model=TradingSettingsRead)

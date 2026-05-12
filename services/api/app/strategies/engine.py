@@ -7,6 +7,7 @@ from app.candles.models import Candle
 from app.drawings.models import ChartDrawing
 from app.indicators.engine import IndicatorEngine
 from app.no_trade_zones.service import NoTradeZoneService
+from app.orders.models import Order
 from app.positions.models import Position
 from app.strategies.context import StrategyContext
 from app.strategies.models import StrategyConfig
@@ -37,7 +38,7 @@ class StrategyContextBuilder:
             indicators=indicators,
             no_trade_zones=NoTradeZoneService(self.db).get_active_zones(config.internal_symbol),
             manual_zones=self._manual_zones(config),
-            open_positions=self._open_positions(config.internal_symbol),
+            open_positions=self._open_positions(config),
             params=params,
         )
 
@@ -73,7 +74,7 @@ class StrategyContextBuilder:
                 select(ChartDrawing).where(
                     ChartDrawing.user_id == config.user_id,
                     ChartDrawing.internal_symbol == config.internal_symbol,
-                    ChartDrawing.drawing_type.in_(("rectangle", "manual_zone")),
+                    ChartDrawing.drawing_type.in_(("rectangle", "manual_zone", "horizontal_line")),
                     ChartDrawing.visible.is_(True),
                     ChartDrawing.source == "MANUAL",
                     ChartDrawing.deleted_at.is_(None),
@@ -81,5 +82,8 @@ class StrategyContextBuilder:
             )
         )
 
-    def _open_positions(self, symbol: str) -> list[Position]:
-        return list(self.db.scalars(select(Position).where(Position.internal_symbol == symbol, Position.status == "OPEN")))
+    def _open_positions(self, config: StrategyConfig) -> list[Position]:
+        stmt = select(Position).where(Position.internal_symbol == config.internal_symbol, Position.status == "OPEN")
+        if config.strategy_key == "torum_v1":
+            stmt = stmt.join(Order, Position.order_id == Order.id).where(Order.source == "STRATEGY", Order.strategy_key == "torum_v1")
+        return list(self.db.scalars(stmt))

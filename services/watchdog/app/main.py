@@ -26,7 +26,7 @@ RestartTarget = Literal["mt5", "api", "frontend", "bridge", "all", "pc"]
 class WatchdogSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    watchdog_admin_token: str
+    watchdog_admin_token: str | None = None
     watchdog_host: str = "127.0.0.1"
     watchdog_port: int = 9200
     torum_root: str = str(Path(__file__).resolve().parents[3])
@@ -88,17 +88,37 @@ def require_token(
     authorization: str | None = Header(default=None),
     x_watchdog_token: str | None = Header(default=None),
 ) -> None:
+    expected_token = current_watchdog_admin_token()
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
     if not token:
         token = x_watchdog_token
-    if not token or token != settings.watchdog_admin_token:
+    if not expected_token:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Watchdog token not configured")
+    if not token or token != expected_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid watchdog token")
 
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _windows_user_env(name: str) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, name)
+        return str(value).strip() or None
+    except Exception:
+        return None
+
+
+def current_watchdog_admin_token() -> str | None:
+    return _windows_user_env("WATCHDOG_ADMIN_TOKEN") or os.environ.get("WATCHDOG_ADMIN_TOKEN") or settings.watchdog_admin_token
 
 
 def _item(key: str, label: str, item_status: ComponentStatus, message: str, details: dict[str, Any] | None = None) -> StatusItem:

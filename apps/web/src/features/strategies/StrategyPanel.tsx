@@ -1,4 +1,4 @@
-import { ChevronDown, Power } from "lucide-react";
+import { ChevronDown, Info, Power, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { Timeframe } from "../../services/market";
@@ -41,6 +41,24 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
   };
 }
 
+function fixedTorumParams(symbol: string, current: Record<string, unknown> | undefined, enabled: boolean): Record<string, unknown> {
+  return {
+    ...defaultTorumParams(symbol),
+    use_news: current?.use_news ?? true,
+    enable_operation_zones: current?.enable_operation_zones ?? true,
+    entry_timeframe: "M5",
+    pullback_threshold_pct: current?.pullback_threshold_pct ?? 0.20,
+    pullback_lookback_bars: current?.pullback_lookback_bars ?? 12,
+    show_pullback_debug: current?.show_pullback_debug ?? false,
+    require_zone: current?.require_zone ?? true,
+    one_position_per_symbol: current?.one_position_per_symbol ?? true,
+    enabled,
+    timeframe: "H2",
+    session_start: symbol === "XAUEUR" ? "09:00" : "15:30",
+    session_end: symbol === "XAUEUR" ? "15:00" : "21:00"
+  };
+}
+
 export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelProps) {
   void symbols;
   void timeframes;
@@ -48,6 +66,7 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
   const [configs, setConfigs] = useState<StrategyConfig[]>([]);
   const [settings, setSettings] = useState<StrategySettings | null>(null);
   const [torumExpanded, setTorumExpanded] = useState(false);
+  const [torumInfoOpen, setTorumInfoOpen] = useState(false);
 
   const torumDefinition = useMemo(
     () => definitions.find((definition) => definition.key === TORUM_V1_KEY),
@@ -98,7 +117,8 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
     if (existing) {
       const updated = await patchStrategyConfig(existing.id, {
         enabled,
-        params_json: { ...defaultTorumParams(symbol), ...existing.params_json, enabled }
+        timeframe: "H2",
+        params_json: fixedTorumParams(symbol, existing.params_json, enabled)
       });
       setConfigs((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       return updated;
@@ -110,7 +130,7 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
       timeframe: "H2",
       enabled,
       mode: settings?.default_mode ?? "PAPER",
-      params_json: defaultTorumParams(symbol)
+      params_json: fixedTorumParams(symbol, undefined, enabled)
     });
     setConfigs((current) => [...current, created]);
     return created;
@@ -144,9 +164,9 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
       const updated = await Promise.all(
         readyConfigs.map((config) =>
           patchStrategyConfig(config.id, {
+            timeframe: "H2",
             params_json: {
-              ...defaultTorumParams(config.internal_symbol),
-              ...config.params_json,
+              ...fixedTorumParams(config.internal_symbol, config.params_json, torumEnabled),
               ...patch
             }
           })
@@ -180,6 +200,14 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
               size={18}
             />
             <strong>{torumDefinition?.name ?? "Estrategia Torum V1.0"}</strong>
+          </button>
+          <button
+            aria-label="Informacion Torum V1"
+            className="strategy-info-button"
+            type="button"
+            onClick={() => setTorumInfoOpen(true)}
+          >
+            <Info size={17} />
           </button>
           <button
             aria-label={torumEnabled ? "Apagar estrategia Torum V1" : "Encender estrategia Torum V1"}
@@ -264,6 +292,31 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
           </div>
         ) : null}
       </section>
+      {torumInfoOpen ? (
+        <div className="modal-backdrop strategy-info-backdrop" role="presentation" onMouseDown={() => setTorumInfoOpen(false)}>
+          <section className="confirm-modal strategy-info-modal" role="dialog" aria-modal="true" aria-label="Resumen Estrategia Torum V1" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-title-row">
+              <Info size={19} />
+              <h2>Estrategia Torum V1.0</h2>
+              <button className="mobile-icon-button strategy-info-close" type="button" aria-label="Cerrar" onClick={() => setTorumInfoOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="strategy-info-list">
+              <p>Solo BOT. Usuario manual siempre puede operar.</p>
+              <p>Solo BUY. Nunca SELL.</p>
+              <p>XAUEUR opera 09:00-15:00 Europe/Madrid. XAUUSD opera 15:30-21:00.</p>
+              <p>Desbloquea por velas cerradas 2H o 3H. Reset diario por activo.</p>
+              <p>Noticias bloquean solo BOT durante ventana configurada. Luego vuelve estado previo.</p>
+              <p>Entrada M5: pullback mayor a 0.20%, despues vela alcista cerrada.</p>
+              <p>Compra solo dentro de rectangulo operativo activo si exigir zona esta activo.</p>
+              <p>Soportes S1/S2/S3 aumentan agresividad si hay capacidad.</p>
+              <p>Zonas ATH limitan BOT: roja bloquea, naranja 1, amarilla 2, verde 3 lotajes.</p>
+              <p>Riesgo BOT: perdida potencial 30% no puede superar 50% del balance.</p>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }

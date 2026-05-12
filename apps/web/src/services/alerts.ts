@@ -1,8 +1,7 @@
 import { getAuthToken } from "../stores/authStore";
+import { resolveApiBaseUrl } from "./runtime";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (window.location.protocol === "https:" ? window.location.origin : "http://localhost:8000");
+const API_BASE_URL = resolveApiBaseUrl();
 
 export type PriceAlertStatus = "ACTIVE" | "TRIGGERED" | "CANCELLED" | "EXPIRED";
 

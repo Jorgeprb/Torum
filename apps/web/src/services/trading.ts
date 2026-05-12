@@ -1,10 +1,7 @@
 import { getAuthToken } from "../stores/authStore";
+import { resolveApiBaseUrl } from "./runtime";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  (window.location.protocol === "https:"
-    ? window.location.origin
-    : "http://localhost:8000");
+const API_BASE_URL = resolveApiBaseUrl();
 
 export type TradingMode = "PAPER" | "DEMO" | "LIVE";
 export type OrderSide = "BUY" | "SELL";
@@ -69,6 +66,24 @@ export interface ManualOrderResponse {
   message: string;
   warnings: string[];
   reasons: string[];
+}
+
+export interface RiskPreviewResponse {
+  balance: number | null;
+  potential_loss: number | null;
+  projected_balance: number | null;
+  breaches_bot_limit: boolean;
+  positions_count: number;
+  message: string | null;
+}
+
+export interface AthLevel {
+  internal_symbol: string;
+  ath_price: number | null;
+  mode: "auto" | "manual";
+  source: string;
+  calculated_at: string | null;
+  updated_at: string | null;
 }
 
 export interface OrderRead {
@@ -189,6 +204,24 @@ export function getLotSize(symbol: string, multiplier = 1): Promise<LotSizeRespo
 export function submitManualOrder(payload: ManualOrderPayload): Promise<ManualOrderResponse> {
   return request<ManualOrderResponse>("/api/orders/manual", {
     method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getManualRiskPreview(payload: { internal_symbol: string; side: OrderSide; volume: number; price?: number | null }): Promise<RiskPreviewResponse> {
+  return request<RiskPreviewResponse>("/api/trading/risk-preview", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getAthLevels(): Promise<AthLevel[]> {
+  return request<AthLevel[]>("/api/trading/ath-levels");
+}
+
+export function patchAthLevel(symbol: string, payload: { mode: AthLevel["mode"]; ath_price?: number | null }): Promise<AthLevel> {
+  return request<AthLevel>(`/api/trading/ath-levels/${symbol}`, {
+    method: "PATCH",
     body: JSON.stringify(payload)
   });
 }
