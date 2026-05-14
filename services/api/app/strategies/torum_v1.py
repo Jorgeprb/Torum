@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,8 +27,22 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "use_news": True,
     "enable_operation_zones": True,
     "entry_timeframe": "M5",
-    "pullback_threshold_pct": 0.20,
+    "pullback_enabled": True,
+    "pullback_max_count": 10,
+    "pullback_min_pct": 0.0,
+    "pullback_threshold_pct": 0.0,
     "pullback_lookback_bars": 12,
+    "pullback_recovery_pct": 0.10,
+    "pullback_end_confirmation_bars": 1,
+    "pullback_min_bars_between": 0,
+    "pullback_use_wicks": True,
+    "pullback_use_close_confirmation": True,
+    "pullback_live_update_enabled": True,
+    "pullback_show_labels": True,
+    "pullback_show_only_live": False,
+    "pullback_label_decimals": 2,
+    "pullback_line_width": 2,
+    "pullback_opacity": 0.95,
     "show_pullback_debug": False,
     "require_zone": True,
     "one_position_per_symbol": True,
@@ -66,6 +80,7 @@ class TorumV1Pullback:
     pullback_low_time: datetime
     pullback_low: float
     pullback_pct: float
+    is_live: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,36 +140,163 @@ class TorumV1Status:
     assets: dict[str, TorumV1AssetStatus]
 
 
-def detect_pullbacks(candles_m5: list[object], threshold: float = 0.20, lookback: int = 12) -> list[TorumV1Pullback]:
+def detect_pullbacks(
+    candles_m5: list[object],
+    threshold: float = 0.20,
+    lookback: int = 12,
+    recovery_pct: float = 0.10,
+    end_confirmation_bars: int = 1,
+    *,
+    max_count: int | None = None,
+    min_bars_between: int = 0,
+    use_wicks: bool = True,
+    use_close_confirmation: bool = True,
+    live_update_enabled: bool = True,
+    live_price: float | None = None,
+    live_time: datetime | None = None,
+) -> list[TorumV1Pullback]:
     candles = _sorted_candles(candles_m5)
-    safe_lookback = max(1, int(lookback))
+    del lookback
+    if not candles:
+        return []
+
+    safe_threshold = max(0.0, float(threshold))
+    safe_recovery_pct = max(0.0, float(recovery_pct))
+    required_recovery_bars = max(1, int(end_confirmation_bars))
+    safe_min_bars_between = max(0, int(min_bars_between))
     pullbacks: list[TorumV1Pullback] = []
+    peak = candles[0]
+    active: TorumV1Pullback | None = None
+    confirmed_recovery_bars = 0
+    bars_until_next_pullback = 0
 
-    for low_index in range(1, len(candles)):
-        current = candles[low_index]
-        previous_window = candles[max(0, low_index - safe_lookback):low_index]
-        if not previous_window:
-            continue
+    for candle in candles:
+        high = float(candle.high)
+        low = _pullback_low_source(candle, use_wicks)
 
-        swing = max(previous_window, key=lambda candle: float(candle.high))
-        swing_high = float(swing.high)
-        current_low = float(current.low)
-        if swing_high <= 0 or current_low >= swing_high:
-            continue
+        if active is None:
+            if high >= float(peak.high):
+                peak = candle
+            if bars_until_next_pullback > 0:
+                bars_until_next_pullback -= 1
+                continue
 
-        pullback_pct = (swing_high - current_low) / swing_high * 100
-        if pullback_pct >= threshold:
-            pullbacks.append(
-                TorumV1Pullback(
-                    swing_high_time=_as_utc(swing.time),
+            swing_high = float(peak.high)
+            if swing_high <= 0 or low >= swing_high:
+                continue
+
+            pullback_pct = _pullback_pct(swing_high, low)
+            if pullback_pct >= safe_threshold:
+                active = TorumV1Pullback(
+                    swing_high_time=_as_utc(peak.time),
                     swing_high=swing_high,
-                    pullback_low_time=_as_utc(current.time),
-                    pullback_low=current_low,
+                    pullback_low_time=_as_utc(candle.time),
+                    pullback_low=low,
                     pullback_pct=pullback_pct,
                 )
-            )
+                confirmed_recovery_bars = 0
+            continue
 
-    return pullbacks
+        if low < active.pullback_low:
+            active = _updated_pullback_low(active, candle.time, low)
+            confirmed_recovery_bars = 0
+            continue
+
+        recovered = float(candle.close) >= active.pullback_low * (1 + safe_recovery_pct / 100)
+        if use_close_confirmation:
+            recovered = recovered and float(candle.close) > float(candle.open)
+        confirmed_recovery_bars = confirmed_recovery_bars + 1 if recovered else 0
+        if confirmed_recovery_bars >= required_recovery_bars:
+            pullbacks.append(active)
+            peak = candle
+            active = None
+            confirmed_recovery_bars = 0
+            bars_until_next_pullback = safe_min_bars_between
+
+    active = (
+        _apply_live_pullback_update(
+            active=active,
+            peak=peak,
+            last_candle=candles[-1],
+            live_price=live_price,
+            live_time=live_time,
+            threshold=safe_threshold,
+            use_wicks=use_wicks,
+        )
+        if live_update_enabled
+        else active
+    )
+    if active is not None:
+        pullbacks.append(replace(active, is_live=True))
+
+    return _latest_pullbacks(pullbacks, max_count=max_count)
+
+
+def _pullback_pct(swing_high: float, pullback_low: float) -> float:
+    return (swing_high - pullback_low) / swing_high * 100 if swing_high > 0 else 0.0
+
+
+def _pullback_low_source(candle: object, use_wicks: bool) -> float:
+    if use_wicks:
+        return float(candle.low)
+    return float(candle.close)
+
+
+def _latest_pullbacks(pullbacks: list[TorumV1Pullback], max_count: int | None) -> list[TorumV1Pullback]:
+    ordered = sorted(pullbacks, key=lambda pullback: pullback.swing_high_time)
+    if max_count is None:
+        return ordered
+    safe_max = max(0, int(max_count))
+    if safe_max == 0:
+        return []
+    return ordered[-safe_max:]
+
+
+def _updated_pullback_low(pullback: TorumV1Pullback, low_time: datetime, low: float) -> TorumV1Pullback:
+    return TorumV1Pullback(
+        swing_high_time=pullback.swing_high_time,
+        swing_high=pullback.swing_high,
+        pullback_low_time=_as_utc(low_time),
+        pullback_low=low,
+        pullback_pct=_pullback_pct(pullback.swing_high, low),
+    )
+
+
+def _apply_live_pullback_update(
+    *,
+    active: TorumV1Pullback | None,
+    peak: object,
+    last_candle: object,
+    live_price: float | None,
+    live_time: datetime | None,
+    threshold: float,
+    use_wicks: bool,
+) -> TorumV1Pullback | None:
+    if live_price is None:
+        return active
+
+    del last_candle, use_wicks
+    live_low = float(live_price)
+    low_time = _as_utc(live_time or datetime.now(UTC))
+
+    if active is not None:
+        return _updated_pullback_low(active, low_time, live_low) if live_low < active.pullback_low else active
+
+    swing_high = float(peak.high)
+    if swing_high <= 0 or live_low >= swing_high:
+        return None
+
+    pullback_pct = _pullback_pct(swing_high, live_low)
+    if pullback_pct < threshold:
+        return None
+
+    return TorumV1Pullback(
+        swing_high_time=_as_utc(peak.time),
+        swing_high=swing_high,
+        pullback_low_time=low_time,
+        pullback_low=live_low,
+        pullback_pct=pullback_pct,
+    )
 
 
 def is_bullish_confirmation(candle: object) -> bool:
@@ -258,9 +400,30 @@ def should_buy_torum_v1(
     if not is_bullish_confirmation(confirmation):
         return TorumV1BuyDecision(False, "waiting_bullish_confirmation")
 
-    threshold = _float_param(params.get("pullback_threshold_pct"), 0.20)
+    if not _bool(params.get("pullback_enabled"), True):
+        return TorumV1BuyDecision(False, "pullback_disabled")
+
+    threshold = _pullback_threshold(params)
     lookback = _int_param(params.get("pullback_lookback_bars"), 12)
-    pullbacks = [pullback for pullback in detect_pullbacks(closed[:-1], threshold, lookback) if pullback.pullback_low_time < confirmation_time]
+    recovery_pct = _nonnegative_float_param(params.get("pullback_recovery_pct"), 0.10)
+    confirmation_bars = _int_param(params.get("pullback_end_confirmation_bars"), 1)
+    min_bars_between = _nonnegative_int_param(params.get("pullback_min_bars_between"), 0)
+    pullbacks = [
+        pullback
+        for pullback in detect_pullbacks(
+            closed,
+            threshold,
+            lookback,
+            recovery_pct,
+            confirmation_bars,
+            max_count=_int_param(params.get("pullback_max_count"), 10),
+            min_bars_between=min_bars_between,
+            use_wicks=_bool(params.get("pullback_use_wicks"), True),
+            use_close_confirmation=_bool(params.get("pullback_use_close_confirmation"), True),
+            live_update_enabled=False,
+        )
+        if not pullback.is_live and pullback.pullback_low_time < confirmation_time
+    ]
     if not pullbacks:
         return TorumV1BuyDecision(False, "missing_pullback")
 
@@ -319,65 +482,42 @@ def pullback_debug_payload(
     live_price: float | None = None,
     live_time: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    threshold = _float_param(params.get("pullback_threshold_pct"), 0.20)
+    if not _bool(params.get("pullback_enabled"), True):
+        return []
+
+    threshold = _pullback_threshold(params)
     lookback = _int_param(params.get("pullback_lookback_bars"), 12)
+    recovery_pct = _nonnegative_float_param(params.get("pullback_recovery_pct"), 0.10)
+    confirmation_bars = _int_param(params.get("pullback_end_confirmation_bars"), 1)
+    max_count = _int_param(params.get("pullback_max_count"), 10)
+    min_bars_between = _nonnegative_int_param(params.get("pullback_min_bars_between"), 0)
+    show_only_live = _bool(params.get("pullback_show_only_live"), False)
+    show_labels = _bool(params.get("pullback_show_labels"), True)
+    label_decimals = max(0, min(6, _nonnegative_int_param(params.get("pullback_label_decimals"), 2)))
+    line_width = max(1, min(6, _nonnegative_int_param(params.get("pullback_line_width"), 2)))
+    opacity = max(0.1, min(1.0, _nonnegative_float_param(params.get("pullback_opacity"), 0.95)))
 
     candles = _sorted_candles(candles_m5)
-    pullbacks = detect_pullbacks(candles, threshold=0.0, lookback=lookback)
-
-    biggest_by_candle: dict[int, TorumV1Pullback] = {}
-
-    for pullback in pullbacks:
-        candle_time = int(pullback.pullback_low_time.timestamp())
-        previous = biggest_by_candle.get(candle_time)
-
-        if previous is None or pullback.pullback_pct > previous.pullback_pct:
-            biggest_by_candle[candle_time] = pullback
-
-    live_pullback: TorumV1Pullback | None = None
-    live_threshold_touched = False
-
-    if candles and live_price is not None:
-        live_checked_at = _as_utc(live_time or datetime.now(UTC))
-        last_candle = candles[-1]
-        last_candle_time = _as_utc(last_candle.time)
-
-        previous_window = candles[max(0, len(candles) - 1 - lookback):len(candles) - 1]
-
-        if previous_window:
-            swing = max(previous_window, key=lambda candle: float(candle.high))
-            swing_high = float(swing.high)
-            current_price = float(live_price)
-
-            if swing_high > 0 and current_price < swing_high:
-                live_pullback_pct = (swing_high - current_price) / swing_high * 100
-
-                candle_low = float(last_candle.low)
-                touched_low = min(candle_low, current_price)
-                touched_pct = (swing_high - touched_low) / swing_high * 100
-                live_threshold_touched = touched_pct >= threshold
-
-                live_pullback = TorumV1Pullback(
-                    swing_high_time=_as_utc(swing.time),
-                    swing_high=swing_high,
-                    pullback_low_time=last_candle_time,
-                    pullback_low=current_price,
-                    pullback_pct=live_pullback_pct,
-                )
-
-                biggest_by_candle[int(last_candle_time.timestamp())] = live_pullback
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=threshold,
+        lookback=lookback,
+        recovery_pct=recovery_pct,
+        end_confirmation_bars=confirmation_bars,
+        max_count=max_count,
+        min_bars_between=min_bars_between,
+        use_wicks=_bool(params.get("pullback_use_wicks"), True),
+        use_close_confirmation=_bool(params.get("pullback_use_close_confirmation"), True),
+        live_update_enabled=_bool(params.get("pullback_live_update_enabled"), True),
+        live_price=live_price,
+        live_time=live_time,
+    )
+    if show_only_live:
+        pullbacks = [pullback for pullback in pullbacks if pullback.is_live]
 
     result: list[dict[str, Any]] = []
 
-    for candle_time, pullback in sorted(biggest_by_candle.items()):
-        is_live = live_pullback is not None and candle_time == int(live_pullback.pullback_low_time.timestamp())
-
-        threshold_touched = (
-            live_threshold_touched
-            if is_live
-            else pullback.pullback_pct >= threshold
-        )
-
+    for pullback in pullbacks:
         result.append(
             {
                 "swing_high_time": int(pullback.swing_high_time.timestamp()),
@@ -386,9 +526,11 @@ def pullback_debug_payload(
                 "pullback_low": pullback.pullback_low,
                 "pullback_pct": pullback.pullback_pct,
                 "threshold_pct": threshold,
-                "threshold_touched": threshold_touched,
-                "is_live": is_live,
-                "label": f"PB {pullback.pullback_pct:.2f}%",
+                "threshold_touched": threshold > 0 and pullback.pullback_pct >= threshold,
+                "is_live": pullback.is_live,
+                "label": f"PB {pullback.pullback_pct:.{label_decimals}f}%" if show_labels else "",
+                "line_width": line_width,
+                "opacity": opacity,
             }
         )
 
@@ -429,7 +571,7 @@ class TorumV1StatusService:
         bot_params = _symbol_params(symbol, config)
         bot_enabled = bool(strategies_enabled and config is not None and config.enabled and _bool(bot_params.get("enabled"), True))
         params = bot_params if bot_enabled else _default_status_params(symbol)
-        timeframe = _timeframe(params.get("timeframe"))
+        timeframe = "H2/H3"
         session_start = _hhmm(params.get("session_start"), _default_session_start(symbol))
         session_end = _hhmm(params.get("session_end"), _default_session_end(symbol))
         base = {
@@ -449,7 +591,7 @@ class TorumV1StatusService:
         if madrid_now < session_start_dt or madrid_now >= session_end_dt:
             return TorumV1AssetStatus(**base, status="LOCKED", reason="outside_session", unlocked_at=None, blocked_by_news=False)
 
-        unlocked_at, reason = self._unlocked_at(symbol, timeframe, madrid_now)
+        unlocked_at, reason = self._unlocked_at(symbol, madrid_now, session_start, session_end)
         if unlocked_at is None:
             return TorumV1AssetStatus(**base, status="LOCKED", reason=reason, unlocked_at=None, blocked_by_news=False)
 
@@ -486,19 +628,23 @@ class TorumV1StatusService:
                 configs[symbol] = config
         return configs
 
-    def _unlocked_at(self, symbol: str, timeframe: str, madrid_now: datetime) -> tuple[datetime | None, str]:
-        starts = _evaluation_starts(symbol, timeframe)
-        duration = timedelta(hours=3 if timeframe == "H3" else 2)
+    def _unlocked_at(
+        self,
+        symbol: str,
+        madrid_now: datetime,
+        session_start: str,
+        session_end: str,
+    ) -> tuple[datetime | None, str]:
+        windows = _evaluation_windows(symbol, madrid_now.date(), session_start, session_end)
         last_reason = "waiting_closed_candle"
 
-        for start_label in starts:
-            start_local = _local_dt(madrid_now.date(), start_label)
-            end_local = start_local + duration
+        for timeframe, start_local, end_local in windows:
             if madrid_now < end_local:
-                continue
+                return None, "waiting_closed_candle"
 
-            current = self._aggregate_window(symbol, start_local, end_local)
-            previous = self._aggregate_window(symbol, start_local - duration, start_local)
+            duration = end_local - start_local
+            current = self._aggregate_window(symbol, start_local, end_local, preferred_timeframe=timeframe)
+            previous = self._aggregate_window(symbol, start_local - duration, start_local, preferred_timeframe=timeframe)
             if current is None:
                 last_reason = "missing_current_candle"
                 continue
@@ -521,10 +667,17 @@ class TorumV1StatusService:
 
         return None, last_reason
 
-    def _aggregate_window(self, symbol: str, start_local: datetime, end_local: datetime) -> AggregatedCandle | None:
+    def _aggregate_window(
+        self,
+        symbol: str,
+        start_local: datetime,
+        end_local: datetime,
+        preferred_timeframe: str | None = None,
+    ) -> AggregatedCandle | None:
         start_utc = _madrid_local_to_broker_chart_utc(start_local)
         end_utc = _madrid_local_to_broker_chart_utc(end_local)
-        for timeframe in ("M1", "M5", "H1", "H2", "H3"):
+        timeframe_order = _aggregate_timeframe_order(preferred_timeframe)
+        for timeframe in timeframe_order:
             rows = list(
                 self.db.scalars(
                     select(Candle)
@@ -596,9 +749,28 @@ def _float_param(value: object, fallback: float) -> float:
     return parsed if parsed > 0 else fallback
 
 
+def _nonnegative_float_param(value: object, fallback: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed >= 0 else fallback
+
+
 def _int_param(value: object, fallback: int) -> int:
     parsed = _int_or_none(value)
     return parsed if parsed is not None and parsed > 0 else fallback
+
+
+def _nonnegative_int_param(value: object, fallback: int) -> int:
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None and parsed >= 0 else fallback
+
+
+def _pullback_threshold(params: dict[str, Any]) -> float:
+    if "pullback_min_pct" in params:
+        return _nonnegative_float_param(params.get("pullback_min_pct"), 0.0)
+    return _nonnegative_float_param(params.get("pullback_threshold_pct"), 0.0)
 
 
 def _int_or_none(value: object) -> int | None:
@@ -691,6 +863,14 @@ def _timeframe(value: object) -> str:
     return candidate if candidate in SUPPORTED_EVALUATION_TIMEFRAMES else "H2"
 
 
+def _aggregate_timeframe_order(preferred_timeframe: str | None) -> tuple[str, ...]:
+    if preferred_timeframe == "H2":
+        return ("H2", "H1", "M5", "M1")
+    if preferred_timeframe == "H3":
+        return ("H3", "H1", "M5", "M1")
+    return ("H1", "M5", "M1", "H2", "H3")
+
+
 def _hhmm(value: object, fallback: str) -> str:
     candidate = str(value or fallback)
     try:
@@ -708,10 +888,37 @@ def _default_session_end(symbol: str) -> str:
     return "15:00" if symbol == "XAUEUR" else "21:00"
 
 
-def _evaluation_starts(symbol: str, timeframe: str) -> tuple[str, ...]:
-    if symbol == "XAUEUR":
-        return ("09:00", "11:00", "13:00") if timeframe == "H2" else ("09:00",)
-    return ("15:00", "17:00", "19:00") if timeframe == "H2" else ("15:00", "18:00")
+def _evaluation_start(symbol: str, session_start: str) -> str:
+    if symbol == "XAUUSD":
+        return "15:00"
+    return session_start
+
+
+def _evaluation_windows(
+    symbol: str,
+    day: object,
+    session_start: str,
+    session_end: str,
+) -> list[tuple[str, datetime, datetime]]:
+    start_local = _local_dt(day, _evaluation_start(symbol, session_start))
+    end_limit = _local_dt(day, session_end)
+    windows: list[tuple[str, datetime, datetime]] = []
+
+    for timeframe, hours in (("H2", 2), ("H3", 3)):
+        duration = timedelta(hours=hours)
+        current_start = start_local
+        while current_start + duration <= end_limit:
+            windows.append((timeframe, current_start, current_start + duration))
+            current_start += duration
+
+    return sorted(
+        windows,
+        key=lambda item: (
+            item[2],
+            2 if item[0] == "H2" else 3,
+            item[1],
+        ),
+    )
 
 
 def _local_dt(day: object, hhmm: str) -> datetime:

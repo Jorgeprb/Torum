@@ -102,8 +102,8 @@ def chart_overlays(
             .order_by(StrategyConfig.id)
             .first()
         )
-        params = config.params_json if config is not None else {}
-        if config is not None and bool(params.get("show_pullback_debug", False)):
+        params = {"pullback_min_pct": 0.0, "pullback_max_count": 10, **(config.params_json if config is not None else {})}
+        if config is not None and bool(params.get("show_pullback_debug", False)) and bool(params.get("pullback_enabled", True)):
             candles_m5 = list(
                 db.query(Candle)
                 .filter(

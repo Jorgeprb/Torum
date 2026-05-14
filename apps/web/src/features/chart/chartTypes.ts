@@ -39,9 +39,12 @@ export interface MarketChartProps {
   autoFollowEnabled?: boolean;
   onAutoFollowChange?: (enabled: boolean) => void;
   recenterToken?: number;
+  centerRequestKey?: string;
   resetKey?: string;
   showFutureNewsZones?: boolean;
   autoExtendToFutureNews?: boolean;
+  pullbackDebugVisible?: boolean;
+  onPullbackDebugToggle?: (visible: boolean) => void;
 }
 
 export interface ZoneOverlay {

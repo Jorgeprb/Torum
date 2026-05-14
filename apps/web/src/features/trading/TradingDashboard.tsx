@@ -37,6 +37,7 @@ import {
   stopMockMarket
 } from "../../services/market";
 import { MarketSocketManager, type MarketSocketStatus } from "../../services/marketSocket";
+import { readPersistedCandles, writePersistedCandles } from "../../services/candleCache";
 import {
   type ChartDrawingCreate,
   type ChartDrawingRead,
@@ -84,6 +85,7 @@ const mobileDrawingTools: DrawingTool[] = ["horizontal_line", "vertical_line", "
 const spyModeStorageKey = "torum.spyMode";
 const showFutureNewsZonesStorageKey = "torum.showFutureNewsZones";
 const autoExtendToFutureNewsStorageKey = "torum.autoExtendToFutureNews";
+const showPullbackOverlaysStorageKey = "torum.showPullbackOverlays";
 const futureNewsVisualsChangedEvent = "torum-future-news-visuals-changed";
 const futureOverlayLookaheadDays = 90;
 const torumTopbarStatusSymbols = new Set(["XAUUSD", "XAUEUR"]);
@@ -101,6 +103,14 @@ function readDefaultTruePreference(key: string): boolean {
     return window.localStorage.getItem(key) !== "0";
   } catch {
     return true;
+  }
+}
+
+function saveBooleanPreference(key: string, enabled: boolean) {
+  try {
+    window.localStorage.setItem(key, enabled ? "1" : "0");
+  } catch {
+    // Prefer live UI over storage.
   }
 }
 
@@ -203,6 +213,39 @@ function torumTopbarAssetTone(status: TorumV1Status | null, symbol: string): "un
   return asset.status === "UNLOCKED" ? "unlocked" : "locked";
 }
 
+function pullbackLabelDecimals(label: string): number {
+  const match = label.match(/\.(\d+)%/);
+  return match ? match[1].length : 2;
+}
+
+function updateLivePullbackDebug(
+  pullbacks: StrategyPullbackDebug[],
+  price: number | null,
+  timeMsc: number
+): StrategyPullbackDebug[] {
+  if (price === null || !Number.isFinite(price) || pullbacks.length === 0) {
+    return pullbacks;
+  }
+
+  const lastIndex = pullbacks.length - 1;
+  const last = pullbacks[lastIndex];
+  if (last.is_live !== true || price >= last.pullback_low || last.swing_high <= 0) {
+    return pullbacks;
+  }
+
+  const pullbackPct = ((last.swing_high - price) / last.swing_high) * 100;
+  const decimals = pullbackLabelDecimals(last.label);
+  const next = [...pullbacks];
+  next[lastIndex] = {
+    ...last,
+    pullback_low: price,
+    pullback_low_time: Math.floor(timeMsc / 1000),
+    pullback_pct: pullbackPct,
+    label: last.label ? `PB ${pullbackPct.toFixed(decimals)}%` : ""
+  };
+  return next;
+}
+
 function translateTradeMessage(message: string): string {
   return message
     .replace(/market closed/gi, "Mercado cerrado")
@@ -236,12 +279,36 @@ async function preparePushForPriceAlert(): Promise<PushStatus | null> {
   }
 }
 
-function normalizeCandleTime(time: number): number {
-  if (!Number.isFinite(time)) {
-    return 0;
+function normalizeCandleTime(time: unknown): number {
+  if (typeof time === "number") {
+    if (!Number.isFinite(time)) {
+      return 0;
+    }
+
+    return time > 10_000_000_000 ? Math.floor(time / 1000) : Math.floor(time);
   }
 
-  return time > 10_000_000_000 ? Math.floor(time / 1000) : Math.floor(time);
+  if (typeof time === "string") {
+    const parsed = Number(time);
+    if (Number.isFinite(parsed)) {
+      return parsed > 10_000_000_000 ? Math.floor(parsed / 1000) : Math.floor(parsed);
+    }
+
+    const parsedDate = Date.parse(time);
+    return Number.isNaN(parsedDate) ? 0 : Math.floor(parsedDate / 1000);
+  }
+
+  if (typeof time === "object" && time !== null) {
+    const source = time as { year?: unknown; month?: unknown; day?: unknown };
+    const year = Number(source.year);
+    const month = Number(source.month);
+    const day = Number(source.day);
+    if (Number.isInteger(year) && Number.isInteger(month) && Number.isInteger(day)) {
+      return Math.floor(Date.UTC(year, month - 1, day) / 1000);
+    }
+  }
+
+  return 0;
 }
 
 function normalizeDashboardCandle(candle: Candle): Candle | null {
@@ -285,6 +352,184 @@ function upsertCandle(candles: Candle[], update: Candle): Candle[] {
   return [...byTime.values()]
     .sort((a, b) => a.time - b.time)
     .slice(-500);
+}
+
+const candleMemoryCache = new Map<string, Candle[]>();
+const candlePrefetchInFlight = new Set<string>();
+const candleCacheLimit = 500;
+
+function candleCacheKey(symbol: string, timeframe: Timeframe): string {
+  return `${symbol.toUpperCase()}:${timeframe}`;
+}
+
+function cloneCandles(candles: Candle[]): Candle[] {
+  return candles.map((candle) => ({ ...candle }));
+}
+
+function normalizeDashboardCandles(candles: Candle[], symbol?: string, timeframe?: Timeframe): Candle[] {
+  const expectedSymbol = symbol?.toUpperCase();
+  const byTime = new Map<number, Candle>();
+  const normalizedCandles = candles
+    .map(normalizeDashboardCandle)
+    .filter((candle): candle is Candle => candle !== null)
+    .filter((candle) => (expectedSymbol ? candle.internal_symbol.toUpperCase() === expectedSymbol : true))
+    .filter((candle) => (timeframe ? candle.timeframe === timeframe : true));
+
+  for (const candle of normalizedCandles) {
+    byTime.set(candle.time, candle);
+  }
+
+  return [...byTime.values()].sort((a, b) => a.time - b.time).slice(-candleCacheLimit);
+}
+
+function readCachedCandles(symbol: string, timeframe: Timeframe): Candle[] | null {
+  const cached = candleMemoryCache.get(candleCacheKey(symbol, timeframe));
+  if (!cached) {
+    return null;
+  }
+
+  const normalizedCandles = normalizeDashboardCandles(cached, symbol, timeframe);
+  candleMemoryCache.set(candleCacheKey(symbol, timeframe), normalizedCandles);
+  return normalizedCandles.length > 0 ? cloneCandles(normalizedCandles) : null;
+}
+
+function writeCachedCandles(symbol: string, timeframe: Timeframe, candles: Candle[]): Candle[] {
+  const normalizedCandles = normalizeDashboardCandles(candles, symbol, timeframe);
+  candleMemoryCache.set(candleCacheKey(symbol, timeframe), normalizedCandles);
+  void writePersistedCandles(symbol, timeframe, normalizedCandles);
+  return cloneCandles(normalizedCandles);
+}
+
+async function readAnyCachedCandles(symbol: string, timeframe: Timeframe): Promise<Candle[] | null> {
+  const memoryCandles = readCachedCandles(symbol, timeframe);
+  if (memoryCandles) {
+    return memoryCandles;
+  }
+
+  const persistedCandles = await readPersistedCandles(symbol, timeframe);
+  if (!persistedCandles) {
+    return null;
+  }
+
+  return writeCachedCandles(symbol, timeframe, persistedCandles);
+}
+
+function mergeCandles(existing: Candle[], incoming: Candle[]): Candle[] {
+  const byTime = new Map<number, Candle>();
+
+  for (const candle of normalizeDashboardCandles(existing)) {
+    byTime.set(candle.time, candle);
+  }
+
+  for (const candle of normalizeDashboardCandles(incoming)) {
+    byTime.set(candle.time, candle);
+  }
+
+  return [...byTime.values()]
+    .sort((a, b) => a.time - b.time)
+    .slice(-candleCacheLimit);
+}
+
+function latestCandleTime(candles: Candle[] | null): number | null {
+  if (!candles?.length) {
+    return null;
+  }
+
+  return candles[candles.length - 1]?.time ?? null;
+}
+
+function patchCandlesWithLivePrice(candles: Candle[], price: number | null): Candle[] | null {
+  if (price === null || !Number.isFinite(price) || candles.length === 0) {
+    return null;
+  }
+
+  const normalizedCandles = normalizeDashboardCandles(candles);
+  const last = normalizedCandles[normalizedCandles.length - 1];
+  if (!last) {
+    return null;
+  }
+
+  const nextLast: Candle = {
+    ...last,
+    close: price,
+    high: Math.max(last.high, price),
+    low: Math.min(last.low, price)
+  };
+
+  return [...normalizedCandles.slice(0, -1), nextLast];
+}
+
+function candlesBelongToMarket(candles: Candle[], symbol: string, timeframe: Timeframe): boolean {
+  const last = candles[candles.length - 1];
+  return last?.internal_symbol === symbol && last.timeframe === timeframe;
+}
+
+function patchCachedCandlesWithLivePrice(
+  symbol: string,
+  timeframe: Timeframe,
+  price: number | null,
+  visibleCandles?: Candle[]
+): Candle[] | null {
+  const key = candleCacheKey(symbol, timeframe);
+  const cachedCandles = candleMemoryCache.get(key);
+  const baseCandles =
+    visibleCandles && visibleCandles.length > 0 && candlesBelongToMarket(visibleCandles, symbol, timeframe)
+      ? visibleCandles
+      : cachedCandles ?? [];
+  const nextCandles = patchCandlesWithLivePrice(baseCandles, price);
+
+  if (!nextCandles) {
+    return null;
+  }
+
+  candleMemoryCache.set(key, nextCandles);
+  return cloneCandles(nextCandles);
+}
+
+function livePriceFromMarketMessage(message: Extract<MarketMessage, { type: "latest_tick_update" | "market_tick" }>): number | null {
+  return message.bid ?? message.last ?? message.ask ?? null;
+}
+
+function nearbyTimeframes(timeframe: Timeframe): Timeframe[] {
+  const supportedNearby: Record<Timeframe, Timeframe[]> = {
+    M1: ["M5"],
+    M5: ["M1", "H1"],
+    H1: ["M5", "H4"],
+    H2: ["H1", "H3"],
+    H3: ["H2", "H4"],
+    H4: ["H1", "D1"],
+    D1: ["H4", "W1"],
+    W1: ["D1"]
+  };
+
+  return supportedNearby[timeframe] ?? [];
+}
+
+function prefetchNearbyCandles(symbol: string, timeframe: Timeframe) {
+  for (const nearby of nearbyTimeframes(timeframe)) {
+    const key = candleCacheKey(symbol, nearby);
+    if (candleMemoryCache.has(key) || candlePrefetchInFlight.has(key)) {
+      continue;
+    }
+
+    candlePrefetchInFlight.add(key);
+    void getCandles(symbol, nearby)
+      .then((candles) => {
+        writeCachedCandles(symbol, nearby, candles);
+      })
+      .catch(() => {
+        // Precarga ligera. Si falla, no molesta al grafico activo.
+      })
+      .finally(() => {
+        candlePrefetchInFlight.delete(key);
+      });
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === "AbortError"
+    : error instanceof Error && error.name === "AbortError";
 }
 
 function isReallyOpenPosition(position: PositionRead): boolean {
@@ -498,6 +743,8 @@ interface SplitMarketChartProps {
   showBidLine: boolean;
   showFutureNewsZones: boolean;
   autoExtendToFutureNews: boolean;
+  showPullbackOverlays: boolean;
+  onPullbackOverlayToggle: (visible: boolean) => void;
   strategyDebugPullbacks?: StrategyPullbackDebug[];
 }
 
@@ -520,6 +767,8 @@ function SplitMarketChart({
   showBidLine,
   showFutureNewsZones,
   autoExtendToFutureNews,
+  showPullbackOverlays,
+  onPullbackOverlayToggle,
   strategyDebugPullbacks = []
 }: SplitMarketChartProps) {
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -534,6 +783,7 @@ function SplitMarketChart({
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const [autoFollowEnabled, setAutoFollowEnabled] = useState(true);
   const generationRef = useRef(0);
+  const candleAbortRef = useRef<AbortController | null>(null);
   const latestBid = latestTick?.bid ?? null;
   const latestAsk = latestTick?.ask ?? null;
   const tradeLines = useMemo(
@@ -546,7 +796,12 @@ function SplitMarketChart({
     const generation = generationRef.current;
     const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
     const to = new Date(Date.now() + futureOverlayLookaheadDays * 24 * 60 * 60 * 1000).toISOString();
-    setCandles([]);
+    const cachedCandles = readCachedCandles(symbol, timeframe);
+    if (cachedCandles) {
+      setCandles(cachedCandles);
+    } else {
+      setCandles([]);
+    }
     setNoTradeZones([]);
     setIndicatorLines([]);
     setLocalStrategyDebugPullbacks([]);
@@ -558,10 +813,23 @@ function SplitMarketChart({
 
     async function refresh() {
       setLoadingCandles(true);
+      candleAbortRef.current?.abort();
+      const controller = new AbortController();
+      candleAbortRef.current = controller;
 
       try {
+        const cachedBeforeFetch = await readAnyCachedCandles(symbol, timeframe);
+        if (generation !== generationRef.current) {
+          return;
+        }
+
+        if (cachedBeforeFetch) {
+          setCandles(cachedBeforeFetch);
+        }
+
+        const after = latestCandleTime(cachedBeforeFetch);
         const [nextCandles, ticks, overlays, nextDrawings] = await Promise.all([
-          getCandles(symbol, timeframe),
+          getCandles(symbol, timeframe, after ? 5000 : 500, { signal: controller.signal, after: after ?? undefined }),
           getTicks(symbol, 1).catch(() => []),
           getChartOverlays(symbol, timeframe, from, to).catch(() => null),
           getDrawings(symbol, timeframe, true).catch(() => [])
@@ -571,7 +839,13 @@ function SplitMarketChart({
           return;
         }
 
-        setCandles([...nextCandles].filter((candle) => Number.isFinite(candle.time)).sort((a, b) => a.time - b.time));
+        const mergedCandles = writeCachedCandles(
+          symbol,
+          timeframe,
+          after ? mergeCandles(cachedBeforeFetch ?? [], nextCandles) : nextCandles
+        );
+
+        setCandles(mergedCandles);
         setLatestTick(ticks[ticks.length - 1] ?? null);
         setNoTradeZones(overlays?.no_trade_zones ?? []);
         setIndicatorLines(overlays?.indicators.filter(isLineOutput) ?? []);
@@ -580,12 +854,16 @@ function SplitMarketChart({
         setPriceAlerts(overlays?.price_alerts ?? []);
         setDrawings(nextDrawings);
         setSelectedDrawingId((current) => (current && nextDrawings.some((drawing) => drawing.id === current) ? current : null));
-      } catch {
+        prefetchNearbyCandles(symbol, timeframe);
+      } catch (requestError) {
+        if (isAbortError(requestError)) {
+          return;
+        }
+
         if (generation !== generationRef.current) {
           return;
         }
 
-        setCandles([]);
         setLatestTick(null);
         setNoTradeZones([]);
         setIndicatorLines([]);
@@ -595,7 +873,10 @@ function SplitMarketChart({
         setDrawings([]);
         setSelectedDrawingId(null);
       } finally {
-        if (generation === generationRef.current) {
+        if (candleAbortRef.current === controller) {
+          candleAbortRef.current = null;
+        }
+        if (generation === generationRef.current && candleAbortRef.current === null) {
           setLoadingCandles(false);
         }
       }
@@ -610,7 +891,10 @@ function SplitMarketChart({
         }
 
         if (message.type === "candle_update" && message.symbol === symbol && message.timeframe === timeframe) {
-          setCandles((current) => upsertCandle(current, message.candle));
+          setCandles((current) => {
+            const next = upsertCandle(current, message.candle);
+            return writeCachedCandles(symbol, timeframe, next);
+          });
           return;
         }
 
@@ -634,6 +918,8 @@ function SplitMarketChart({
               source: message.source ?? "UNKNOWN"
             };
           });
+          const livePrice = livePriceFromMarketMessage(message);
+          setCandles((current) => patchCachedCandlesWithLivePrice(symbol, timeframe, livePrice, current) ?? current);
         }
       },
       onReconnect: () => {
@@ -647,6 +933,7 @@ function SplitMarketChart({
     socket.connect(symbol, timeframe);
 
     return () => {
+      candleAbortRef.current?.abort();
       socket.disconnect();
     };
   }, [symbol, timeframe]);
@@ -733,6 +1020,7 @@ function SplitMarketChart({
           autoExtendToFutureNews={autoExtendToFutureNews}
           bidPrice={latestTick?.bid ?? null}
           candles={candles}
+          centerRequestKey={`${symbol}:${timeframe}`}
           drawingTool={drawingTool}
           drawings={drawingsVisible ? drawings.filter((drawing) => drawing.visible) : []}
           indicatorLines={indicatorLines}
@@ -756,6 +1044,8 @@ function SplitMarketChart({
           showAskLine={showAskLine}
           showBidLine={showBidLine}
           showFutureNewsZones={showFutureNewsZones}
+          pullbackDebugVisible={showPullbackOverlays}
+          onPullbackDebugToggle={onPullbackOverlayToggle}
           symbol={symbol}
           timeframe={timeframe}
           tradeLines={tradeLines}
@@ -816,6 +1106,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [spyModeEnabled, setSpyModeEnabled] = useState(readSpyModePreference);
   const [showFutureNewsZones, setShowFutureNewsZones] = useState(() => readDefaultTruePreference(showFutureNewsZonesStorageKey));
   const [autoExtendToFutureNews, setAutoExtendToFutureNews] = useState(() => readDefaultTruePreference(autoExtendToFutureNewsStorageKey));
+  const [showPullbackOverlays, setShowPullbackOverlays] = useState(() => readDefaultTruePreference(showPullbackOverlaysStorageKey));
   const [chartAutoFollowEnabled, setChartAutoFollowEnabled] = useState(true);
   const [chartRecenterToken, setChartRecenterToken] = useState(0);
   const [chartSymbolResetToken, setChartSymbolResetToken] = useState(0);
@@ -829,7 +1120,9 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const socketManagerRef = useRef<MarketSocketManager | null>(null);
   const resumeReconnectAtRef = useRef(0);
   const marketGenerationRef = useRef(0);
+  const candleAbortRef = useRef<AbortController | null>(null);
   const activeMarketKeyRef = useRef(`${selectedSymbol}:${selectedTimeframe}`);
+  const pullbackOverlayRefreshAtRef = useRef(0);
   const [ticksPerSecond, setTicksPerSecond] = useState(0);
   const activeMobileView = controlledActiveView ?? internalActiveView;
 
@@ -1156,7 +1449,12 @@ useEffect(() => {
   setChartAutoFollowEnabled(true);
   setLatestTick(null);
   setBackendLatestTick(null);
-  setCandles([]);
+  const cachedCandles = readCachedCandles(symbol, timeframe);
+  if (cachedCandles) {
+    setCandles(cachedCandles);
+  } else {
+    setCandles([]);
+  }
   setNoTradeZones([]);
   setIndicatorLines([]);
   setStrategyDebugPullbacks([]);
@@ -1286,8 +1584,12 @@ useEffect(() => {
       return;
     }
 
-    setCandles((current) => upsertCandle(current, message.candle));
+    setCandles((current) => {
+      const next = upsertCandle(current, message.candle);
+      return writeCachedCandles(message.symbol, message.timeframe, next);
+    });
     setStreamSource(message.candle.source);
+    queuePullbackOverlayRefresh();
     return;
   }
     if (message.type === "market_status") {
@@ -1321,6 +1623,13 @@ useEffect(() => {
         source: message.source ?? "UNKNOWN"
       };
     });
+    if (showPullbackOverlays) {
+      const livePrice = message.bid ?? message.last ?? message.ask ?? null;
+      setStrategyDebugPullbacks((current) => updateLivePullbackDebug(current, livePrice, messageTimeMsc));
+      queuePullbackOverlayRefresh();
+    }
+    const livePrice = livePriceFromMarketMessage(message);
+    setCandles((current) => patchCachedCandlesWithLivePrice(selectedSymbol, selectedTimeframe, livePrice, current) ?? current);
     setStreamSource(message.source ?? "UNKNOWN");
     setLastTickTime(message.time);
   }
@@ -1344,10 +1653,23 @@ useEffect(() => {
 ) {
   setLoadingCandles(true);
   setError(null);
+  candleAbortRef.current?.abort();
+  const controller = new AbortController();
+  candleAbortRef.current = controller;
 
   try {
+    const cachedBeforeFetch = await readAnyCachedCandles(symbol, timeframe);
+    if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+      return;
+    }
+
+    if (cachedBeforeFetch) {
+      setCandles(cachedBeforeFetch);
+    }
+
+    const after = latestCandleTime(cachedBeforeFetch);
     const [nextCandles, ticks] = await Promise.all([
-      getCandles(symbol, timeframe),
+      getCandles(symbol, timeframe, after ? 5000 : 500, { signal: controller.signal, after: after ?? undefined }),
       getTicks(symbol, 1).catch(() => [])
     ]);
 
@@ -1355,21 +1677,31 @@ useEffect(() => {
       return;
     }
 
-    const normalizedCandles = [...nextCandles]
-      .filter((candle) => Number.isFinite(candle.time))
-      .sort((a, b) => a.time - b.time);
+    const mergedCandles = writeCachedCandles(
+      symbol,
+      timeframe,
+      after ? mergeCandles(cachedBeforeFetch ?? [], nextCandles) : nextCandles
+    );
 
-    setCandles(normalizedCandles);
+    setCandles(mergedCandles);
     setLatestTick(ticks[ticks.length - 1] ?? null);
+    prefetchNearbyCandles(symbol, timeframe);
   } catch (requestError) {
+    if (isAbortError(requestError)) {
+      return;
+    }
+
     if (!isCurrentMarketContext(symbol, timeframe, generation)) {
       return;
     }
 
-    setCandles([]);
     setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar las velas");
   } finally {
-    if (isCurrentMarketContext(symbol, timeframe, generation)) {
+    if (candleAbortRef.current === controller) {
+      candleAbortRef.current = null;
+    }
+
+    if (isCurrentMarketContext(symbol, timeframe, generation) && candleAbortRef.current === null) {
       setLoadingCandles(false);
     }
   }
@@ -1473,7 +1805,7 @@ useEffect(() => {
 
     setNoTradeZones(response.no_trade_zones);
     setIndicatorLines(response.indicators.filter(isLineOutput));
-    setStrategyDebugPullbacks(response.strategy_debug_pullbacks ?? []);
+    setStrategyDebugPullbacks(showPullbackOverlays ? response.strategy_debug_pullbacks ?? [] : []);
     setAthZones(response.ath_zones ?? []);
     setPriceAlerts(response.price_alerts ?? []);
 
@@ -2263,6 +2595,31 @@ useEffect(() => {
   setChartRecenterToken((current) => current + 1);
   setChartHardResetToken((current) => current + 1);
 }
+
+  function handlePullbackOverlayToggle(visible: boolean) {
+    setShowPullbackOverlays(visible);
+    saveBooleanPreference(showPullbackOverlaysStorageKey, visible);
+    if (visible) {
+      void refreshChartOverlays();
+    } else {
+      setStrategyDebugPullbacks([]);
+    }
+  }
+
+  function queuePullbackOverlayRefresh() {
+    if (!showPullbackOverlays) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - pullbackOverlayRefreshAtRef.current < 1000) {
+      return;
+    }
+
+    pullbackOverlayRefreshAtRef.current = now;
+    void refreshChartOverlays();
+  }
+
   function handleChartSplitChange(count: ChartSplitCount, orientation: ChartSplitOrientation) {
     setChartSplitCount(count);
     setChartSplitOrientation(orientation);
@@ -2484,6 +2841,7 @@ useEffect(() => {
             autoExtendToFutureNews={autoExtendToFutureNews}
             autoFollowEnabled={chartAutoFollowEnabled}
             bidPrice={latestBid}
+            centerRequestKey={`${selectedSymbol}:${selectedTimeframe}`}
             onAutoFollowChange={setChartAutoFollowEnabled}
             recenterToken={chartRecenterToken}
             priceAlerts={priceAlerts}
@@ -2492,6 +2850,8 @@ useEffect(() => {
             showAskLine={tradingSettings?.show_ask_line ?? true}
             showBidLine={tradingSettings?.show_bid_line ?? true}
             showFutureNewsZones={showFutureNewsZones}
+            pullbackDebugVisible={showPullbackOverlays}
+            onPullbackDebugToggle={handlePullbackOverlayToggle}
             symbol={selectedSymbol}
             timeframe={selectedTimeframe}
             tradeLines={tradeLines}
@@ -2519,7 +2879,7 @@ useEffect(() => {
               chartSymbols={chartSymbols}
               drawingTool={drawingTool}
               drawingsVisible={drawingsVisible}
-              key={`${index}:${chart.symbol}:${selectedTimeframe}`}
+              key={`secondary-chart-${index}`}
               onSelectPosition={setSelectedPositionId}
               onSymbolChange={(symbol) => updateSecondaryChart(index, { symbol })}
               onUpdatePositionTp={handleModifyPositionTp}
@@ -2529,6 +2889,8 @@ useEffect(() => {
               showAskLine={tradingSettings?.show_ask_line ?? true}
               showBidLine={tradingSettings?.show_bid_line ?? true}
               showFutureNewsZones={showFutureNewsZones}
+              showPullbackOverlays={showPullbackOverlays}
+              onPullbackOverlayToggle={handlePullbackOverlayToggle}
               symbol={chart.symbol}
               symbolMappings={symbolMappings}
               symbolLabels={strategySymbolLabels}

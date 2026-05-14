@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -19,14 +20,15 @@ def get_candles(
     symbol: str = Query(min_length=3),
     timeframe: Timeframe = Query(),
     limit: int = Query(default=500, ge=1, le=5000),
+    after: int | None = Query(default=None, ge=0),
 ) -> list[CandleRead]:
-    rows = list(
-        db.scalars(
-            select(Candle)
-            .where(Candle.internal_symbol == symbol, Candle.timeframe == timeframe)
-            .order_by(Candle.time.desc())
-            .limit(limit)
-        )
-    )
+    stmt = select(Candle).where(Candle.internal_symbol == symbol, Candle.timeframe == timeframe)
+
+    if after is not None:
+        after_dt = datetime.fromtimestamp(after, tz=UTC)
+        rows = list(db.scalars(stmt.where(Candle.time > after_dt).order_by(Candle.time.asc()).limit(limit)))
+        return [candle_to_read(candle) for candle in rows]
+
+    rows = list(db.scalars(stmt.order_by(Candle.time.desc()).limit(limit)))
     rows.reverse()
     return [candle_to_read(candle) for candle in rows]

@@ -36,6 +36,8 @@ export interface StrategyPullbackDebug {
   threshold_touched?: boolean;
   is_live?: boolean;
   label: string;
+  line_width?: number;
+  opacity?: number;
 }
 
 export interface AthPriceZone {

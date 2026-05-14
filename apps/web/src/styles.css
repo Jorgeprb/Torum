@@ -1515,6 +1515,111 @@ button.system-status-card:disabled {
   font-weight: 950;
 }
 
+.chart-measure-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 36;
+  color: #58a4ff;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.chart-measure-layer--active {
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.chart-measure-vline,
+.chart-measure-hline {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.chart-measure-vline {
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed rgba(88, 164, 255, 0.9);
+}
+
+.chart-measure-hline {
+  right: var(--chart-price-scale-width);
+  left: 0;
+  border-top: 1px dashed rgba(88, 164, 255, 0.9);
+}
+
+.chart-measure-svg {
+  position: absolute;
+  inset: 0 var(--chart-price-scale-width) 0 0;
+  z-index: 2;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.chart-measure-distance-line {
+  stroke: #58a4ff;
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 5px rgba(47, 140, 255, 0.82));
+}
+
+.chart-measure-point {
+  fill: #58a4ff;
+  stroke: #03080c;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-measure-point--start {
+  fill: #f5c542;
+}
+
+.chart-measure-price-label,
+.chart-measure-time-label,
+.chart-measure-delta {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid rgba(88, 164, 255, 0.7);
+  border-radius: 4px;
+  background: rgba(3, 8, 12, 0.92);
+  color: #dcecff;
+  padding: 3px 6px;
+  font-size: 0.7rem;
+  font-weight: 950;
+  line-height: 1;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 0 10px rgba(47, 140, 255, 0.25);
+}
+
+.chart-measure-price-label {
+  right: 0;
+  width: var(--chart-price-scale-width);
+  transform: translateY(-50%);
+}
+
+.chart-measure-time-label {
+  bottom: 0;
+  transform: translateX(-50%);
+}
+
+.chart-measure-delta {
+  transform: translate(-50%, -120%);
+}
+
+.chart-measure-delta--up {
+  border-color: rgba(32, 214, 145, 0.75);
+  color: #56f0b0;
+}
+
+.chart-measure-delta--down {
+  border-color: rgba(255, 82, 96, 0.75);
+  color: #ff8c96;
+}
+
 .chart-follow-button {
   position: absolute;
   right: 12px;
@@ -1577,7 +1682,7 @@ button.system-status-card:disabled {
 }
 
 .chart-object-delete-button {
-  right: 132px;
+  right: 182px;
   width: 38px;
   padding: 0;
   border-color: rgba(244, 93, 93, 0.9);
@@ -1589,7 +1694,7 @@ button.system-status-card:disabled {
 }
 
 .chart-object-style-button {
-  right: 182px;
+  right: 232px;
   width: 38px;
   padding: 0;
   border-color: rgba(214, 178, 94, 0.9);
@@ -1601,7 +1706,7 @@ button.system-status-card:disabled {
 }
 
 .chart-object-torum-zone-button {
-  right: 232px;
+  right: 282px;
   width: 38px;
   padding: 0;
   border-color: rgba(47, 140, 255, 0.85);
@@ -1615,6 +1720,18 @@ button.system-status-card:disabled {
 
 .chart-object-torum-zone-button:hover {
   background: rgba(12, 28, 48, 0.92);
+}
+
+.chart-pullback-toggle-button {
+  right: 132px;
+  min-width: 38px;
+  padding: 0 10px;
+}
+
+.chart-pullback-toggle-button--active {
+  border-color: rgba(47, 140, 255, 0.95);
+  background: rgba(14, 37, 74, 0.92);
+  box-shadow: 0 0 16px rgba(47, 140, 255, 0.48);
 }
 
 .chart-style-popover {
@@ -1695,21 +1812,27 @@ button.system-status-card:disabled {
   }
 
   .chart-object-delete-button {
-    right: 122px;
-    width: 34px;
-    padding: 0;
-  }
-
-  .chart-object-style-button {
     right: 166px;
     width: 34px;
     padding: 0;
   }
 
-  .chart-object-torum-zone-button {
+  .chart-object-style-button {
     right: 210px;
     width: 34px;
     padding: 0;
+  }
+
+  .chart-object-torum-zone-button {
+    right: 254px;
+    width: 34px;
+    padding: 0;
+  }
+
+  .chart-pullback-toggle-button {
+    right: 122px;
+    min-width: 34px;
+    padding: 0 8px;
   }
 
   .chart-style-popover {
@@ -1726,21 +1849,27 @@ button.system-status-card:disabled {
   }
 
   .chart-object-delete-button {
-    right: 112px;
-    width: 34px;
-    padding: 0;
-  }
-
-  .chart-object-style-button {
     right: 154px;
     width: 34px;
     padding: 0;
   }
 
-  .chart-object-torum-zone-button {
+  .chart-object-style-button {
     right: 196px;
     width: 34px;
     padding: 0;
+  }
+
+  .chart-object-torum-zone-button {
+    right: 238px;
+    width: 34px;
+    padding: 0;
+  }
+
+  .chart-pullback-toggle-button {
+    right: 112px;
+    min-width: 34px;
+    padding: 0 7px;
   }
 
 }

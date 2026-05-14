@@ -166,6 +166,14 @@ function drawingTimeSpanFromPoints(firstTime: number, secondTime: number, timefr
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
+interface MeasurePoint {
+  time: number;
+  price: number;
+  x: number;
+  y: number;
+  index: number;
+}
+
 export function MarketChart({
   candles,
   loadingCandles = false,
@@ -200,9 +208,12 @@ export function MarketChart({
   autoFollowEnabled = true,
   onAutoFollowChange,
   recenterToken = 0,
+  centerRequestKey,
   resetKey,
   showFutureNewsZones = true,
-  autoExtendToFutureNews = true
+  autoExtendToFutureNews = true,
+  pullbackDebugVisible = true,
+  onPullbackDebugToggle
 }: MarketChartProps) {
   // ── Refs ───────────────────────────────────────────────────────────────────
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -214,6 +225,8 @@ export function MarketChart({
   const askPriceLineRef = useRef<IPriceLine | null>(null);
   const loadedResetKeyRef = useRef<string | null>(null);
   const hasFullDataRef = useRef(false);
+  const lastDataTimeRef = useRef<number | null>(null);
+  const appliedCenterRequestKeyRef = useRef<string | null>(null);
   const centeredResetKeyRef = useRef<string | null>(null);
   const appliedSymbolResetTokenRef = useRef<number | null>(null);
   const appliedHardResetTokenRef = useRef<number | null>(hardResetToken);
@@ -251,9 +264,16 @@ export function MarketChart({
   const [styleEditorTarget, setStyleEditorTarget] = useState<{ kind: "drawing" | "alert"; id: string } | null>(null);
   const [pendingPoint, setPendingPoint] = useState<DrawingPoint | null>(null);
   const [pendingCoordinate, setPendingCoordinate] = useState<DrawingCoordinate | null>(null);
+  const [measureMode, setMeasureMode] = useState(false);
+  const [measureStart, setMeasureStart] = useState<MeasurePoint | null>(null);
+  const [measureCursor, setMeasureCursor] = useState<MeasurePoint | null>(null);
 
   const effectiveHardResetToken = hardResetToken + localHardResetToken;
   const effectiveRecenterToken = recenterToken + localRecenterToken;
+  const measureLongPressTimerRef = useRef<number | null>(null);
+  const measureLongPressTriggeredRef = useRef(false);
+  const measureCrosshairRef = useRef<{ x: number; y: number } | null>(null);
+  const measureDragStartRef = useRef<{ pointerX: number; pointerY: number; crosshairX: number; crosshairY: number } | null>(null);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function syncPriceScaleWidth(container: HTMLDivElement): number {
@@ -273,6 +293,42 @@ export function MarketChart({
   function getPreferredVisibleBars(candleCount: number): number {
     const containerWidth = containerRef.current?.clientWidth ?? 360;
     return calculateVisibleBarsForWidth(containerWidth, timeframe, candleCount);
+  }
+
+  function lastChartDataTime(data: ReturnType<typeof normalizeCandlesForChart>): number | null {
+    const last = data[data.length - 1];
+    if (!last) return null;
+    const numericTime = timeToNumber(last.time);
+    return Number.isFinite(numericTime) && numericTime > 0 ? numericTime : null;
+  }
+
+  function setMainSeriesData(data: ReturnType<typeof normalizeCandlesForChart>) {
+    const series = seriesRef.current;
+    if (!series) return;
+    series.setData(data);
+    lastDataTimeRef.current = lastChartDataTime(data);
+  }
+
+  function clearMainSeriesData() {
+    const series = seriesRef.current;
+    if (!series) return;
+    series.setData([]);
+    lastDataTimeRef.current = null;
+  }
+
+  function applyCenterRequestIfNeeded(sc: ReturnType<typeof normalizeCandlesForChart>, nextKey: string): boolean {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series || !centerRequestKey || appliedCenterRequestKeyRef.current === centerRequestKey || sc.length === 0) {
+      return false;
+    }
+
+    appliedCenterRequestKeyRef.current = centerRequestKey;
+    onAutoFollowChange?.(true);
+    priceScaleManuallyAdjustedRef.current = false;
+    hardResetChartView(chart, series, sc.length, timeframe, getPreferredVisibleBars(sc.length));
+    centeredResetKeyRef.current = nextKey;
+    return true;
   }
 
   function isPointerInsideRightPriceScale(clientX: number): boolean {
@@ -300,19 +356,21 @@ export function MarketChart({
     return price === null ? null : Number(price.toFixed(5));
   }
 
-  function chartTimeFromX(x: number, fallback: number | null = null): number | null {
+  function chartTimeFromX(x: number, fallback: number | null = null, clampToPane = true): number | null {
     const chart = chartRef.current;
     const container = containerRef.current;
     if (!chart || !container) return fallback;
     const sortedCandles = normalizeCandlesForChart(candles);
-    return chartXToTime(chart, sortedCandles, clampNumber(x, 0, chartPaneWidth(container)), fallback);
+    const chartX = clampToPane ? clampNumber(x, 0, chartPaneWidth(container)) : x;
+    return chartXToTime(chart, sortedCandles, chartX, fallback);
   }
 
-  function chartPriceFromY(y: number, fallback: number | null = null): number | null {
+  function chartPriceFromY(y: number, fallback: number | null = null, clampToPane = true): number | null {
     const series = seriesRef.current;
     const container = containerRef.current;
     if (!series || !container) return fallback;
-    const price = series.coordinateToPrice(clampNumber(y, 0, container.clientHeight));
+    const chartY = clampToPane ? clampNumber(y, 0, container.clientHeight) : y;
+    const price = series.coordinateToPrice(chartY);
     return price === null ? fallback : Number(price.toFixed(5));
   }
 
@@ -339,6 +397,196 @@ export function MarketChart({
     const price = series.coordinateToPrice(y);
     if (time === null || price === null) return null;
     return { time, price };
+  }
+
+  function nearestMeasureCandle(time: number, sortedCandles: ReturnType<typeof normalizeCandlesForChart>): { time: number; index: number } | null {
+    if (sortedCandles.length === 0) return null;
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (let index = 0; index < sortedCandles.length; index += 1) {
+      const candleTime = timeToNumber(sortedCandles[index].time);
+      const distance = Math.abs(candleTime - time);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    }
+
+    return { time: timeToNumber(sortedCandles[bestIndex].time), index: bestIndex };
+  }
+
+  function measurePointFromChartCoordinates(chartX: number, chartY: number): MeasurePoint | null {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    const container = containerRef.current;
+    if (!chart || !series || !container) return null;
+
+    const sortedCandles = normalizeCandlesForChart(candles);
+    if (sortedCandles.length === 0) return null;
+
+    const paneWidth = chartPaneWidth(container);
+    const x = clampNumber(chartX, 0, paneWidth);
+    const y = clampNumber(chartY, 0, container.clientHeight);
+    const rawTime = chartTimeToUnix(chart.timeScale().coordinateToTime(x)) ?? chartXToTime(chart, sortedCandles, x, null);
+    if (rawTime === null) return null;
+
+    const nearest = nearestMeasureCandle(rawTime, sortedCandles);
+    const price = series.coordinateToPrice(y);
+    if (!nearest || price === null) return null;
+
+    const snappedX = timeToChartX(chart, sortedCandles, nearest.time, x);
+    const priceY = series.priceToCoordinate(price);
+    return {
+      time: nearest.time,
+      price: Number(price.toFixed(5)),
+      x: Number.isFinite(snappedX) ? snappedX : x,
+      y: priceY === null ? y : priceY,
+      index: nearest.index
+    };
+  }
+
+  function setMeasureCursorPoint(point: MeasurePoint | null) {
+    if (point) measureCrosshairRef.current = { x: point.x, y: point.y };
+    setMeasureCursor(point);
+  }
+
+  function initialMeasurePoint(): MeasurePoint | null {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    const container = containerRef.current;
+    if (!chart || !series || !container) return null;
+
+    const previous = measureCrosshairRef.current;
+    if (previous) {
+      const point = measurePointFromChartCoordinates(previous.x, previous.y);
+      if (point) return point;
+    }
+
+    const sortedCandles = normalizeCandlesForChart(candles);
+    const paneWidth = chartPaneWidth(container);
+    const centerX = paneWidth / 2;
+    const centerY = container.clientHeight / 2;
+    const last = sortedCandles[sortedCandles.length - 1];
+    if (!last) return measurePointFromChartCoordinates(centerX, centerY);
+
+    const lastTime = timeToNumber(last.time);
+    const lastX = timeToChartX(chart, sortedCandles, lastTime, centerX);
+    const lastPrice = askPrice ?? bidPrice ?? last.close;
+    const lastY = series.priceToCoordinate(lastPrice) ?? centerY;
+    return measurePointFromChartCoordinates(
+      Number.isFinite(lastX) ? clampNumber(lastX, 0, paneWidth) : centerX,
+      clampNumber(lastY, 0, container.clientHeight)
+    );
+  }
+
+  function updateMeasureCrosshairFromChartPoint(x: number, y: number): MeasurePoint | null {
+    const point = measurePointFromChartCoordinates(x, y);
+    if (point) setMeasureCursorPoint(point);
+    return point;
+  }
+
+  function updateMeasureCrosshairRelative(clientX: number, clientY: number): MeasurePoint | null {
+    const drag = measureDragStartRef.current;
+    if (!drag) return measureCursor;
+    return updateMeasureCrosshairFromChartPoint(
+      drag.crosshairX + (clientX - drag.pointerX),
+      drag.crosshairY + (clientY - drag.pointerY)
+    );
+  }
+
+  function vibrateMeasure() {
+    navigator.vibrate?.(30);
+  }
+
+  function clearMeasureLongPressTimer() {
+    if (measureLongPressTimerRef.current !== null) {
+      window.clearTimeout(measureLongPressTimerRef.current);
+      measureLongPressTimerRef.current = null;
+    }
+  }
+
+  function leaveMeasureMode() {
+    setMeasureMode(false);
+    setMeasureStart(null);
+    setMeasureCursor(null);
+    measureDragStartRef.current = null;
+    clearMeasureLongPressTimer();
+  }
+
+  function enterMeasureMode(point: MeasurePoint | null) {
+    const cursor = point ?? initialMeasurePoint();
+    setMeasureMode(true);
+    setMeasureStart(null);
+    setMeasureCursorPoint(cursor);
+    setPendingPoint(null);
+    setPendingCoordinate(null);
+    setDraggingTpLineId(null);
+    setDraggingAlertId(null);
+    onSelectDrawing?.(null);
+    setSelectedAlertId(null);
+    setStyleEditorTarget(null);
+  }
+
+  function stopMeasureEvent(event: PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation?.();
+  }
+
+  function handleMeasurePointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (!measureMode) return;
+    stopMeasureEvent(event);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const cursor = measureCursor ?? initialMeasurePoint();
+    if (cursor && !measureCursor) setMeasureCursorPoint(cursor);
+    measureDragStartRef.current = cursor
+      ? { pointerX: event.clientX, pointerY: event.clientY, crosshairX: cursor.x, crosshairY: cursor.y }
+      : null;
+    measureLongPressTriggeredRef.current = false;
+    clearMeasureLongPressTimer();
+    measureLongPressTimerRef.current = window.setTimeout(() => {
+      measureLongPressTriggeredRef.current = true;
+      suppressNextChartPointerUpRef.current = true;
+      suppressNextChartClickRef.current = true;
+      suppressNextChartPointRef.current = true;
+      vibrateMeasure();
+      leaveMeasureMode();
+    }, DRAWING_LONG_PRESS_MS);
+  }
+
+  function handleMeasurePointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (!measureMode) return;
+    stopMeasureEvent(event);
+    const start = measureDragStartRef.current;
+    if (start && Math.hypot(event.clientX - start.pointerX, event.clientY - start.pointerY) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX) {
+      clearMeasureLongPressTimer();
+    }
+    updateMeasureCrosshairRelative(event.clientX, event.clientY);
+  }
+
+  function handleMeasurePointerUp(event: PointerEvent<HTMLDivElement>) {
+    if (!measureMode) return;
+    stopMeasureEvent(event);
+    const start = measureDragStartRef.current;
+    const moved = start
+      ? Math.hypot(event.clientX - start.pointerX, event.clientY - start.pointerY) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX
+      : false;
+    const wasLongPress = measureLongPressTriggeredRef.current;
+    clearMeasureLongPressTimer();
+    measureDragStartRef.current = null;
+    measureLongPressTriggeredRef.current = false;
+    if (wasLongPress || moved) return;
+    const point = measureCursor ?? initialMeasurePoint();
+    if (point) setMeasureStart(point);
+  }
+
+  function handleMeasurePointerCancel(event: PointerEvent<HTMLDivElement>) {
+    if (!measureMode) return;
+    stopMeasureEvent(event);
+    clearMeasureLongPressTimer();
+    measureDragStartRef.current = null;
+    measureLongPressTriggeredRef.current = false;
   }
 
   // ── recalculateOverlays ────────────────────────────────────────────────────
@@ -488,7 +736,7 @@ export function MarketChart({
     );
 
     setPullbackDebugOverlays(
-      strategyDebugPullbacks.map(debug => {
+      (pullbackDebugVisible ? strategyDebugPullbacks : []).map(debug => {
         const x1 = timeToChartX(chart, sortedCandles, debug.swing_high_time, Number.NaN);
         const x2 = timeToChartX(chart, sortedCandles, debug.pullback_low_time, Number.NaN);
         const y1 = series.priceToCoordinate(debug.swing_high);
@@ -523,7 +771,7 @@ export function MarketChart({
     } else {
       setPendingCoordinate(null);
     }
-  }, [athZones, candles, drawings, draftAlertPrices, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, showFutureNewsZones, strategyDebugPullbacks, timeframe, tradeLines, tradeMarkers]);
+  }, [athZones, candles, drawings, draftAlertPrices, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, pullbackDebugVisible, showFutureNewsZones, strategyDebugPullbacks, timeframe, tradeLines, tradeMarkers]);
 
   function scheduleOverlayRecalculate() {
     if (overlayRecalculateFrameRef.current !== null) return;
@@ -532,7 +780,7 @@ export function MarketChart({
       recalculateOverlays();
     });
   }
-// â”€â”€ Chart init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
   useEffect(() => {
     if (!containerRef.current) return;
     const chart = createChart(containerRef.current, {
@@ -552,6 +800,7 @@ export function MarketChart({
     return () => {
       if (overlayRecalculateFrameRef.current !== null) { window.cancelAnimationFrame(overlayRecalculateFrameRef.current); overlayRecalculateFrameRef.current = null; }
       lineSeriesRef.current.clear(); futurePaddingSeriesRef.current = null;
+      lastDataTimeRef.current = null;
       chart.remove(); chartRef.current = null; seriesRef.current = null;
     };
   }, []);
@@ -617,7 +866,26 @@ export function MarketChart({
     window.addEventListener(chartTimeSettingsChangedEvent, handler);
     return () => window.removeEventListener(chartTimeSettingsChangedEvent, handler);
   }, [recalculateOverlays]);
-  useEffect(() => { setPendingPoint(null); setPendingCoordinate(null); }, [drawingTool, symbol, timeframe]);
+  useEffect(() => {
+    setPendingPoint(null);
+    setPendingCoordinate(null);
+    leaveMeasureMode();
+    measureCrosshairRef.current = null;
+  }, [drawingTool, symbol, timeframe]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.applyOptions({
+      crosshair: {
+        mode: 1,
+        vertLine: { visible: !measureMode, labelVisible: !measureMode },
+        horzLine: { visible: !measureMode, labelVisible: !measureMode }
+      }
+    });
+  }, [measureMode]);
+
+  useEffect(() => () => clearMeasureLongPressTimer(), []);
 
   // â”€â”€ Hard reset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
@@ -626,6 +894,7 @@ export function MarketChart({
     appliedHardResetTokenRef.current = effectiveHardResetToken;
     const sc = normalizeCandlesForChart(candles);
     priceScaleManuallyAdjustedRef.current = false;
+    lastDataTimeRef.current = lastChartDataTime(sc);
     hardResetChartView(chart, series, sc.length, timeframe, getPreferredVisibleBars(sc.length));
     centeredResetKeyRef.current = resetKey ?? `${symbol}:${timeframe}`;
     appliedSymbolResetTokenRef.current = symbolResetToken;
@@ -642,7 +911,7 @@ export function MarketChart({
     const shouldSymReset = appliedSymbolResetTokenRef.current !== symbolResetToken;
     if (shouldReset) {
       loadedResetKeyRef.current = nextKey; hasFullDataRef.current = false; centeredResetKeyRef.current = null;
-      series.setData([]); series.setMarkers([]);
+      clearMainSeriesData(); series.setMarkers([]);
       if (bidPriceLineRef.current) { series.removePriceLine(bidPriceLineRef.current); bidPriceLineRef.current = null; }
       if (askPriceLineRef.current) { series.removePriceLine(askPriceLineRef.current); askPriceLineRef.current = null; }
       lineSeriesRef.current.forEach(ls => ls.setData([]));
@@ -650,11 +919,18 @@ export function MarketChart({
       setAthZoneOverlays([]);
       priceScaleManuallyAdjustedRef.current = false; resetPriceScale(chart, series);
     }
-    if (sc.length === 0) { series.setData([]); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return; }
-    if (loadingCandles && sc.length <= 2 && !hasFullDataRef.current) { series.setData(sc); series.setMarkers([]); window.setTimeout(recalculateOverlays, 0); return; }
+    if (sc.length === 0) { clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return; }
+    if (loadingCandles && sc.length <= 2 && !hasFullDataRef.current) {
+      setMainSeriesData(sc); series.setMarkers([]);
+      applyCenterRequestIfNeeded(sc, nextKey);
+      window.setTimeout(recalculateOverlays, 0); return;
+    }
     if (shouldReset || !hasFullDataRef.current) {
-      series.setData(sc); series.setMarkers([]); hasFullDataRef.current = true;
-      if (shouldSymReset) {
+      setMainSeriesData(sc); series.setMarkers([]); hasFullDataRef.current = true;
+      const centeredByRequest = applyCenterRequestIfNeeded(sc, nextKey);
+      if (centeredByRequest) {
+        if (shouldSymReset) appliedSymbolResetTokenRef.current = symbolResetToken;
+      } else if (shouldSymReset) {
         priceScaleManuallyAdjustedRef.current = false;
         centerSymbolChange(chart, series, sc.length, timeframe, getPreferredVisibleBars(sc.length));
         appliedSymbolResetTokenRef.current = symbolResetToken; centeredResetKeyRef.current = nextKey;
@@ -664,11 +940,11 @@ export function MarketChart({
       }
       window.setTimeout(recalculateOverlays, 0); return;
     }
-    series.update(sc[sc.length - 1]); series.setMarkers([]);
-    if (autoFollowEnabled) scrollToLatestRealCandle(chart, sc.length, timeframe, getPreferredVisibleBars(sc.length));
+    setMainSeriesData(sc); series.setMarkers([]);
+    if (!applyCenterRequestIfNeeded(sc, nextKey) && autoFollowEnabled) scrollToLatestRealCandle(chart, sc.length, timeframe, getPreferredVisibleBars(sc.length));
     if (priceScaleManuallyAdjustedRef.current) disablePriceAutoScale(chart, series);
     window.setTimeout(recalculateOverlays, 0);
-  }, [autoFollowEnabled, candles, loadingCandles, recalculateOverlays, resetKey, symbol, timeframe, tradeMarkers]);
+  }, [autoFollowEnabled, candles, centerRequestKey, loadingCandles, onAutoFollowChange, recalculateOverlays, resetKey, symbol, timeframe, tradeMarkers]);
 
   useEffect(() => {
     const chart = chartRef.current; const fp = futurePaddingSeriesRef.current;
@@ -821,10 +1097,10 @@ export function MarketChart({
     if ((drawing.drawing_type === "rectangle" && shape.kind === "rectangle") || (drawing.drawing_type === "manual_zone" && shape.kind === "manual_zone")) {
       const isMZ = drawing.drawing_type === "manual_zone";
       const lowKey = isMZ ? "price_min" : "price1"; const highKey = isMZ ? "price_max" : "price2";
-      const tL = chartTimeFromX(shape.x, numberValue(payload.time1));
-      const tR = chartTimeFromX(shape.x + shape.width, numberValue(payload.time2));
-      const pT = chartPriceFromY(shape.y, numberValue(payload[highKey]));
-      const pB = chartPriceFromY(shape.y + shape.height, numberValue(payload[lowKey]));
+      const tL = chartTimeFromX(shape.x, numberValue(payload.time1), false);
+      const tR = chartTimeFromX(shape.x + shape.width, numberValue(payload.time2), false);
+      const pT = chartPriceFromY(shape.y, numberValue(payload[highKey]), false);
+      const pB = chartPriceFromY(shape.y + shape.height, numberValue(payload[lowKey]), false);
       if (tL === null || tR === null || pT === null || pB === null) return null;
       return { ...payload, time1: Math.floor(Math.min(tL, tR)), time2: Math.max(Math.floor(Math.max(tL, tR)), Math.floor(Math.min(tL, tR)) + 1), [lowKey]: Number(Math.min(pT, pB).toFixed(5)), [highKey]: Number(Math.max(pT, pB).toFixed(5)) };
     }
@@ -902,6 +1178,7 @@ export function MarketChart({
   function handleChartPointerDownCapture(event: PointerEvent<HTMLDivElement>) {
   chartPointerDownStartedOnDrawingRef.current = false;
 
+  if (measureMode) { return; }
   if (event.button !== 0) {return;}
   const container = containerRef.current;
   if (!container) { return;}
@@ -915,7 +1192,48 @@ export function MarketChart({
       return !candidate.drawing.locked && isPointInsideDrawingShape(candidate, x, y);
     });
 
-  if (!shape) {return;}
+  if (!shape) {
+    if (drawingTool !== "select" || alertToolActive) { return; }
+    const startX = event.clientX;
+    const startY = event.clientY;
+    measureLongPressTriggeredRef.current = false;
+    clearMeasureLongPressTimer();
+    measureLongPressTimerRef.current = window.setTimeout(() => {
+      const point = initialMeasurePoint();
+      measureLongPressTriggeredRef.current = true;
+      suppressNextChartPointerUpRef.current = true;
+      suppressNextChartClickRef.current = true;
+      suppressNextChartPointRef.current = true;
+      vibrateMeasure();
+      enterMeasureMode(point);
+      measureDragStartRef.current = point
+        ? { pointerX: startX, pointerY: startY, crosshairX: point.x, crosshairY: point.y }
+        : null;
+    }, DRAWING_LONG_PRESS_MS);
+
+    function cleanupMeasureLongPress() {
+      clearMeasureLongPressTimer();
+      measureDragStartRef.current = null;
+      document.removeEventListener("pointermove", onMeasureMove, true);
+      document.removeEventListener("pointerup", onMeasureUp, true);
+      document.removeEventListener("pointercancel", onMeasureCancel, true);
+    }
+    function onMeasureMove(e: globalThis.PointerEvent) {
+      if (measureLongPressTriggeredRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        updateMeasureCrosshairRelative(e.clientX, e.clientY);
+        return;
+      }
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX) cleanupMeasureLongPress();
+    }
+    function onMeasureUp() { cleanupMeasureLongPress(); }
+    function onMeasureCancel() { cleanupMeasureLongPress(); }
+    document.addEventListener("pointermove", onMeasureMove, { capture: true, passive: false });
+    document.addEventListener("pointerup", onMeasureUp, true);
+    document.addEventListener("pointercancel", onMeasureCancel, true);
+    return;
+  }
   chartPointerDownStartedOnDrawingRef.current = true;
   const startX = event.clientX;const startY = event.clientY;let longPress = false;
   const tid = window.setTimeout(() => {
@@ -944,6 +1262,14 @@ export function MarketChart({
   document.addEventListener("pointermove", onMove, { capture: true, passive: true });document.addEventListener("pointerup", onUp, true);document.addEventListener("pointercancel", onCancel, true);}
 
   function handleChartPointerUp(event: PointerEvent<HTMLDivElement>) {
+  if (measureMode) {
+    suppressNextChartPointerUpRef.current = false;
+    suppressNextChartPointRef.current = false;
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
   if (suppressNextChartPointerUpRef.current) {
     suppressNextChartPointerUpRef.current = false;
     suppressNextChartPointRef.current = false;
@@ -1169,7 +1495,19 @@ export function MarketChart({
     }
   }
 
-  // â”€â”€ JSX â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const measurePaneWidth = containerRef.current ? chartPaneWidth(containerRef.current) : 0;
+  const measurePaneHeight = containerRef.current?.clientHeight ?? 0;
+  const measureDelta = measureStart && measureCursor
+    ? {
+        points: measureCursor.price - measureStart.price,
+        percent: measureStart.price === 0 ? 0 : ((measureCursor.price - measureStart.price) / measureStart.price) * 100,
+        bars: Math.abs(measureCursor.index - measureStart.index),
+        labelX: clampNumber((measureStart.x + measureCursor.x) / 2, 44, Math.max(44, measurePaneWidth - 44)),
+        labelY: clampNumber((measureStart.y + measureCursor.y) / 2, 22, Math.max(22, measurePaneHeight - 22))
+      }
+    : null;
+  const measureDeltaLabel = measureDelta ? `${measureDelta.percent >= 0 ? "+" : ""}${measureDelta.percent.toFixed(2)}%` : "";
+
   return (
     <div
       className={
@@ -1202,8 +1540,10 @@ export function MarketChart({
         isTorumZoneActive={selectedDrawing ? isTorumV1OperationZone(selectedDrawing) : false}
         canStyleSelectedObject={canStyleSelectedObject}
         canDeleteSelectedObject={canDeleteSelectedObject}
+        pullbackDebugVisible={pullbackDebugVisible}
         styleEditorOpen={Boolean(styleEditorTarget)}
         onCenterChart={() => { onAutoFollowChange?.(true); setLocalHardResetToken(c => c + 1); setLocalRecenterToken(c => c + 1); }}
+        onPullbackDebugToggle={() => onPullbackDebugToggle?.(!pullbackDebugVisible)}
         onToggleTorumZone={handleTorumZoneToggle}
         onStyleButton={handleSelectedStyleButton}
         onDeleteButton={handleSelectedDeleteButton}
@@ -1231,6 +1571,55 @@ export function MarketChart({
         selectedAlertId={selectedAlertId}
         onDragStart={startAlertDrag}
       />
+      {measureMode ? (
+        <div
+          className="chart-measure-layer chart-measure-layer--active"
+          onPointerCancel={handleMeasurePointerCancel}
+          onPointerDown={handleMeasurePointerDown}
+          onPointerMove={handleMeasurePointerMove}
+          onPointerUp={handleMeasurePointerUp}
+        >
+          {measureCursor ? (
+            <>
+              <div className="chart-measure-vline" style={{ left: `${measureCursor.x}px` }} />
+              <div className="chart-measure-hline" style={{ top: `${measureCursor.y}px` }} />
+              <div className="chart-measure-price-label" style={{ top: `${measureCursor.y}px` }}>
+                {measureCursor.price.toFixed(2)}
+              </div>
+              <div className="chart-measure-time-label" style={{ left: `${measureCursor.x}px` }}>
+                {formatChartCrosshairTime(measureCursor.time as UTCTimestamp)}
+              </div>
+              {measureStart ? (
+                <>
+                  <svg
+                    className="chart-measure-svg"
+                    preserveAspectRatio="none"
+                    viewBox={`0 0 ${Math.max(1, measurePaneWidth)} ${Math.max(1, measurePaneHeight)}`}
+                  >
+                    <line
+                      className="chart-measure-distance-line"
+                      x1={measureStart.x}
+                      x2={measureCursor.x}
+                      y1={measureStart.y}
+                      y2={measureCursor.y}
+                    />
+                    <circle className="chart-measure-point chart-measure-point--start" cx={measureStart.x} cy={measureStart.y} r="4" />
+                    <circle className="chart-measure-point" cx={measureCursor.x} cy={measureCursor.y} r="3" />
+                  </svg>
+                  {measureDelta ? (
+                    <div
+                      className={`chart-measure-delta ${measureDelta.points >= 0 ? "chart-measure-delta--up" : "chart-measure-delta--down"}`}
+                      style={{ left: `${measureDelta.labelX}px`, top: `${measureDelta.labelY}px` }}
+                    >
+                      {measureDeltaLabel}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

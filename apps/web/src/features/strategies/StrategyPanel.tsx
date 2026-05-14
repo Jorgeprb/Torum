@@ -33,8 +33,22 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
     session_end: symbol === "XAUEUR" ? "15:00" : "21:00",
     enable_operation_zones: true,
     entry_timeframe: "M5",
-    pullback_threshold_pct: 0.20,
+    pullback_enabled: true,
+    pullback_max_count: 10,
+    pullback_min_pct: 0,
+    pullback_threshold_pct: 0,
     pullback_lookback_bars: 12,
+    pullback_recovery_pct: 0.10,
+    pullback_end_confirmation_bars: 1,
+    pullback_min_bars_between: 0,
+    pullback_use_wicks: true,
+    pullback_use_close_confirmation: true,
+    pullback_live_update_enabled: true,
+    pullback_show_labels: true,
+    pullback_show_only_live: false,
+    pullback_label_decimals: 2,
+    pullback_line_width: 2,
+    pullback_opacity: 0.95,
     show_pullback_debug: false,
     require_zone: true,
     one_position_per_symbol: true
@@ -47,8 +61,22 @@ function fixedTorumParams(symbol: string, current: Record<string, unknown> | und
     use_news: current?.use_news ?? true,
     enable_operation_zones: current?.enable_operation_zones ?? true,
     entry_timeframe: "M5",
-    pullback_threshold_pct: current?.pullback_threshold_pct ?? 0.20,
+    pullback_enabled: current?.pullback_enabled ?? true,
+    pullback_max_count: current?.pullback_max_count ?? 10,
+    pullback_min_pct: current?.pullback_min_pct ?? 0,
+    pullback_threshold_pct: current?.pullback_threshold_pct ?? current?.pullback_min_pct ?? 0,
     pullback_lookback_bars: current?.pullback_lookback_bars ?? 12,
+    pullback_recovery_pct: current?.pullback_recovery_pct ?? 0.10,
+    pullback_end_confirmation_bars: current?.pullback_end_confirmation_bars ?? 1,
+    pullback_min_bars_between: current?.pullback_min_bars_between ?? 0,
+    pullback_use_wicks: current?.pullback_use_wicks ?? true,
+    pullback_use_close_confirmation: current?.pullback_use_close_confirmation ?? true,
+    pullback_live_update_enabled: current?.pullback_live_update_enabled ?? true,
+    pullback_show_labels: current?.pullback_show_labels ?? true,
+    pullback_show_only_live: current?.pullback_show_only_live ?? false,
+    pullback_label_decimals: current?.pullback_label_decimals ?? 2,
+    pullback_line_width: current?.pullback_line_width ?? 2,
+    pullback_opacity: current?.pullback_opacity ?? 0.95,
     show_pullback_debug: current?.show_pullback_debug ?? false,
     require_zone: current?.require_zone ?? true,
     one_position_per_symbol: current?.one_position_per_symbol ?? true,
@@ -250,6 +278,54 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
               </label>
               <label className="toggle-line">
                 <input
+                  checked={torumParams.pullback_enabled !== false}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ pullback_enabled: event.target.checked })}
+                />
+                Calcular pullbacks
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.pullback_live_update_enabled !== false}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ pullback_live_update_enabled: event.target.checked })}
+                />
+                Actualizar en vivo
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.pullback_use_wicks !== false}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ pullback_use_wicks: event.target.checked })}
+                />
+                Usar mechas
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.pullback_use_close_confirmation !== false}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ pullback_use_close_confirmation: event.target.checked })}
+                />
+                Confirmar con vela alcista
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.pullback_show_labels !== false}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ pullback_show_labels: event.target.checked })}
+                />
+                Etiquetas PB
+              </label>
+              <label className="toggle-line">
+                <input
+                  checked={torumParams.pullback_show_only_live === true}
+                  type="checkbox"
+                  onChange={(event) => void updateTorumParams({ pullback_show_only_live: event.target.checked })}
+                />
+                Solo PB vivo
+              </label>
+              <label className="toggle-line">
+                <input
                   checked={torumParams.require_zone !== false}
                   type="checkbox"
                   onChange={(event) => void updateTorumParams({ require_zone: event.target.checked })}
@@ -265,13 +341,27 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
                 Una posicion por activo
               </label>
               <label>
-                Pullback %
+                PB min %
                 <input
-                  min="0.01"
+                  min="0"
                   step="0.01"
                   type="number"
-                  value={Number(torumParams.pullback_threshold_pct ?? 0.2)}
-                  onChange={(event) => void updateTorumParams({ pullback_threshold_pct: Number(event.target.value) })}
+                  value={Number(torumParams.pullback_min_pct ?? torumParams.pullback_threshold_pct ?? 0)}
+                  onChange={(event) => {
+                    const value = Math.max(0, Number(event.target.value));
+                    void updateTorumParams({ pullback_min_pct: value, pullback_threshold_pct: value });
+                  }}
+                />
+              </label>
+              <label>
+                Max PB
+                <input
+                  min="1"
+                  max="50"
+                  step="1"
+                  type="number"
+                  value={Number(torumParams.pullback_max_count ?? 10)}
+                  onChange={(event) => void updateTorumParams({ pullback_max_count: Math.max(1, Number(event.target.value)) })}
                 />
               </label>
               <label>
@@ -282,6 +372,71 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
                   type="number"
                   value={Number(torumParams.pullback_lookback_bars ?? 12)}
                   onChange={(event) => void updateTorumParams({ pullback_lookback_bars: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                Recuperacion %
+                <input
+                  min="0"
+                  step="0.01"
+                  type="number"
+                  value={Number(torumParams.pullback_recovery_pct ?? 0.10)}
+                  onChange={(event) => void updateTorumParams({ pullback_recovery_pct: Math.max(0, Number(event.target.value)) })}
+                />
+              </label>
+              <label>
+                Velas confirma
+                <input
+                  min="1"
+                  max="5"
+                  step="1"
+                  type="number"
+                  value={Number(torumParams.pullback_end_confirmation_bars ?? 1)}
+                  onChange={(event) => void updateTorumParams({ pullback_end_confirmation_bars: Math.max(1, Number(event.target.value)) })}
+                />
+              </label>
+              <label>
+                Separacion velas
+                <input
+                  min="0"
+                  max="20"
+                  step="1"
+                  type="number"
+                  value={Number(torumParams.pullback_min_bars_between ?? 0)}
+                  onChange={(event) => void updateTorumParams({ pullback_min_bars_between: Math.max(0, Number(event.target.value)) })}
+                />
+              </label>
+              <label>
+                Decimales etiqueta
+                <input
+                  min="0"
+                  max="6"
+                  step="1"
+                  type="number"
+                  value={Number(torumParams.pullback_label_decimals ?? 2)}
+                  onChange={(event) => void updateTorumParams({ pullback_label_decimals: Math.max(0, Number(event.target.value)) })}
+                />
+              </label>
+              <label>
+                Ancho linea
+                <input
+                  min="1"
+                  max="6"
+                  step="1"
+                  type="number"
+                  value={Number(torumParams.pullback_line_width ?? 2)}
+                  onChange={(event) => void updateTorumParams({ pullback_line_width: Math.max(1, Number(event.target.value)) })}
+                />
+              </label>
+              <label>
+                Opacidad
+                <input
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  type="number"
+                  value={Number(torumParams.pullback_opacity ?? 0.95)}
+                  onChange={(event) => void updateTorumParams({ pullback_opacity: Math.max(0.1, Math.min(1, Number(event.target.value))) })}
                 />
               </label>
               <label>
@@ -308,7 +463,7 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
               <p>XAUEUR opera 09:00-15:00 Europe/Madrid. XAUUSD opera 15:30-21:00.</p>
               <p>Desbloquea por velas cerradas 2H o 3H. Reset diario por activo.</p>
               <p>Noticias bloquean solo BOT durante ventana configurada. Luego vuelve estado previo.</p>
-              <p>Entrada M5: pullback mayor a 0.20%, despues vela alcista cerrada.</p>
+              <p>Entrada M5: pullback configurable, despues vela alcista cerrada.</p>
               <p>Compra solo dentro de rectangulo operativo activo si exigir zona esta activo.</p>
               <p>Soportes S1/S2/S3 aumentan agresividad si hay capacidad.</p>
               <p>Zonas ATH limitan BOT: roja bloquea, naranja 1, amarilla 2, verde 3 lotajes.</p>

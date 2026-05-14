@@ -28,6 +28,7 @@ from app.strategies.torum_v1 import (
     is_bullish_confirmation,
     is_candle_inside_operation_zone,
     operation_zones_from_drawings,
+    pullback_debug_payload,
     should_buy_torum_v1,
 )
 from app.symbols.models import SymbolMapping
@@ -120,6 +121,32 @@ def _h1(db: Session, symbol: str, start_local: datetime, open_: float, close: fl
             open=open_,
             high=max(open_, close) + 1,
             low=min(open_, close) - 1 if low is None else low,
+            close=close,
+            volume=0.0,
+            tick_count=1,
+            source="TEST",
+        )
+    )
+
+
+def _tf_candle(
+    db: Session,
+    symbol: str,
+    timeframe: str,
+    start_local: datetime,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+) -> None:
+    db.add(
+        Candle(
+            time=_broker_chart_time(start_local),
+            internal_symbol=symbol,
+            timeframe=timeframe,
+            open=open_,
+            high=high,
+            low=low,
             close=close,
             volume=0.0,
             tick_count=1,
@@ -273,7 +300,7 @@ def test_xaueur_visual_status_unlocks_even_when_strategy_off() -> None:
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
 
     assert status.enabled is False
-    assert status.timeframe == "H2"
+    assert status.timeframe == "H2/H3"
     assert status.status == "UNLOCKED"
     assert status.reason == "bullish_closed_candle"
 
@@ -307,7 +334,7 @@ def test_xaueur_2h_bearish_holds_previous_low_but_previous_bullish_stays_locked(
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
 
     assert status.status == "LOCKED"
-    assert status.reason == "previous_candle_not_bearish"
+    assert status.reason == "waiting_closed_candle"
 
 
 def test_xaueur_2h_bearish_breaks_previous_low_stays_locked() -> None:
@@ -318,7 +345,7 @@ def test_xaueur_2h_bearish_breaks_previous_low_stays_locked() -> None:
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
 
     assert status.status == "LOCKED"
-    assert status.reason == "broke_previous_low"
+    assert status.reason == "waiting_closed_candle"
 
 
 def test_xaueur_after_15_locked() -> None:
@@ -352,6 +379,41 @@ def test_xauusd_15_17_bullish_unlocks() -> None:
     assert status.status == "UNLOCKED"
 
 
+def test_xauusd_h2_fails_then_h3_bullish_unlocks() -> None:
+    db = _session()
+    _config(db, "XAUUSD", "H2")
+    _tf_candle(db, "XAUUSD", "H2", _madrid(1, 13), 110, 111, 90, 100)
+    _tf_candle(db, "XAUUSD", "H2", _madrid(1, 15), 100, 101, 80, 95)
+    _tf_candle(db, "XAUUSD", "H3", _madrid(1, 15), 95, 106, 80, 105)
+    db.commit()
+
+    waiting = TorumV1StatusService(db).status_for_user(1, _madrid(1, 17, 30)).assets["XAUUSD"]
+    unlocked = TorumV1StatusService(db).status_for_user(1, _madrid(1, 18, 5)).assets["XAUUSD"]
+
+    assert waiting.status == "LOCKED"
+    assert waiting.reason == "waiting_closed_candle"
+    assert unlocked.status == "UNLOCKED"
+    assert unlocked.reason == "bullish_closed_candle"
+
+
+def test_xauusd_h2_and_h3_fail_then_next_h2_unlocks() -> None:
+    db = _session()
+    _config(db, "XAUUSD", "H2")
+    _tf_candle(db, "XAUUSD", "H2", _madrid(1, 13), 110, 111, 90, 100)
+    _tf_candle(db, "XAUUSD", "H2", _madrid(1, 15), 100, 101, 80, 95)
+    _tf_candle(db, "XAUUSD", "H3", _madrid(1, 15), 100, 101, 80, 95)
+    _tf_candle(db, "XAUUSD", "H2", _madrid(1, 17), 95, 106, 94, 105)
+    db.commit()
+
+    waiting = TorumV1StatusService(db).status_for_user(1, _madrid(1, 18, 5)).assets["XAUUSD"]
+    unlocked = TorumV1StatusService(db).status_for_user(1, _madrid(1, 19, 5)).assets["XAUUSD"]
+
+    assert waiting.status == "LOCKED"
+    assert waiting.reason == "waiting_closed_candle"
+    assert unlocked.status == "UNLOCKED"
+    assert unlocked.reason == "bullish_closed_candle"
+
+
 def test_xauusd_2h_uses_broker_chart_time_for_spanish_window() -> None:
     db = _session()
     _config(db, "XAUUSD", "H2")
@@ -371,7 +433,7 @@ def test_xauusd_2h_bearish_holds_previous_low_but_previous_bullish_stays_locked(
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 17, 5)).assets["XAUUSD"]
 
     assert status.status == "LOCKED"
-    assert status.reason == "previous_candle_not_bearish"
+    assert status.reason == "waiting_closed_candle"
 
 
 def test_xauusd_3h_uses_broker_chart_time_for_spanish_window() -> None:
@@ -382,7 +444,7 @@ def test_xauusd_3h_uses_broker_chart_time_for_spanish_window() -> None:
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 18, 5)).assets["XAUUSD"]
 
     assert status.status == "LOCKED"
-    assert status.reason == "broke_previous_low"
+    assert status.reason == "waiting_closed_candle"
 
 
 def test_xauusd_3h_bearish_holds_previous_low_but_previous_bullish_stays_locked() -> None:
@@ -393,7 +455,7 @@ def test_xauusd_3h_bearish_holds_previous_low_but_previous_bullish_stays_locked(
     status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 18, 5)).assets["XAUUSD"]
 
     assert status.status == "LOCKED"
-    assert status.reason == "previous_candle_not_bearish"
+    assert status.reason == "waiting_closed_candle"
 
 
 def test_xauusd_after_21_locked() -> None:
@@ -497,6 +559,121 @@ def test_pullback_021_detected() -> None:
 
     assert len(pullbacks) == 1
     assert pullbacks[0].pullback_pct > 0.20
+
+
+def test_pullback_down_leg_returns_one_pullback_with_last_low() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99, 99.5),
+        _m5_candle(_madrid(1, 9, 5), 99.5, 99.6, 98, 98.5),
+        _m5_candle(_madrid(1, 9, 10), 98.5, 98.6, 97, 97.5),
+        _m5_candle(_madrid(1, 9, 15), 97.5, 97.6, 96, 96.5),
+    ]
+
+    pullbacks = detect_pullbacks(candles, threshold=0.20)
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].swing_high == 100
+    assert pullbacks[0].pullback_low == 96
+    assert pullbacks[0].is_live is True
+
+
+def test_pullback_recovery_then_new_drop_returns_two_segments() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99, 99.5),
+        _m5_candle(_madrid(1, 9, 5), 99.5, 99.6, 96, 96.5),
+        _m5_candle(_madrid(1, 9, 10), 96.0, 96.3, 96.0, 96.2),
+        _m5_candle(_madrid(1, 9, 15), 96.2, 98.0, 97.8, 97.9),
+        _m5_candle(_madrid(1, 9, 20), 97.9, 98.0, 97.0, 97.4),
+    ]
+
+    pullbacks = detect_pullbacks(candles, threshold=0.20, recovery_pct=0.10, end_confirmation_bars=1)
+
+    assert len(pullbacks) == 2
+    assert pullbacks[0].pullback_low == 96
+    assert pullbacks[0].is_live is False
+    assert pullbacks[1].swing_high == 98
+    assert pullbacks[1].pullback_low == 97
+    assert pullbacks[1].is_live is True
+
+
+def test_pullback_updates_swing_high_before_drop() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.95, 99.98),
+        _m5_candle(_madrid(1, 9, 5), 99.98, 105, 104.9, 104.95),
+        _m5_candle(_madrid(1, 9, 10), 104.95, 105, 104.7, 104.8),
+    ]
+
+    pullbacks = detect_pullbacks(candles, threshold=0.20)
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].swing_high == 105
+    assert pullbacks[0].pullback_low == 104.7
+
+
+def test_live_pullback_updates_current_segment_low() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.95, 99.98),
+        _m5_candle(_madrid(1, 9, 5), 99.98, 100, 99.7, 99.8),
+    ]
+
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.4,
+        live_time=_madrid(1, 9, 9),
+    )
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].pullback_low == 99.4
+    assert pullbacks[0].pullback_low_time == _madrid(1, 9, 9).astimezone(UTC)
+    assert pullbacks[0].is_live is True
+
+
+def test_pullback_debug_payload_returns_one_segment_per_down_leg() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99, 99.5),
+        _m5_candle(_madrid(1, 9, 5), 99.5, 99.6, 98, 98.5),
+        _m5_candle(_madrid(1, 9, 10), 98.5, 98.6, 97, 97.5),
+        _m5_candle(_madrid(1, 9, 15), 97.5, 97.6, 96, 96.5),
+    ]
+
+    payload = pullback_debug_payload(candles, {"pullback_threshold_pct": 0.2})
+
+    assert len(payload) == 1
+    assert payload[0]["pullback_low"] == 96
+    assert payload[0]["is_live"] is True
+
+
+def test_pullback_zero_threshold_detects_small_pullback() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.96, 99.99),
+        _m5_candle(_madrid(1, 9, 5), 99.99, 100.0, 99.95, 99.98),
+    ]
+
+    payload = pullback_debug_payload(candles, {"pullback_min_pct": 0, "pullback_max_count": 10})
+
+    assert len(payload) == 1
+    assert payload[0]["pullback_pct"] < 0.2
+    assert payload[0]["threshold_touched"] is False
+
+
+def test_pullback_payload_returns_only_latest_max_count() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.5, 99.6),
+        _m5_candle(_madrid(1, 9, 5), 99.6, 99.7, 99.5, 99.7),
+        _m5_candle(_madrid(1, 9, 10), 101, 101, 100.5, 100.6),
+        _m5_candle(_madrid(1, 9, 15), 100.6, 100.7, 100.5, 100.7),
+        _m5_candle(_madrid(1, 9, 20), 102, 102, 101.5, 101.6),
+    ]
+
+    payload = pullback_debug_payload(
+        candles,
+        {"pullback_min_pct": 0, "pullback_max_count": 2, "pullback_recovery_pct": 0.01},
+    )
+
+    assert len(payload) == 2
+    assert payload[0]["swing_high"] == 101
+    assert payload[1]["swing_high"] == 102
 
 
 def test_pullback_detected_next_bearish_no_buy() -> None:

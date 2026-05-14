@@ -174,9 +174,12 @@ export function getSymbols(): Promise<SymbolMapping[]> {
   return request<SymbolMapping[]>("/api/symbols");
 }
 
-export function getCandles(symbol: string, timeframe: Timeframe, limit = 500): Promise<Candle[]> {
+export function getCandles(symbol: string, timeframe: Timeframe, limit = 500, options: { signal?: AbortSignal; after?: number } = {}): Promise<Candle[]> {
   const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) });
-  return request<Candle[]>(`/api/candles?${params.toString()}`);
+  if (typeof options.after === "number" && Number.isFinite(options.after)) {
+    params.set("after", String(Math.floor(options.after)));
+  }
+  return request<Candle[]>(`/api/candles?${params.toString()}`, { signal: options.signal });
 }
 
 export function getTicks(symbol: string, limit = 1000): Promise<Tick[]> {

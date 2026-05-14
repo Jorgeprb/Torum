@@ -7,8 +7,10 @@ interface ChartActionButtonsProps {
   isTorumZoneActive: boolean;
   canStyleSelectedObject: boolean;
   canDeleteSelectedObject: boolean;
+  pullbackDebugVisible: boolean;
   styleEditorOpen: boolean;
   onCenterChart: () => void;
+  onPullbackDebugToggle: () => void;
   onToggleTorumZone: (event: PointerEvent<HTMLButtonElement>) => void;
   onStyleButton: (event: PointerEvent<HTMLButtonElement>) => void;
   onDeleteButton: (event: PointerEvent<HTMLButtonElement>) => void;
@@ -25,7 +27,9 @@ export function ChartActionButtons({
   isTorumZoneActive,
   canStyleSelectedObject,
   canDeleteSelectedObject,
+  pullbackDebugVisible,
   onCenterChart,
+  onPullbackDebugToggle,
   onToggleTorumZone,
   onStyleButton,
   onDeleteButton
@@ -74,6 +78,18 @@ export function ChartActionButtons({
           <Trash2 size={16} />
         </button>
       ) : null}
+
+      <button
+        aria-label={pullbackDebugVisible ? "Ocultar pullbacks" : "Mostrar pullbacks"}
+        aria-pressed={pullbackDebugVisible}
+        className={pullbackDebugVisible ? "chart-hard-reset-button chart-pullback-toggle-button chart-pullback-toggle-button--active" : "chart-hard-reset-button chart-pullback-toggle-button"}
+        type="button"
+        onClick={onPullbackDebugToggle}
+        onPointerDown={stopBubble}
+        onPointerUp={stopBubble}
+      >
+        PB
+      </button>
 
       <button
         aria-label="Centrar grafico"

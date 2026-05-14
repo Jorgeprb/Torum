@@ -13,6 +13,8 @@ export function PullbackDebugOverlayLayer({ overlays }: PullbackDebugOverlayProp
         const length = Math.max(2, Math.hypot(dx, dy));
         const angle = Math.atan2(dy, dx);
         const thresholdTouched = overlay.debug.threshold_touched === true;
+        const opacity = Math.max(0.1, Math.min(1, overlay.debug.opacity ?? 0.95));
+        const lineWidth = Math.max(1, Math.min(6, overlay.debug.line_width ?? 2));
 
         return (
           <div
@@ -30,23 +32,27 @@ export function PullbackDebugOverlayLayer({ overlays }: PullbackDebugOverlayProp
                   : "pullback-debug__line"
               }
               style={{
+                borderTopWidth: lineWidth,
                 left: overlay.x1,
+                opacity,
                 top: overlay.y1,
                 width: length,
                 transform: `rotate(${angle}rad)`,
               }}
             />
 
-            <span
-              className={
-                thresholdTouched
-                  ? "pullback-debug__label pullback-debug__label--threshold"
-                  : "pullback-debug__label"
-              }
-              style={{ left: overlay.x2 + 6, top: overlay.y2 - 14 }}
-            >
-              {overlay.debug.label}
-            </span>
+            {overlay.debug.label ? (
+              <span
+                className={
+                  thresholdTouched
+                    ? "pullback-debug__label pullback-debug__label--threshold"
+                    : "pullback-debug__label"
+                }
+                style={{ left: overlay.x2 + 6, opacity, top: overlay.y2 - 14 }}
+              >
+                {overlay.debug.label}
+              </span>
+            ) : null}
           </div>
         );
       })}
