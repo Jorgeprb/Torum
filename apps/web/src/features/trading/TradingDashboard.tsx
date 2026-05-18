@@ -351,12 +351,15 @@ function upsertCandle(candles: Candle[], update: Candle): Candle[] {
 
   return [...byTime.values()]
     .sort((a, b) => a.time - b.time)
-    .slice(-500);
+    .slice(-candleCacheLimit);
 }
 
 const candleMemoryCache = new Map<string, Candle[]>();
 const candlePrefetchInFlight = new Set<string>();
-const candleCacheLimit = 500;
+const candleCacheLimit = 5000;
+const candleInitialLimit = 1000;
+const candleNewerSyncLimit = 5000;
+const candleOlderPageLimit = 500;
 
 function candleCacheKey(symbol: string, timeframe: Timeframe): string {
   return `${symbol.toUpperCase()}:${timeframe}`;
@@ -436,6 +439,14 @@ function latestCandleTime(candles: Candle[] | null): number | null {
   }
 
   return candles[candles.length - 1]?.time ?? null;
+}
+
+function oldestCandleTime(candles: Candle[] | null): number | null {
+  if (!candles?.length) {
+    return null;
+  }
+
+  return candles[0]?.time ?? null;
 }
 
 function patchCandlesWithLivePrice(candles: Candle[], price: number | null): Candle[] | null {
@@ -699,7 +710,7 @@ function tradeLinesForSymbol(
 
 function historyGrossProfit(item: TradeHistoryItem, symbolMappings: SymbolMapping[]): number {
   if (typeof item.profit === "number" && Number.isFinite(item.profit)) {
-    return item.profit;
+    return item.profit + (item.swap ?? 0) + (item.commission ?? 0);
   }
 
   if (item.close_price === null || item.close_price === undefined) {
@@ -827,34 +838,74 @@ function SplitMarketChart({
           setCandles(cachedBeforeFetch);
         }
 
-        const after = latestCandleTime(cachedBeforeFetch);
-        const [nextCandles, ticks, overlays, nextDrawings] = await Promise.all([
-          getCandles(symbol, timeframe, after ? 5000 : 500, { signal: controller.signal, after: after ?? undefined }),
-          getTicks(symbol, 1).catch(() => []),
-          getChartOverlays(symbol, timeframe, from, to).catch(() => null),
-          getDrawings(symbol, timeframe, true).catch(() => [])
-        ]);
+        void getTicks(symbol, 1)
+          .then((ticks) => {
+            if (generation === generationRef.current) setLatestTick(ticks[ticks.length - 1] ?? null);
+          })
+          .catch(() => {
+            if (generation === generationRef.current) setLatestTick(null);
+          });
+
+        void getChartOverlays(symbol, timeframe, from, to)
+          .then((overlays) => {
+            if (generation !== generationRef.current) return;
+            setNoTradeZones(overlays.no_trade_zones ?? []);
+            setIndicatorLines(overlays.indicators.filter(isLineOutput) ?? []);
+            setLocalStrategyDebugPullbacks(overlays.strategy_debug_pullbacks ?? []);
+            setAthZones(overlays.ath_zones ?? []);
+            setPriceAlerts(overlays.price_alerts ?? []);
+          })
+          .catch(() => {
+            if (generation !== generationRef.current) return;
+            setNoTradeZones([]);
+            setIndicatorLines([]);
+            setLocalStrategyDebugPullbacks([]);
+            setAthZones([]);
+            setPriceAlerts([]);
+          });
+
+        void getDrawings(symbol, timeframe, true)
+          .then((nextDrawings) => {
+            if (generation !== generationRef.current) return;
+            setDrawings(nextDrawings);
+            setSelectedDrawingId((current) => (current && nextDrawings.some((drawing) => drawing.id === current) ? current : null));
+          })
+          .catch(() => {
+            if (generation !== generationRef.current) return;
+            setDrawings([]);
+            setSelectedDrawingId(null);
+          });
+
+        const nextCandles = await getCandles(symbol, timeframe, candleInitialLimit, { signal: controller.signal });
 
         if (generation !== generationRef.current) {
           return;
         }
 
-        const mergedCandles = writeCachedCandles(
-          symbol,
-          timeframe,
-          after ? mergeCandles(cachedBeforeFetch ?? [], nextCandles) : nextCandles
-        );
+        const mergedCandles = writeCachedCandles(symbol, timeframe, mergeCandles(cachedBeforeFetch ?? [], nextCandles));
 
         setCandles(mergedCandles);
-        setLatestTick(ticks[ticks.length - 1] ?? null);
-        setNoTradeZones(overlays?.no_trade_zones ?? []);
-        setIndicatorLines(overlays?.indicators.filter(isLineOutput) ?? []);
-        setLocalStrategyDebugPullbacks(overlays?.strategy_debug_pullbacks ?? []);
-        setAthZones(overlays?.ath_zones ?? []);
-        setPriceAlerts(overlays?.price_alerts ?? []);
-        setDrawings(nextDrawings);
-        setSelectedDrawingId((current) => (current && nextDrawings.some((drawing) => drawing.id === current) ? current : null));
         prefetchNearbyCandles(symbol, timeframe);
+
+        const after = latestCandleTime(cachedBeforeFetch);
+        if (after) {
+          void getCandles(symbol, timeframe, candleNewerSyncLimit, { signal: controller.signal, after })
+            .then((newerCandles) => {
+              if (generation !== generationRef.current || newerCandles.length === 0) return;
+              setCandles((current) => writeCachedCandles(symbol, timeframe, mergeCandles(current, newerCandles)));
+            })
+            .catch(() => undefined);
+        }
+
+        const before = oldestCandleTime(mergedCandles);
+        if (before) {
+          void getCandles(symbol, timeframe, candleOlderPageLimit, { signal: controller.signal, before })
+            .then((olderCandles) => {
+              if (generation !== generationRef.current || olderCandles.length === 0) return;
+              setCandles((current) => writeCachedCandles(symbol, timeframe, mergeCandles(olderCandles, current)));
+            })
+            .catch(() => undefined);
+        }
       } catch (requestError) {
         if (isAbortError(requestError)) {
           return;
@@ -1116,6 +1167,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [historyTab, setHistoryTab] = useState<"OPEN" | "CLOSED">("OPEN");
   const [expandedHistoryRows, setExpandedHistoryRows] = useState<Set<string>>(() => new Set());
   const previousSymbolRef = useRef(selectedSymbol);
+  const latestTickBySymbolRef = useRef<Map<string, Tick>>(new Map());
   const tickTimestampsRef = useRef<number[]>([]);
   const socketManagerRef = useRef<MarketSocketManager | null>(null);
   const resumeReconnectAtRef = useRef(0);
@@ -1447,7 +1499,7 @@ useEffect(() => {
   const timeframe = selectedTimeframe;
 
   setChartAutoFollowEnabled(true);
-  setLatestTick(null);
+  setLatestTick(latestTickBySymbolRef.current.get(symbol) ?? null);
   setBackendLatestTick(null);
   const cachedCandles = readCachedCandles(symbol, timeframe);
   if (cachedCandles) {
@@ -1472,6 +1524,7 @@ useEffect(() => {
     setChartSymbolResetToken((current) => current + 1);
   }
 
+  void refreshMarketDiagnostics(generation, symbol);
   void refreshCandlesAndLatestTick(generation, symbol, timeframe);
 }, [selectedSymbol, selectedTimeframe]);
 
@@ -1607,21 +1660,23 @@ useEffect(() => {
     setTicksPerSecond(Number((tickTimestampsRef.current.length / 5).toFixed(2)));
     const parsedMessageTime = Date.parse(message.time);
     const messageTimeMsc = message.time_msc ?? (Number.isFinite(parsedMessageTime) ? parsedMessageTime : Date.now());
+    const nextTick = {
+      time: message.time,
+      time_msc: messageTimeMsc,
+      internal_symbol: message.symbol,
+      broker_symbol: message.broker_symbol ?? "",
+      bid: message.bid,
+      ask: message.ask,
+      last: message.last,
+      volume: message.volume,
+      source: message.source ?? "UNKNOWN"
+    };
+    latestTickBySymbolRef.current.set(message.symbol, nextTick);
     setLatestTick((current) => {
       if (current && messageTimeMsc < current.time_msc) {
         return current;
       }
-      return {
-        time: message.time,
-        time_msc: messageTimeMsc,
-        internal_symbol: message.symbol,
-        broker_symbol: message.broker_symbol ?? "",
-        bid: message.bid,
-        ask: message.ask,
-        last: message.last,
-        volume: message.volume,
-        source: message.source ?? "UNKNOWN"
-      };
+      return nextTick;
     });
     if (showPullbackOverlays) {
       const livePrice = message.bid ?? message.last ?? message.ask ?? null;
@@ -1667,25 +1722,59 @@ useEffect(() => {
       setCandles(cachedBeforeFetch);
     }
 
-    const after = latestCandleTime(cachedBeforeFetch);
-    const [nextCandles, ticks] = await Promise.all([
-      getCandles(symbol, timeframe, after ? 5000 : 500, { signal: controller.signal, after: after ?? undefined }),
-      getTicks(symbol, 1).catch(() => [])
-    ]);
+    void getTicks(symbol, 1)
+      .then((ticks) => {
+        if (!isCurrentMarketContext(symbol, timeframe, generation)) {
+          return;
+        }
+        const tick = ticks[ticks.length - 1] ?? null;
+        if (tick && tick.internal_symbol === symbol) {
+          latestTickBySymbolRef.current.set(symbol, tick);
+          setLatestTick(tick);
+        } else if (!latestTickBySymbolRef.current.has(symbol)) {
+          setLatestTick(null);
+        }
+      })
+      .catch(() => {
+        if (isCurrentMarketContext(symbol, timeframe, generation) && !latestTickBySymbolRef.current.has(symbol)) {
+          setLatestTick(null);
+        }
+      });
+
+    const nextCandles = await getCandles(symbol, timeframe, candleInitialLimit, { signal: controller.signal });
 
     if (!isCurrentMarketContext(symbol, timeframe, generation)) {
       return;
     }
 
-    const mergedCandles = writeCachedCandles(
-      symbol,
-      timeframe,
-      after ? mergeCandles(cachedBeforeFetch ?? [], nextCandles) : nextCandles
-    );
+    const mergedCandles = writeCachedCandles(symbol, timeframe, mergeCandles(cachedBeforeFetch ?? [], nextCandles));
 
     setCandles(mergedCandles);
-    setLatestTick(ticks[ticks.length - 1] ?? null);
     prefetchNearbyCandles(symbol, timeframe);
+
+    const after = latestCandleTime(cachedBeforeFetch);
+    if (after) {
+      void getCandles(symbol, timeframe, candleNewerSyncLimit, { signal: controller.signal, after })
+        .then((newerCandles) => {
+          if (!isCurrentMarketContext(symbol, timeframe, generation) || newerCandles.length === 0) {
+            return;
+          }
+          setCandles((current) => writeCachedCandles(symbol, timeframe, mergeCandles(current, newerCandles)));
+        })
+        .catch(() => undefined);
+    }
+
+    const before = oldestCandleTime(mergedCandles);
+    if (before) {
+      void getCandles(symbol, timeframe, candleOlderPageLimit, { signal: controller.signal, before })
+        .then((olderCandles) => {
+          if (!isCurrentMarketContext(symbol, timeframe, generation) || olderCandles.length === 0) {
+            return;
+          }
+          setCandles((current) => writeCachedCandles(symbol, timeframe, mergeCandles(olderCandles, current)));
+        })
+        .catch(() => undefined);
+    }
   } catch (requestError) {
     if (isAbortError(requestError)) {
       return;
@@ -1775,6 +1864,7 @@ useEffect(() => {
     }
 
     setBackendLatestTick(tick);
+    latestTickBySymbolRef.current.set(symbol, tick);
     setLatestTick((current) => {
       if (current && current.internal_symbol === tick.internal_symbol && current.time_msc > tick.time_msc) {
         return current;
@@ -1791,7 +1881,8 @@ useEffect(() => {
   async function refreshChartOverlays(
   generation = marketGenerationRef.current,
   symbol = selectedSymbol,
-  timeframe = selectedTimeframe
+  timeframe = selectedTimeframe,
+  pullbackVisible = showPullbackOverlays
 ) {
   const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
   const to = new Date(Date.now() + futureOverlayLookaheadDays * 24 * 60 * 60 * 1000).toISOString();
@@ -1805,7 +1896,7 @@ useEffect(() => {
 
     setNoTradeZones(response.no_trade_zones);
     setIndicatorLines(response.indicators.filter(isLineOutput));
-    setStrategyDebugPullbacks(showPullbackOverlays ? response.strategy_debug_pullbacks ?? [] : []);
+    setStrategyDebugPullbacks(pullbackVisible ? response.strategy_debug_pullbacks ?? [] : []);
     setAthZones(response.ath_zones ?? []);
     setPriceAlerts(response.price_alerts ?? []);
 
@@ -2600,7 +2691,7 @@ useEffect(() => {
     setShowPullbackOverlays(visible);
     saveBooleanPreference(showPullbackOverlaysStorageKey, visible);
     if (visible) {
-      void refreshChartOverlays();
+      void refreshChartOverlays(marketGenerationRef.current, selectedSymbol, selectedTimeframe, true);
     } else {
       setStrategyDebugPullbacks([]);
     }

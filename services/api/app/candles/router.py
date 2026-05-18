@@ -21,12 +21,19 @@ def get_candles(
     timeframe: Timeframe = Query(),
     limit: int = Query(default=500, ge=1, le=5000),
     after: int | None = Query(default=None, ge=0),
+    before: int | None = Query(default=None, ge=0),
 ) -> list[CandleRead]:
     stmt = select(Candle).where(Candle.internal_symbol == symbol, Candle.timeframe == timeframe)
 
     if after is not None:
         after_dt = datetime.fromtimestamp(after, tz=UTC)
         rows = list(db.scalars(stmt.where(Candle.time > after_dt).order_by(Candle.time.asc()).limit(limit)))
+        return [candle_to_read(candle) for candle in rows]
+
+    if before is not None:
+        before_dt = datetime.fromtimestamp(before, tz=UTC)
+        rows = list(db.scalars(stmt.where(Candle.time < before_dt).order_by(Candle.time.desc()).limit(limit)))
+        rows.reverse()
         return [candle_to_read(candle) for candle in rows]
 
     rows = list(db.scalars(stmt.order_by(Candle.time.desc()).limit(limit)))

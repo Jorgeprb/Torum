@@ -676,6 +676,58 @@ def test_pullback_payload_returns_only_latest_max_count() -> None:
     assert payload[1]["swing_high"] == 102
 
 
+def test_pullback_starts_at_later_real_high_inside_same_down_leg() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.6, 99.7),
+        _m5_candle(_madrid(1, 9, 5), 99.7, 101.0, 100.6, 100.7),
+        _m5_candle(_madrid(1, 9, 10), 100.7, 100.8, 99.0, 99.2),
+        _m5_candle(_madrid(1, 9, 15), 99.2, 99.4, 98.8, 99.0),
+    ]
+
+    payload = pullback_debug_payload(
+        candles,
+        {
+            "pullback_threshold_pct": 0.2,
+            "pullback_lookback_bars": 12,
+            "pullback_swing_confirm_bars": 1,
+            "pullback_allow_peak_extension": True,
+        },
+    )
+
+    assert len(payload) == 1
+    assert payload[0]["swing_high"] == 101.0
+    assert payload[0]["swing_high_time"] == int(_madrid(1, 9, 5).timestamp())
+    assert payload[0]["pullback_low"] == 98.8
+    assert payload[0]["pullback_low_time"] >= payload[0]["swing_high_time"]
+
+
+def test_pullback_peak_extension_can_move_start_three_candles_right() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.5, 99.7),
+        _m5_candle(_madrid(1, 9, 5), 99.7, 99.9, 99.6, 99.85),
+        _m5_candle(_madrid(1, 9, 10), 99.85, 100.0, 99.8, 100.0),
+        _m5_candle(_madrid(1, 9, 15), 100.5, 101.0, 100.2, 100.4),
+        _m5_candle(_madrid(1, 9, 20), 100.4, 102.0, 101.2, 101.5),
+        _m5_candle(_madrid(1, 9, 25), 101.5, 103.0, 102.0, 102.3),
+        _m5_candle(_madrid(1, 9, 30), 102.3, 102.5, 101.0, 101.2),
+    ]
+
+    payload = pullback_debug_payload(
+        candles,
+        {
+            "pullback_threshold_pct": 0.2,
+            "pullback_lookback_bars": 12,
+            "pullback_swing_confirm_bars": 1,
+            "pullback_allow_peak_extension": True,
+        },
+    )
+
+    assert len(payload) == 2
+    assert payload[-1]["swing_high"] == 103.0
+    assert payload[-1]["swing_high_time"] == int(_madrid(1, 9, 25).timestamp())
+    assert payload[-1]["pullback_low"] == 101.0
+
+
 def test_pullback_detected_next_bearish_no_buy() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),

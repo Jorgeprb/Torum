@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, Loader2, ShieldAlert } from "lucide-react";
 
 import type { MT5Status } from "../../services/market";
@@ -65,8 +65,11 @@ export function BuyOnlyOrderPanel({
   const [submitting, setSubmitting] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [riskPreview, setRiskPreview] = useState<RiskPreviewResponse | null>(null);
+  const [riskPreviewLoading, setRiskPreviewLoading] = useState(false);
+  const [riskPreviewError, setRiskPreviewError] = useState<string | null>(null);
   const [liveText, setLiveText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const riskPreviewRequestRef = useRef(0);
 
   const tpPercent = settings?.default_take_profit_percent ?? 0.09;
   const previewTp = useMemo(() => calculateTp(lastPrice, tpPercent), [lastPrice, tpPercent]);
@@ -87,6 +90,8 @@ export function BuyOnlyOrderPanel({
     setMultiplier(1);
     setLotInputText("");
     setRiskPreview(null);
+    setRiskPreviewError(null);
+    setRiskPreviewLoading(false);
   }, [symbol]);
 
   useEffect(() => {
@@ -157,23 +162,35 @@ export function BuyOnlyOrderPanel({
     }
   }
 
-  async function openBuyModal() {
+  function openBuyModal() {
     if (selectedLot === null) {
       return;
     }
     setError(null);
-    try {
-      const preview = await getManualRiskPreview({
+    setModalOpen(true);
+    setRiskPreview(null);
+    setRiskPreviewError(null);
+    setRiskPreviewLoading(true);
+    const requestId = riskPreviewRequestRef.current + 1;
+    riskPreviewRequestRef.current = requestId;
+    void getManualRiskPreview({
         internal_symbol: symbol,
         side: "BUY",
         volume: selectedLot,
         price: lastPrice ?? null
+      })
+      .then((preview) => {
+        if (riskPreviewRequestRef.current !== requestId) return;
+        setRiskPreview(preview);
+      })
+      .catch((requestError) => {
+        if (riskPreviewRequestRef.current !== requestId) return;
+        setRiskPreview(null);
+        setRiskPreviewError(requestError instanceof Error ? requestError.message : "No se pudo calcular riesgo");
+      })
+      .finally(() => {
+        if (riskPreviewRequestRef.current === requestId) setRiskPreviewLoading(false);
       });
-      setRiskPreview(preview);
-    } catch {
-      setRiskPreview(null);
-    }
-    setModalOpen(true);
   }
 
   const highRiskPreview =
@@ -205,7 +222,7 @@ export function BuyOnlyOrderPanel({
         onLotInputChange={setLotInputText}
       />
 
-      <button className="buy-panel__button" disabled={buyDisabled} type="button" onClick={() => void openBuyModal()}>
+      <button className="buy-panel__button" disabled={buyDisabled} type="button" onClick={openBuyModal}>
         {submitting ? <Loader2 className="spin" size={18} /> : <ArrowUp size={18} />}
         BUY
       </button>
@@ -250,10 +267,12 @@ export function BuyOnlyOrderPanel({
                 <dd>{previewTp ? previewTp.toFixed(2) : "--"}</dd>
               </div>
             </dl>
-            <p>Esta orden no tendra stop loss. El TP lo recalcula y valida el backend antes de ejecutar.</p>
+            <p>Esta orden no tendra stop loss. El TP mostrado es aproximado. MT5 devuelve el precio real y Torum ajusta el TP final despues.</p>
+            {riskPreviewLoading ? <div className="risk-preview-note">Calculando riesgo...</div> : null}
+            {riskPreviewError ? <div className="risk-preview-note">Riesgo estimado no disponible: {riskPreviewError}</div> : null}
             {highRiskPreview ? (
               <div className="risk-preview-warning">
-                <strong>Riesgo alto</strong>
+                <strong>Riesgo estimado</strong>
                 <span>
                   {highRiskPreview.message ?? `Esta operacion supondra que si el activo desciende un 30% tu capital sera de ${highRiskPreview.projected_balance!.toFixed(2)}`}
                 </span>

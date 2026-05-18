@@ -30,6 +30,7 @@ class BridgeOrderResponse(BaseModel):
     position: int | None = None
     price: float | None = None
     volume: float | None = None
+    close_deal: dict[str, Any] | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -50,6 +51,20 @@ class ModifyPositionTpRequest(BaseModel):
     tp: float = Field(gt=0)
     sl: float | None = Field(default=None, ge=0)
     magic_number: int | None = None
+    comment: str | None = None
+
+
+class ProfitPreviewRequest(BaseModel):
+    broker_symbol: str = Field(min_length=1, max_length=64)
+    side: OrderSide
+    volume: float = Field(gt=0)
+    price_open: float = Field(gt=0)
+    price_close: float = Field(gt=0)
+
+
+class ProfitPreviewResponse(BaseModel):
+    ok: bool
+    profit: float | None = None
     comment: str | None = None
 
 

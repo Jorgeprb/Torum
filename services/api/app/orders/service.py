@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +17,8 @@ from app.ticks.models import Tick
 from app.trading.lot_sizing import calculate_buy_take_profit
 from app.trading.schemas import ManualOrderRequest, ManualOrderResponse
 from app.users.models import User
+
+logger = logging.getLogger(__name__)
 
 
 class OrderManager:
@@ -69,9 +72,19 @@ class OrderManager:
         requested_price = self._side_price(payload.side, latest_tick)
         effective_tp = payload.tp
         tp_percent = payload.tp_percent or getattr(trading_settings, "default_take_profit_percent", 0.09)
+        payload.tp_percent = tp_percent
         if payload.side == "BUY" and effective_tp is None and requested_price is not None:
             effective_tp = calculate_buy_take_profit(requested_price, tp_percent)
             payload.tp = effective_tp
+        logger.info(
+            "Order prepared: source=%s symbol=%s side=%s requested_price=%s preliminary_tp=%s tp_percent=%s",
+            source,
+            payload.internal_symbol,
+            payload.side,
+            requested_price,
+            effective_tp,
+            tp_percent,
+        )
         magic_number = payload.magic_number or trading_settings.default_magic_number
         deviation_points = payload.deviation_points or trading_settings.default_deviation_points
         request_payload = payload.model_dump(mode="json")
@@ -281,6 +294,44 @@ class OrderManager:
         order.mt5_order_ticket = _int_or_none(response.get("order"))
         order.mt5_deal_ticket = _int_or_none(response.get("deal"))
         order.mt5_position_ticket = _int_or_none(response.get("position"))
+        final_tp = order.tp
+        tp_modify_response: dict[str, Any] | None = None
+        if order.executed_price and payload.tp_percent and order.mt5_position_ticket:
+            final_tp = _take_profit_from_executed(order.side, order.executed_price, payload.tp_percent)
+            if final_tp and (order.tp is None or abs(final_tp - order.tp) > 0.0000001):
+                logger.info(
+                    "MT5 TP final adjustment: symbol=%s ticket=%s executed_price=%s preliminary_tp=%s final_tp=%s tp_percent=%s",
+                    order.internal_symbol,
+                    order.mt5_position_ticket,
+                    order.executed_price,
+                    order.tp,
+                    final_tp,
+                    payload.tp_percent,
+                )
+                try:
+                    tp_modify_response = self.mt5_client.modify_position_tp(
+                        order.mt5_position_ticket,
+                        {
+                            "internal_symbol": order.internal_symbol,
+                            "broker_symbol": order.broker_symbol,
+                            "side": order.side,
+                            "mode": order.mode,
+                            "tp": final_tp,
+                            "sl": order.sl or 0,
+                            "magic_number": order.magic_number,
+                            "comment": "tp-final",
+                        },
+                    )
+                    if tp_modify_response.get("ok"):
+                        final_tp = _float_or_none(tp_modify_response.get("price")) or final_tp
+                    else:
+                        warnings = [*warnings, str(tp_modify_response.get("comment") or "MT5 TP final rejected")]
+                except MT5BridgeClientError as exc:
+                    warnings = [*warnings, f"MT5 TP final failed: {exc}"]
+                    tp_modify_response = {"ok": False, "error": str(exc)}
+        order.tp = final_tp
+        if tp_modify_response is not None:
+            order.response_payload_json = {**response, "tp_final": final_tp, "tp_modify_response": tp_modify_response}
         position = Position(
             user_id=order.user_id,
             order_id=order.id,
@@ -294,13 +345,13 @@ class OrderManager:
             open_price=order.executed_price or order.requested_price or 0.0,
             current_price=order.executed_price,
             sl=order.sl,
-            tp=order.tp,
+            tp=final_tp,
             profit=0.0,
             status="OPEN",
             mt5_position_ticket=order.mt5_position_ticket,
             magic_number=order.magic_number,
             opened_at=now,
-            raw_payload_json=response,
+            raw_payload_json=order.response_payload_json,
         )
         self.db.add(position)
         self.db.commit()
@@ -334,6 +385,14 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _take_profit_from_executed(side: str, executed_price: float, tp_percent: float) -> float | None:
+    if executed_price <= 0 or tp_percent <= 0:
+        return None
+    if side == "BUY":
+        return calculate_buy_take_profit(executed_price, tp_percent)
+    return round(executed_price * (1 - tp_percent / 100), 8)
 
 
 def _effective_trading_settings(trading_settings: object, mode_override: str | None) -> object:

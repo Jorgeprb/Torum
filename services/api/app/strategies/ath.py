@@ -272,6 +272,12 @@ def preview_manual_risk(
     positions = list(db.scalars(select(Position).where(Position.status == "OPEN")))
     if balance is None or balance <= 0 or price is None or price <= 0:
         return RiskPreview(balance=balance, potential_loss=None, projected_balance=None, breaches_bot_limit=False, positions_count=len(positions))
+    mappings = {
+        str(mapping.internal_symbol).upper(): float(mapping.contract_size)
+        for mapping in db.scalars(select(SymbolMapping))
+        if getattr(mapping, "contract_size", None) and float(mapping.contract_size) > 0
+    }
+    mappings[symbol.upper()] = contract_size
 
     loss = total_potential_loss_after_adverse_move(
         positions=positions,
@@ -280,6 +286,7 @@ def preview_manual_risk(
         new_volume=volume,
         new_price=price,
         contract_size=contract_size,
+        contract_sizes=mappings,
     )
     projected = balance - loss
     return RiskPreview(
@@ -299,14 +306,16 @@ def total_potential_loss_after_adverse_move(
     new_volume: float | None = None,
     new_price: float | None = None,
     contract_size: float = 100.0,
+    contract_sizes: dict[str, float] | None = None,
 ) -> float:
     total = 0.0
     for position in positions:
+        position_contract_size = (contract_sizes or {}).get(position.internal_symbol.upper(), contract_size)
         total += potential_loss_after_adverse_move(
             side=position.side,
             volume=position.volume,
             entry_price=position.open_price,
-            contract_size=contract_size,
+            contract_size=position_contract_size,
         )
     if new_symbol and new_side and new_volume and new_price:
         total += potential_loss_after_adverse_move(

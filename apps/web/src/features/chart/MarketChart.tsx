@@ -225,8 +225,11 @@ export function MarketChart({
   const askPriceLineRef = useRef<IPriceLine | null>(null);
   const loadedResetKeyRef = useRef<string | null>(null);
   const hasFullDataRef = useRef(false);
+  const firstDataTimeRef = useRef<number | null>(null);
   const lastDataTimeRef = useRef<number | null>(null);
+  const dataLengthRef = useRef(0);
   const appliedCenterRequestKeyRef = useRef<string | null>(null);
+  const pendingCenterResetKeyRef = useRef<string | null>(null);
   const centeredResetKeyRef = useRef<string | null>(null);
   const appliedSymbolResetTokenRef = useRef<number | null>(null);
   const appliedHardResetTokenRef = useRef<number | null>(hardResetToken);
@@ -302,18 +305,56 @@ export function MarketChart({
     return Number.isFinite(numericTime) && numericTime > 0 ? numericTime : null;
   }
 
-  function setMainSeriesData(data: ReturnType<typeof normalizeCandlesForChart>) {
+  function firstChartDataTime(data: ReturnType<typeof normalizeCandlesForChart>): number | null {
+    const first = data[0];
+    if (!first) return null;
+    const numericTime = timeToNumber(first.time);
+    return Number.isFinite(numericTime) && numericTime > 0 ? numericTime : null;
+  }
+
+  function setMainSeriesData(data: ReturnType<typeof normalizeCandlesForChart>, preservePrependedHistory = false): boolean {
     const series = seriesRef.current;
-    if (!series) return;
+    if (!series) return false;
+    const chart = chartRef.current;
+    const nextFirstTime = firstChartDataTime(data);
+    const nextLastTime = lastChartDataTime(data);
+    const previousFirstTime = firstDataTimeRef.current;
+    const previousLastTime = lastDataTimeRef.current;
+    const previousLength = dataLengthRef.current;
+    const prependedHistory =
+      preservePrependedHistory &&
+      chart !== null &&
+      previousFirstTime !== null &&
+      previousLastTime !== null &&
+      nextFirstTime !== null &&
+      nextLastTime === previousLastTime &&
+      nextFirstTime < previousFirstTime &&
+      data.length > previousLength;
+    const visibleRange = prependedHistory ? chart?.timeScale().getVisibleLogicalRange() : null;
+    const addedBars = data.length - previousLength;
+
     series.setData(data);
-    lastDataTimeRef.current = lastChartDataTime(data);
+    firstDataTimeRef.current = nextFirstTime;
+    lastDataTimeRef.current = nextLastTime;
+    dataLengthRef.current = data.length;
+
+    if (prependedHistory && visibleRange && addedBars > 0) {
+      chart?.timeScale().setVisibleLogicalRange({
+        from: visibleRange.from + addedBars,
+        to: visibleRange.to + addedBars
+      });
+    }
+
+    return prependedHistory;
   }
 
   function clearMainSeriesData() {
     const series = seriesRef.current;
     if (!series) return;
     series.setData([]);
+    firstDataTimeRef.current = null;
     lastDataTimeRef.current = null;
+    dataLengthRef.current = 0;
   }
 
   function applyCenterRequestIfNeeded(sc: ReturnType<typeof normalizeCandlesForChart>, nextKey: string): boolean {
@@ -449,6 +490,13 @@ export function MarketChart({
   function setMeasureCursorPoint(point: MeasurePoint | null) {
     if (point) measureCrosshairRef.current = { x: point.x, y: point.y };
     setMeasureCursor(point);
+  }
+
+  function measurePointFromClient(clientX: number, clientY: number): MeasurePoint | null {
+    const container = containerRef.current;
+    if (!container) return null;
+    const bounds = container.getBoundingClientRect();
+    return measurePointFromChartCoordinates(clientX - bounds.left, clientY - bounds.top);
   }
 
   function initialMeasurePoint(): MeasurePoint | null {
@@ -800,7 +848,9 @@ export function MarketChart({
     return () => {
       if (overlayRecalculateFrameRef.current !== null) { window.cancelAnimationFrame(overlayRecalculateFrameRef.current); overlayRecalculateFrameRef.current = null; }
       lineSeriesRef.current.clear(); futurePaddingSeriesRef.current = null;
+      firstDataTimeRef.current = null;
       lastDataTimeRef.current = null;
+      dataLengthRef.current = 0;
       chart.remove(); chartRef.current = null; seriesRef.current = null;
     };
   }, []);
@@ -894,7 +944,9 @@ export function MarketChart({
     appliedHardResetTokenRef.current = effectiveHardResetToken;
     const sc = normalizeCandlesForChart(candles);
     priceScaleManuallyAdjustedRef.current = false;
+    firstDataTimeRef.current = firstChartDataTime(sc);
     lastDataTimeRef.current = lastChartDataTime(sc);
+    dataLengthRef.current = sc.length;
     hardResetChartView(chart, series, sc.length, timeframe, getPreferredVisibleBars(sc.length));
     centeredResetKeyRef.current = resetKey ?? `${symbol}:${timeframe}`;
     appliedSymbolResetTokenRef.current = symbolResetToken;
@@ -910,8 +962,9 @@ export function MarketChart({
     const shouldReset = loadedResetKeyRef.current !== nextKey;
     const shouldSymReset = appliedSymbolResetTokenRef.current !== symbolResetToken;
     if (shouldReset) {
-      loadedResetKeyRef.current = nextKey; hasFullDataRef.current = false; centeredResetKeyRef.current = null;
-      clearMainSeriesData(); series.setMarkers([]);
+      loadedResetKeyRef.current = nextKey;centeredResetKeyRef.current = null;pendingCenterResetKeyRef.current = nextKey;
+      appliedCenterRequestKeyRef.current = null;clearMainSeriesData();series.setMarkers([]);
+      
       if (bidPriceLineRef.current) { series.removePriceLine(bidPriceLineRef.current); bidPriceLineRef.current = null; }
       if (askPriceLineRef.current) { series.removePriceLine(askPriceLineRef.current); askPriceLineRef.current = null; }
       lineSeriesRef.current.forEach(ls => ls.setData([]));
@@ -922,26 +975,63 @@ export function MarketChart({
     if (sc.length === 0) { clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return; }
     if (loadingCandles && sc.length <= 2 && !hasFullDataRef.current) {
       setMainSeriesData(sc); series.setMarkers([]);
-      applyCenterRequestIfNeeded(sc, nextKey);
       window.setTimeout(recalculateOverlays, 0); return;
     }
     if (shouldReset || !hasFullDataRef.current) {
-      setMainSeriesData(sc); series.setMarkers([]); hasFullDataRef.current = true;
-      const centeredByRequest = applyCenterRequestIfNeeded(sc, nextKey);
-      if (centeredByRequest) {
-        if (shouldSymReset) appliedSymbolResetTokenRef.current = symbolResetToken;
-      } else if (shouldSymReset) {
+      setMainSeriesData(sc);series.setMarkers([]);hasFullDataRef.current = true;
+
+      const shouldCenterPendingReset = pendingCenterResetKeyRef.current === nextKey;
+
+      if (shouldCenterPendingReset) {
+        pendingCenterResetKeyRef.current = null;appliedCenterRequestKeyRef.current = centerRequestKey ?? nextKey;centeredResetKeyRef.current = nextKey;onAutoFollowChange?.(true);priceScaleManuallyAdjustedRef.current = false;
+
+        hardResetChartView(
+          chart,
+          series,
+          sc.length,
+          timeframe,
+          getPreferredVisibleBars(sc.length),
+        );
+
+        window.requestAnimationFrame(() => {
+          if (loadedResetKeyRef.current !== nextKey) return;
+
+          hardResetChartView(
+            chart,
+            series,
+            sc.length,
+            timeframe,
+            getPreferredVisibleBars(sc.length),
+          );
+
+          recalculateOverlays();
+        });
+
+        if (shouldSymReset) {
+          appliedSymbolResetTokenRef.current = symbolResetToken;
+        }
+      } else {
+        const centeredByRequest = applyCenterRequestIfNeeded(sc, nextKey);
+
+        if (centeredByRequest) {
+          if (shouldSymReset) appliedSymbolResetTokenRef.current = symbolResetToken;
+        } else if (shouldSymReset) {
         priceScaleManuallyAdjustedRef.current = false;
         centerSymbolChange(chart, series, sc.length, timeframe, getPreferredVisibleBars(sc.length));
         appliedSymbolResetTokenRef.current = symbolResetToken; centeredResetKeyRef.current = nextKey;
-      } else if (centeredResetKeyRef.current !== nextKey) {
-        centerRecentBars(chart, sc.length, timeframe, getPreferredVisibleBars(sc.length));
-        centeredResetKeyRef.current = nextKey;
+          } else if (centeredResetKeyRef.current !== nextKey) {
+          centerRecentBars(chart, sc.length, timeframe, getPreferredVisibleBars(sc.length));
+          centeredResetKeyRef.current = nextKey;
+        }
       }
-      window.setTimeout(recalculateOverlays, 0); return;
+
+      window.setTimeout(recalculateOverlays, 0);
+      return;
     }
-    setMainSeriesData(sc); series.setMarkers([]);
-    if (!applyCenterRequestIfNeeded(sc, nextKey) && autoFollowEnabled) scrollToLatestRealCandle(chart, sc.length, timeframe, getPreferredVisibleBars(sc.length));
+    const prependedHistory = setMainSeriesData(sc, true);
+    series.setMarkers([]);
+    const centeredByRequest = applyCenterRequestIfNeeded(sc, nextKey);
+    if (!prependedHistory && !centeredByRequest && autoFollowEnabled) scrollToLatestRealCandle(chart, sc.length, timeframe, getPreferredVisibleBars(sc.length));
     if (priceScaleManuallyAdjustedRef.current) disablePriceAutoScale(chart, series);
     window.setTimeout(recalculateOverlays, 0);
   }, [autoFollowEnabled, candles, centerRequestKey, loadingCandles, onAutoFollowChange, recalculateOverlays, resetKey, symbol, timeframe, tradeMarkers]);
@@ -1199,7 +1289,7 @@ export function MarketChart({
     measureLongPressTriggeredRef.current = false;
     clearMeasureLongPressTimer();
     measureLongPressTimerRef.current = window.setTimeout(() => {
-      const point = initialMeasurePoint();
+      const point = measurePointFromClient(startX, startY) ?? initialMeasurePoint();
       measureLongPressTriggeredRef.current = true;
       suppressNextChartPointerUpRef.current = true;
       suppressNextChartClickRef.current = true;

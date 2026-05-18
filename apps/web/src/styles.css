@@ -2731,6 +2731,34 @@ button.system-status-card:disabled {
   gap: 8px;
 }
 
+.strategy-global-warning {
+  margin: 0 0 10px;
+  color: #f0cd78;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.strategy-param-line {
+  display: grid;
+  gap: 4px;
+}
+
+.strategy-param-line small {
+  color: #7f8a90;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.toggle-line.strategy-param-line {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+}
+
+.toggle-line.strategy-param-line small {
+  grid-column: 2;
+}
+
 .strategy-info-list p {
   margin: 0;
   border: 1px solid #263033;

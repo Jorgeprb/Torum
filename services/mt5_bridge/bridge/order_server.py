@@ -15,6 +15,8 @@ from bridge.order_models import (
     ModifyPositionTpRequest,
     OrderExecutionSettingsRequest,
     OrderExecutionSettingsResponse,
+    ProfitPreviewRequest,
+    ProfitPreviewResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,10 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
     @app.patch("/positions/{ticket}/tp", response_model=BridgeOrderResponse)
     def modify_position_tp(ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
         return executor.modify_position_tp(ticket, payload)
+
+    @app.post("/profit-preview", response_model=ProfitPreviewResponse)
+    def profit_preview(payload: ProfitPreviewRequest) -> ProfitPreviewResponse:
+        return executor.calculate_profit(payload)
 
     return app
 

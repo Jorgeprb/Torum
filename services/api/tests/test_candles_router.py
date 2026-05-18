@@ -69,3 +69,18 @@ def test_get_candles_after_returns_only_newer_candles() -> None:
         int((start.replace(tzinfo=UTC) + timedelta(minutes=10)).timestamp()),
         int((start.replace(tzinfo=UTC) + timedelta(minutes=15)).timestamp()),
     ]
+
+
+def test_get_candles_before_returns_older_candles_ascending() -> None:
+    client, db = _client_with_db()
+    start = datetime(2026, 5, 13, 10, 0)
+    _add_candles(db, [_candle(start + timedelta(minutes=5 * index), 4700 + index) for index in range(5)])
+
+    before = int((start.replace(tzinfo=UTC) + timedelta(minutes=15)).timestamp())
+    response = client.get(f"/api/candles?symbol=XAUUSD&timeframe=M5&before={before}&limit=2")
+
+    assert response.status_code == 200
+    assert [row["time"] for row in response.json()] == [
+        int((start.replace(tzinfo=UTC) + timedelta(minutes=5)).timestamp()),
+        int((start.replace(tzinfo=UTC) + timedelta(minutes=10)).timestamp()),
+    ]

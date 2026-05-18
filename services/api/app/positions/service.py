@@ -79,11 +79,18 @@ class PositionService:
             return False, str(response.get("comment") or "MT5 close rejected"), position
 
         position.status = "CLOSED"
-        position.closed_at = datetime.now(UTC)
-        position.close_price = _float_or_none(response.get("price")) or position.current_price
-        position.current_price = position.close_price or position.current_price
-        position.closing_deal_ticket = _int_or_none(response.get("deal"))
-        position.close_payload_json = response
+        close_deal = response.get("close_deal")
+        if not isinstance(close_deal, dict):
+            raw_payload = response.get("raw")
+            close_deal = raw_payload.get("close_deal") if isinstance(raw_payload, dict) else None
+        if isinstance(close_deal, dict):
+            _apply_close_deal(position, close_deal)
+        else:
+            position.closed_at = datetime.now(UTC)
+            position.close_price = _float_or_none(response.get("price")) or position.current_price
+            position.current_price = position.close_price or position.current_price
+            position.closing_deal_ticket = _int_or_none(response.get("deal"))
+            position.close_payload_json = response
         position.raw_payload_json = {**(position.raw_payload_json or {}), "close_response": response}
         self.db.commit()
         return True, "MT5 position closed", position

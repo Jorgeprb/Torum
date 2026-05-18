@@ -2,12 +2,13 @@ import logging
 import math
 import re
 import unicodedata
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bridge.account_state import AccountState
 from bridge.config import BridgeSettings
 from bridge.mt5_client import MT5Client, MT5ClientError
-from bridge.order_models import BridgeOrderResponse, ClosePositionRequest, MarketOrderRequest, ModifyPositionTpRequest
+from bridge.order_models import BridgeOrderResponse, ClosePositionRequest, MarketOrderRequest, ModifyPositionTpRequest, ProfitPreviewRequest, ProfitPreviewResponse
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,23 @@ class OrderExecutor:
             "comment": self._comment("close"),
             "type_time": mt5.ORDER_TIME_GTC,
         }
-        return self._send_with_filling_fallback(request, volume, price, self._filling_modes_for_symbol(symbol_info))
+        response = self._send_with_filling_fallback(request, volume, price, self._filling_modes_for_symbol(symbol_info))
+        if response.ok:
+            close_deal = _load_recent_close_deal(mt5, ticket, response.deal)
+            if close_deal is not None:
+                response.close_deal = close_deal
+                response.raw = {**response.raw, "close_deal": close_deal}
+                logger.info(
+                    "MT5 close deal received: ticket=%s deal=%s price=%s profit=%s swap=%s commission=%s fee=%s",
+                    ticket,
+                    close_deal.get("ticket") or close_deal.get("deal"),
+                    close_deal.get("price"),
+                    close_deal.get("profit"),
+                    close_deal.get("swap"),
+                    close_deal.get("commission"),
+                    close_deal.get("fee"),
+                )
+        return response
 
     def modify_position_tp(self, ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
         validation_error = self._validate_execution_allowed(payload.mode)
@@ -164,6 +181,31 @@ class OrderExecutor:
         }
         logger.info("MT5 modify TP request prepared: symbol=%s ticket=%s tp=%s sl=%s", payload.broker_symbol, ticket, tp, sl)
         return self._send_single(request, volume=0.0, price=tp)
+
+    def calculate_profit(self, payload: ProfitPreviewRequest) -> ProfitPreviewResponse:
+        try:
+            self.mt5_client.initialize()
+        except MT5ClientError as exc:
+            return ProfitPreviewResponse(ok=False, comment=str(exc))
+        mt5 = self.mt5_client.mt5
+        if mt5 is None or not hasattr(mt5, "order_calc_profit"):
+            return ProfitPreviewResponse(ok=False, comment="MT5 order_calc_profit unavailable")
+        if not self.mt5_client.select_symbol(payload.broker_symbol):
+            return ProfitPreviewResponse(ok=False, comment=f"Symbol not available: {payload.broker_symbol}")
+        order_type = mt5.ORDER_TYPE_BUY if payload.side == "BUY" else mt5.ORDER_TYPE_SELL
+        try:
+            profit = mt5.order_calc_profit(
+                order_type,
+                payload.broker_symbol,
+                float(payload.volume),
+                float(payload.price_open),
+                float(payload.price_close),
+            )
+        except Exception as exc:  # pragma: no cover - vendor package defensive guard
+            return ProfitPreviewResponse(ok=False, comment=str(exc))
+        if profit is None:
+            return ProfitPreviewResponse(ok=False, comment=str(_last_error(mt5)))
+        return ProfitPreviewResponse(ok=True, profit=float(profit), comment="MT5 order_calc_profit")
 
     def _validate_execution_allowed(self, requested_mode: str) -> BridgeOrderResponse | None:
         if not self.settings.mt5_allow_order_execution:
@@ -427,6 +469,64 @@ def _result_to_response(
         volume=_float_or_none(raw.get("volume")) or volume,
         raw=_json_safe({**raw, "request": request or {}}),
     )
+
+
+def _load_recent_close_deal(mt5: Any, position_ticket: int, deal_ticket: int | None = None) -> dict[str, Any] | None:
+    if not hasattr(mt5, "history_deals_get"):
+        return None
+    date_to = datetime.now(UTC) + timedelta(minutes=1)
+    date_from = date_to - timedelta(days=3)
+    deals = mt5.history_deals_get(date_from, date_to)
+    if deals is None:
+        logger.warning("MT5 history_deals_get after close failed: %s", mt5.last_error() if hasattr(mt5, "last_error") else None)
+        return None
+    candidates = [_deal_to_payload(deal) for deal in deals if getattr(deal, "position_id", None) == position_ticket]
+    if deal_ticket is not None:
+        for deal in candidates:
+            if _int_or_none(deal.get("ticket") or deal.get("deal")) == deal_ticket:
+                return deal
+    close_candidates = [deal for deal in candidates if _is_close_deal(deal)]
+    ordered = sorted(close_candidates or candidates, key=_deal_sort_key)
+    return ordered[-1] if ordered else None
+
+
+def _deal_to_payload(deal: Any) -> dict[str, Any]:
+    raw = deal._asdict() if hasattr(deal, "_asdict") else {
+        name: getattr(deal, name)
+        for name in dir(deal)
+        if not name.startswith("_")
+    }
+    return {
+        **raw,
+        "position_id": raw.get("position_id"),
+        "ticket": raw.get("ticket"),
+        "deal": raw.get("ticket"),
+        "time": raw.get("time"),
+        "time_msc": raw.get("time_msc"),
+        "price": raw.get("price"),
+        "volume": raw.get("volume"),
+        "type": raw.get("type"),
+        "fee": raw.get("fee"),
+        "profit": raw.get("profit"),
+        "swap": raw.get("swap"),
+        "commission": raw.get("commission"),
+        "symbol": raw.get("symbol"),
+        "entry": raw.get("entry"),
+        "raw": raw,
+    }
+
+
+def _is_close_deal(deal: dict[str, Any]) -> bool:
+    entry = _int_or_none(deal.get("entry"))
+    return entry in {1, 2, 3} or entry is None
+
+
+def _deal_sort_key(deal: dict[str, Any]) -> tuple[int, int]:
+    time_msc = _int_or_none(deal.get("time_msc"))
+    if time_msc is None:
+        time_msc = (_int_or_none(deal.get("time")) or 0) * 1000
+    ticket = _int_or_none(deal.get("ticket") or deal.get("deal")) or 0
+    return time_msc, ticket
 
 
 def _int_or_none(value: Any) -> int | None:

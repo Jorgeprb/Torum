@@ -1,5 +1,5 @@
 import { ChevronDown, Info, Power, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useState } from "react";
 
 import type { Timeframe } from "../../services/market";
 import {
@@ -11,7 +11,6 @@ import {
   getStrategyConfigs,
   getStrategySettings,
   patchStrategyConfig,
-  patchStrategySettings,
   registerDefaultStrategies,
 } from "../../services/strategies";
 
@@ -23,6 +22,56 @@ interface StrategyPanelProps {
   timeframes: Timeframe[];
   onChanged?: () => void;
 }
+
+type NumericParamKey =
+  | "pullback_min_pct"
+  | "pullback_max_count"
+  | "pullback_lookback_bars"
+  | "pullback_recovery_pct"
+  | "pullback_end_confirmation_bars"
+  | "pullback_min_bars_between"
+  | "pullback_swing_confirm_bars"
+  | "pullback_label_decimals"
+  | "pullback_line_width"
+  | "pullback_opacity";
+
+interface NumericParamConfig {
+  key: NumericParamKey;
+  label: string;
+  help: string;
+  min: number;
+  max?: number;
+  step: string;
+  integer?: boolean;
+  decimals?: number;
+}
+
+const numericParams: NumericParamConfig[] = [
+  { key: "pullback_min_pct", label: "PB min %", help: "Pullback minimo para pintar/calcular. 0 muestra todos.", min: 0, step: "0.01", decimals: 3 },
+  { key: "pullback_max_count", label: "Max PB", help: "Cantidad maxima de pullbacks recientes a mostrar.", min: 1, max: 50, step: "1", integer: true },
+  { key: "pullback_lookback_bars", label: "Lookback M5", help: "Velas usadas para buscar estructura/pullback.", min: 2, max: 300, step: "1", integer: true },
+  { key: "pullback_recovery_pct", label: "Recuperacion %", help: "Rebote necesario desde el minimo para cerrar el pullback.", min: 0, max: 20, step: "0.01", decimals: 3 },
+  { key: "pullback_end_confirmation_bars", label: "Velas confirma", help: "Numero de velas que confirman recuperacion.", min: 1, max: 20, step: "1", integer: true },
+  { key: "pullback_min_bars_between", label: "Separacion velas", help: "Distancia minima entre pullbacks.", min: 0, max: 100, step: "1", integer: true },
+  { key: "pullback_swing_confirm_bars", label: "Confirmacion maximo", help: "Velas usadas para confirmar que el maximo es real antes de anclar el pullback.", min: 0, max: 10, step: "1", integer: true },
+  { key: "pullback_label_decimals", label: "Decimales etiqueta", help: "Decimales del porcentaje mostrado.", min: 0, max: 6, step: "1", integer: true },
+  { key: "pullback_line_width", label: "Ancho linea", help: "Grosor visual.", min: 1, max: 8, step: "1", integer: true },
+  { key: "pullback_opacity", label: "Opacidad", help: "Transparencia visual.", min: 0.1, max: 1, step: "0.05", decimals: 2 },
+];
+
+const booleanParamHelps: Record<string, string> = {
+  enable_operation_zones: "Permite activar rectangulos como zona operativa.",
+  show_pullback_debug: "Pinta pullbacks calculados en el grafico.",
+  pullback_enabled: "Activa el calculo de pullbacks.",
+  pullback_live_update_enabled: "Actualiza el pullback vivo con ticks.",
+  pullback_use_wicks: "Usa high/low en vez de close.",
+  pullback_use_close_confirmation: "Exige vela de recuperacion alcista.",
+  pullback_show_labels: "Muestra etiqueta PB con porcentaje.",
+  pullback_show_only_live: "Muestra solo el pullback activo.",
+  pullback_allow_peak_extension: "Si aparece un high mayor dentro del mismo tramo, mueve el inicio del PB a ese maximo.",
+  require_zone: "Bot solo opera dentro de zona operativa.",
+  one_position_per_symbol: "Limita entradas simultaneas del bot.",
+};
 
 function defaultTorumParams(symbol: string): Record<string, unknown> {
   return {
@@ -38,6 +87,8 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
     pullback_min_pct: 0,
     pullback_threshold_pct: 0,
     pullback_lookback_bars: 12,
+    pullback_swing_confirm_bars: 1,
+    pullback_allow_peak_extension: true,
     pullback_recovery_pct: 0.10,
     pullback_end_confirmation_bars: 1,
     pullback_min_bars_between: 0,
@@ -58,33 +109,29 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
 function fixedTorumParams(symbol: string, current: Record<string, unknown> | undefined, enabled: boolean): Record<string, unknown> {
   return {
     ...defaultTorumParams(symbol),
-    use_news: current?.use_news ?? true,
-    enable_operation_zones: current?.enable_operation_zones ?? true,
-    entry_timeframe: "M5",
-    pullback_enabled: current?.pullback_enabled ?? true,
-    pullback_max_count: current?.pullback_max_count ?? 10,
-    pullback_min_pct: current?.pullback_min_pct ?? 0,
-    pullback_threshold_pct: current?.pullback_threshold_pct ?? current?.pullback_min_pct ?? 0,
-    pullback_lookback_bars: current?.pullback_lookback_bars ?? 12,
-    pullback_recovery_pct: current?.pullback_recovery_pct ?? 0.10,
-    pullback_end_confirmation_bars: current?.pullback_end_confirmation_bars ?? 1,
-    pullback_min_bars_between: current?.pullback_min_bars_between ?? 0,
-    pullback_use_wicks: current?.pullback_use_wicks ?? true,
-    pullback_use_close_confirmation: current?.pullback_use_close_confirmation ?? true,
-    pullback_live_update_enabled: current?.pullback_live_update_enabled ?? true,
-    pullback_show_labels: current?.pullback_show_labels ?? true,
-    pullback_show_only_live: current?.pullback_show_only_live ?? false,
-    pullback_label_decimals: current?.pullback_label_decimals ?? 2,
-    pullback_line_width: current?.pullback_line_width ?? 2,
-    pullback_opacity: current?.pullback_opacity ?? 0.95,
-    show_pullback_debug: current?.show_pullback_debug ?? false,
-    require_zone: current?.require_zone ?? true,
-    one_position_per_symbol: current?.one_position_per_symbol ?? true,
+    ...(current ?? {}),
     enabled,
+    entry_timeframe: "M5",
     timeframe: "H2",
     session_start: symbol === "XAUEUR" ? "09:00" : "15:30",
-    session_end: symbol === "XAUEUR" ? "15:00" : "21:00"
+    session_end: symbol === "XAUEUR" ? "15:00" : "21:00",
+    pullback_threshold_pct: current?.pullback_threshold_pct ?? current?.pullback_min_pct ?? 0,
   };
+}
+
+function formatDraftValue(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : String(value ?? "");
+}
+
+function normalizeNumericValue(raw: string, config: NumericParamConfig): number | null {
+  const normalized = raw.trim().replace(",", ".");
+  if (normalized === "" || normalized === "." || normalized === "0.") return null;
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return null;
+  let value = config.integer ? Math.round(parsed) : parsed;
+  value = Math.max(config.min, value);
+  if (typeof config.max === "number") value = Math.min(config.max, value);
+  return config.integer ? value : Number(value.toFixed(config.decimals ?? 4));
 }
 
 export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelProps) {
@@ -95,13 +142,16 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
   const [settings, setSettings] = useState<StrategySettings | null>(null);
   const [torumExpanded, setTorumExpanded] = useState(false);
   const [torumInfoOpen, setTorumInfoOpen] = useState(false);
+  const [draftParams, setDraftParams] = useState<Record<string, string>>({});
+  const [activeDraftKey, setActiveDraftKey] = useState<string | null>(null);
+  const [savingDraftKey, setSavingDraftKey] = useState<string | null>(null);
 
   const torumDefinition = useMemo(
     () => definitions.find((definition) => definition.key === TORUM_V1_KEY),
     [definitions]
   );
   const torumConfigs = useMemo(
-    () => configs.filter((config) => config.strategy_key === TORUM_V1_KEY),
+    () => configs.filter((config) => config.strategy_key === TORUM_V1_KEY).sort((left, right) => left.id - right.id),
     [configs]
   );
   const torumEnabled = torumSymbols.every((symbol) => torumConfigs.some((config) => config.internal_symbol === symbol && config.enabled));
@@ -114,6 +164,17 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
     void refresh();
   }, []);
 
+  useEffect(() => {
+    if (activeDraftKey) return;
+    setDraftParams((current) => {
+      const next = { ...current };
+      for (const config of numericParams) {
+        next[config.key] = formatDraftValue(torumParams[config.key]);
+      }
+      return next;
+    });
+  }, [activeDraftKey, torumParams]);
+
   async function refresh() {
     let [definitionResponse, configResponse, settingsResponse] = await Promise.all([
       getStrategies(),
@@ -122,22 +183,12 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
     ]);
     if (!definitionResponse.some((definition) => definition.key === TORUM_V1_KEY)) {
       definitionResponse = await registerDefaultStrategies();
-    }
-    if (!settingsResponse.strategies_enabled || !settingsResponse.strategy_live_enabled) {
-      settingsResponse = await patchStrategySettings({
-        strategies_enabled: true,
-        strategy_live_enabled: true
-      });
+      configResponse = await getStrategyConfigs();
+      settingsResponse = await getStrategySettings();
     }
     setDefinitions(definitionResponse);
     setConfigs(configResponse);
     setSettings(settingsResponse);
-  }
-
-  async function handleSettingsPatch(patch: Partial<StrategySettings>) {
-    const next = await patchStrategySettings(patch);
-    setSettings(next);
-    onChanged?.();
   }
 
   async function ensureTorumConfig(symbol: string, enabled: boolean): Promise<StrategyConfig> {
@@ -164,22 +215,18 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
     return created;
   }
 
+  function mergeUpdatedConfigs(updated: StrategyConfig[]) {
+    setConfigs((current) => {
+      const byId = new Map(current.map((config) => [config.id, config]));
+      for (const config of updated) byId.set(config.id, config);
+      return [...byId.values()].sort((left, right) => left.id - right.id);
+    });
+  }
+
   async function handleToggleTorum(nextEnabled: boolean) {
     try {
-      if (nextEnabled && (!settings?.strategies_enabled || !settings?.strategy_live_enabled)) {
-        await handleSettingsPatch({
-          strategies_enabled: true,
-          strategy_live_enabled: true
-        });
-      }
       const updated = await Promise.all(torumSymbols.map((symbol) => ensureTorumConfig(symbol, nextEnabled)));
-      setConfigs((current) => {
-        const byId = new Map(current.map((config) => [config.id, config]));
-        for (const config of updated) {
-          byId.set(config.id, config);
-        }
-        return [...byId.values()].sort((left, right) => left.id - right.id);
-      });
+      mergeUpdatedConfigs(updated);
       onChanged?.();
     } catch {
       // La UI queda igual si falla el backend.
@@ -200,18 +247,40 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
           })
         )
       );
-      setConfigs((current) => {
-        const byId = new Map(current.map((config) => [config.id, config]));
-        for (const config of updated) {
-          byId.set(config.id, config);
-        }
-        return [...byId.values()].sort((left, right) => left.id - right.id);
-      });
+      mergeUpdatedConfigs(updated);
       onChanged?.();
     } catch {
       // Silencio simple. La card refresca en siguiente carga.
     }
   }
+
+  async function commitNumericParam(config: NumericParamConfig) {
+    const raw = draftParams[config.key] ?? "";
+    const value = normalizeNumericValue(raw, config);
+    setActiveDraftKey(null);
+    if (value === null) {
+      setDraftParams((current) => ({ ...current, [config.key]: formatDraftValue(torumParams[config.key]) }));
+      return;
+    }
+    setSavingDraftKey(config.key);
+    const patch: Record<string, unknown> = { [config.key]: value };
+    if (config.key === "pullback_min_pct") patch.pullback_threshold_pct = value;
+    try {
+      await updateTorumParams(patch);
+      setDraftParams((current) => ({ ...current, [config.key]: formatDraftValue(value) }));
+    } finally {
+      setSavingDraftKey(null);
+    }
+  }
+
+  function handleNumericKeyDown(event: KeyboardEvent<HTMLInputElement>, config: NumericParamConfig) {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+      void commitNumericParam(config);
+    }
+  }
+
+  const globalDisabled = settings && (!settings.strategies_enabled || !settings.strategy_live_enabled);
 
   return (
     <section className="strategy-workbench">
@@ -248,6 +317,7 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
             <span>{torumEnabled ? "ON" : "OFF"}</span>
           </button>
         </div>
+        {globalDisabled ? <p className="strategy-global-warning">Motor global apagado. El boton Torum solo cambia esta estrategia.</p> : null}
         {torumExpanded ? (
           <div className="strategy-card__body strategy-card__summary">
             <p>
@@ -260,188 +330,56 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
               <span>Noticias bloquean solo BOT</span>
             </div>
             <div className="strategy-torum-settings">
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.enable_operation_zones === true}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ enable_operation_zones: event.target.checked })}
-                />
-                Zonas operativas
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.show_pullback_debug === true}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ show_pullback_debug: event.target.checked })}
-                />
-                Mostrar pullbacks M5 calculados
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.pullback_enabled !== false}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ pullback_enabled: event.target.checked })}
-                />
-                Calcular pullbacks
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.pullback_live_update_enabled !== false}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ pullback_live_update_enabled: event.target.checked })}
-                />
-                Actualizar en vivo
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.pullback_use_wicks !== false}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ pullback_use_wicks: event.target.checked })}
-                />
-                Usar mechas
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.pullback_use_close_confirmation !== false}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ pullback_use_close_confirmation: event.target.checked })}
-                />
-                Confirmar con vela alcista
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.pullback_show_labels !== false}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ pullback_show_labels: event.target.checked })}
-                />
-                Etiquetas PB
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.pullback_show_only_live === true}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ pullback_show_only_live: event.target.checked })}
-                />
-                Solo PB vivo
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.require_zone !== false}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ require_zone: event.target.checked })}
-                />
-                Requerir zona
-              </label>
-              <label className="toggle-line">
-                <input
-                  checked={torumParams.one_position_per_symbol !== false}
-                  type="checkbox"
-                  onChange={(event) => void updateTorumParams({ one_position_per_symbol: event.target.checked })}
-                />
-                Una posicion por activo
-              </label>
-              <label>
-                PB min %
-                <input
-                  min="0"
-                  step="0.01"
-                  type="number"
-                  value={Number(torumParams.pullback_min_pct ?? torumParams.pullback_threshold_pct ?? 0)}
-                  onChange={(event) => {
-                    const value = Math.max(0, Number(event.target.value));
-                    void updateTorumParams({ pullback_min_pct: value, pullback_threshold_pct: value });
-                  }}
-                />
-              </label>
-              <label>
-                Max PB
-                <input
-                  min="1"
-                  max="50"
-                  step="1"
-                  type="number"
-                  value={Number(torumParams.pullback_max_count ?? 10)}
-                  onChange={(event) => void updateTorumParams({ pullback_max_count: Math.max(1, Number(event.target.value)) })}
-                />
-              </label>
-              <label>
-                Lookback M5
-                <input
-                  min="2"
-                  step="1"
-                  type="number"
-                  value={Number(torumParams.pullback_lookback_bars ?? 12)}
-                  onChange={(event) => void updateTorumParams({ pullback_lookback_bars: Number(event.target.value) })}
-                />
-              </label>
-              <label>
-                Recuperacion %
-                <input
-                  min="0"
-                  step="0.01"
-                  type="number"
-                  value={Number(torumParams.pullback_recovery_pct ?? 0.10)}
-                  onChange={(event) => void updateTorumParams({ pullback_recovery_pct: Math.max(0, Number(event.target.value)) })}
-                />
-              </label>
-              <label>
-                Velas confirma
-                <input
-                  min="1"
-                  max="5"
-                  step="1"
-                  type="number"
-                  value={Number(torumParams.pullback_end_confirmation_bars ?? 1)}
-                  onChange={(event) => void updateTorumParams({ pullback_end_confirmation_bars: Math.max(1, Number(event.target.value)) })}
-                />
-              </label>
-              <label>
-                Separacion velas
-                <input
-                  min="0"
-                  max="20"
-                  step="1"
-                  type="number"
-                  value={Number(torumParams.pullback_min_bars_between ?? 0)}
-                  onChange={(event) => void updateTorumParams({ pullback_min_bars_between: Math.max(0, Number(event.target.value)) })}
-                />
-              </label>
-              <label>
-                Decimales etiqueta
-                <input
-                  min="0"
-                  max="6"
-                  step="1"
-                  type="number"
-                  value={Number(torumParams.pullback_label_decimals ?? 2)}
-                  onChange={(event) => void updateTorumParams({ pullback_label_decimals: Math.max(0, Number(event.target.value)) })}
-                />
-              </label>
-              <label>
-                Ancho linea
-                <input
-                  min="1"
-                  max="6"
-                  step="1"
-                  type="number"
-                  value={Number(torumParams.pullback_line_width ?? 2)}
-                  onChange={(event) => void updateTorumParams({ pullback_line_width: Math.max(1, Number(event.target.value)) })}
-                />
-              </label>
-              <label>
-                Opacidad
-                <input
-                  min="0.1"
-                  max="1"
-                  step="0.05"
-                  type="number"
-                  value={Number(torumParams.pullback_opacity ?? 0.95)}
-                  onChange={(event) => void updateTorumParams({ pullback_opacity: Math.max(0.1, Math.min(1, Number(event.target.value))) })}
-                />
-              </label>
-              <label>
-                Entrada
+              {[
+                ["enable_operation_zones", "Zonas operativas", torumParams.enable_operation_zones === true],
+                ["show_pullback_debug", "Mostrar pullbacks M5 calculados", torumParams.show_pullback_debug === true],
+                ["pullback_enabled", "Calcular pullbacks", torumParams.pullback_enabled !== false],
+                ["pullback_live_update_enabled", "Actualizar en vivo", torumParams.pullback_live_update_enabled !== false],
+                ["pullback_use_wicks", "Usar mechas", torumParams.pullback_use_wicks !== false],
+                ["pullback_use_close_confirmation", "Confirmar con vela alcista", torumParams.pullback_use_close_confirmation !== false],
+                ["pullback_show_labels", "Etiquetas PB", torumParams.pullback_show_labels !== false],
+                ["pullback_show_only_live", "Solo PB vivo", torumParams.pullback_show_only_live === true],
+                ["pullback_allow_peak_extension", "Permitir actualizar maximo", torumParams.pullback_allow_peak_extension !== false],
+                ["require_zone", "Requerir zona", torumParams.require_zone !== false],
+                ["one_position_per_symbol", "Una posicion por activo", torumParams.one_position_per_symbol !== false],
+              ].map(([key, label, checked]) => (
+                <label className="toggle-line strategy-param-line" key={String(key)} title={booleanParamHelps[String(key)]}>
+                  <input
+                    checked={Boolean(checked)}
+                    type="checkbox"
+                    onChange={(event) => void updateTorumParams({ [String(key)]: event.target.checked })}
+                  />
+                  <span>{String(label)}</span>
+                  <small>{booleanParamHelps[String(key)]}</small>
+                </label>
+              ))}
+
+              {numericParams.map((config) => (
+                <label className="strategy-param-line" key={config.key} title={config.help}>
+                  <span>{config.label}</span>
+                  <input
+                    inputMode={config.integer ? "numeric" : "decimal"}
+                    max={config.max}
+                    min={config.min}
+                    step={config.step}
+                    type="text"
+                    value={draftParams[config.key] ?? formatDraftValue(torumParams[config.key])}
+                    onBlur={() => void commitNumericParam(config)}
+                    onChange={(event) => {
+                      setActiveDraftKey(config.key);
+                      setDraftParams((current) => ({ ...current, [config.key]: event.target.value }));
+                    }}
+                    onFocus={() => setActiveDraftKey(config.key)}
+                    onKeyDown={(event) => handleNumericKeyDown(event, config)}
+                  />
+                  <small>{savingDraftKey === config.key ? "Guardando..." : config.help}</small>
+                </label>
+              ))}
+
+              <label className="strategy-param-line">
+                <span>Entrada</span>
                 <input disabled value="M5" readOnly />
+                <small>Timeframe usado por el bot para entrada.</small>
               </label>
             </div>
           </div>

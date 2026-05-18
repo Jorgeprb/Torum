@@ -174,10 +174,18 @@ export function getSymbols(): Promise<SymbolMapping[]> {
   return request<SymbolMapping[]>("/api/symbols");
 }
 
-export function getCandles(symbol: string, timeframe: Timeframe, limit = 500, options: { signal?: AbortSignal; after?: number } = {}): Promise<Candle[]> {
+export function getCandles(
+  symbol: string,
+  timeframe: Timeframe,
+  limit = 500,
+  options: { signal?: AbortSignal; after?: number; before?: number } = {}
+): Promise<Candle[]> {
   const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) });
   if (typeof options.after === "number" && Number.isFinite(options.after)) {
     params.set("after", String(Math.floor(options.after)));
+  }
+  if (typeof options.before === "number" && Number.isFinite(options.before)) {
+    params.set("before", String(Math.floor(options.before)));
   }
   return request<Candle[]>(`/api/candles?${params.toString()}`, { signal: options.signal });
 }

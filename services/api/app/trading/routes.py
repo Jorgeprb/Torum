@@ -2,16 +2,18 @@ from dataclasses import asdict
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
+from app.positions.models import Position
 from app.positions.service import PositionService
 from app.settings.trading_service import get_global_trading_settings, update_global_trading_settings
 from app.mt5.status_store import mt5_status_store
 from app.risk.manager import RiskManager
-from app.strategies.ath import list_symbol_ath_levels, latest_executable_price, preview_manual_risk, set_symbol_ath_level
+from app.strategies.ath import ATH_RISK_LIMIT_RATIO, RiskPreview, list_symbol_ath_levels, latest_executable_price, preview_manual_risk, set_symbol_ath_level
 from app.symbols.service import get_symbol_by_internal
 from app.trading.lot_sizing import calculate_lot_size
 from app.trading.schemas import AthLevelRead, AthLevelUpdate, MT5OrderExecutionSettingsRead, LotSizeResponse, RiskPreviewRequest, RiskPreviewResponse, TradingSettingsRead, TradingSettingsUpdate
@@ -144,7 +146,15 @@ def get_risk_preview(
     mapping = get_symbol_by_internal(db, payload.internal_symbol)
     latest_tick = RiskManager(db).latest_tick(payload.internal_symbol)
     price = payload.price or latest_executable_price(latest_tick, payload.side)
-    preview = preview_manual_risk(
+    preview = _mt5_manual_risk_preview(
+        db,
+        symbol=payload.internal_symbol,
+        side=payload.side,
+        volume=payload.volume,
+        price=price,
+        balance=account.balance if account is not None else None,
+        new_broker_symbol=mapping.broker_symbol if mapping is not None else payload.internal_symbol,
+    ) or preview_manual_risk(
         db,
         symbol=payload.internal_symbol,
         side=payload.side,
@@ -156,10 +166,74 @@ def get_risk_preview(
     message = None
     if preview.balance is not None and preview.projected_balance is not None:
         message = (
-            f"Esta operacion supondra que si el activo desciende un 30% "
-            f"tu capital sera de {preview.projected_balance:.2f}"
+            f"Riesgo estimado: si el activo se mueve un 30% en contra, "
+            f"tu capital seria {preview.projected_balance:.2f}"
         )
     return RiskPreviewResponse(**asdict(preview), message=message)
+
+
+def _mt5_manual_risk_preview(
+    db: Session,
+    *,
+    symbol: str,
+    side: str,
+    volume: float,
+    price: float | None,
+    balance: float | None,
+    new_broker_symbol: str,
+) -> RiskPreview | None:
+    if balance is None or balance <= 0 or price is None or price <= 0:
+        return None
+    client = MT5BridgeClient()
+    if not client.is_configured():
+        return None
+
+    positions = list(db.scalars(select(Position).where(Position.status == "OPEN")))
+
+    def adverse(entry_price: float, order_side: str) -> float:
+        return entry_price * (0.70 if order_side.upper() == "BUY" else 1.30)
+
+    total_loss = 0.0
+    try:
+        for position in positions:
+            mapping = get_symbol_by_internal(db, position.internal_symbol)
+            broker_symbol = mapping.broker_symbol if mapping is not None else position.broker_symbol
+            result = client.calculate_profit(
+                {
+                    "broker_symbol": broker_symbol,
+                    "side": position.side,
+                    "volume": position.volume,
+                    "price_open": position.open_price,
+                    "price_close": adverse(position.open_price, position.side),
+                }
+            )
+            if not result.get("ok"):
+                return None
+            total_loss += max(0.0, -float(result.get("profit") or 0.0))
+
+        result = client.calculate_profit(
+            {
+                "broker_symbol": new_broker_symbol,
+                "side": side.upper(),
+                "volume": volume,
+                "price_open": price,
+                "price_close": adverse(price, side),
+            }
+        )
+        if not result.get("ok"):
+            return None
+        total_loss += max(0.0, -float(result.get("profit") or 0.0))
+    except (MT5BridgeClientError, TypeError, ValueError):
+        return None
+
+    total_loss = round(total_loss, 2)
+    return RiskPreview(
+        balance=balance,
+        potential_loss=total_loss,
+        projected_balance=balance - total_loss,
+        breaches_bot_limit=total_loss > balance * ATH_RISK_LIMIT_RATIO,
+        positions_count=len(positions) + 1,
+    )
 
 
 @router.get("/ath-levels", response_model=list[AthLevelRead])

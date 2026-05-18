@@ -32,6 +32,8 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "pullback_min_pct": 0.0,
     "pullback_threshold_pct": 0.0,
     "pullback_lookback_bars": 12,
+    "pullback_swing_confirm_bars": 1,
+    "pullback_allow_peak_extension": True,
     "pullback_recovery_pct": 0.10,
     "pullback_end_confirmation_bars": 1,
     "pullback_min_bars_between": 0,
@@ -154,47 +156,78 @@ def detect_pullbacks(
     live_update_enabled: bool = True,
     live_price: float | None = None,
     live_time: datetime | None = None,
+    swing_confirm_bars: int = 1,
+    allow_peak_extension: bool = True,
 ) -> list[TorumV1Pullback]:
     candles = _sorted_candles(candles_m5)
-    del lookback
     if not candles:
         return []
 
     safe_threshold = max(0.0, float(threshold))
+    safe_lookback = max(1, int(lookback))
     safe_recovery_pct = max(0.0, float(recovery_pct))
     required_recovery_bars = max(1, int(end_confirmation_bars))
+    safe_swing_confirm_bars = max(0, int(swing_confirm_bars))
     safe_min_bars_between = max(0, int(min_bars_between))
     pullbacks: list[TorumV1Pullback] = []
     peak = candles[0]
     active: TorumV1Pullback | None = None
     confirmed_recovery_bars = 0
     bars_until_next_pullback = 0
+    segment_start_index = 0
 
-    for candle in candles:
+    for index, candle in enumerate(candles):
         high = float(candle.high)
         low = _pullback_low_source(candle, use_wicks)
 
         if active is None:
-            if high >= float(peak.high):
-                peak = candle
             if bars_until_next_pullback > 0:
                 bars_until_next_pullback -= 1
                 continue
 
-            swing_high = float(peak.high)
-            if swing_high <= 0 or low >= swing_high:
+            peak_index = _highest_high_index(candles, max(segment_start_index, index - safe_lookback + 1), index)
+            peak = candles[peak_index]
+            if index - peak_index < safe_swing_confirm_bars and index < len(candles) - 1:
                 continue
 
-            pullback_pct = _pullback_pct(swing_high, low)
-            if pullback_pct >= safe_threshold:
-                active = TorumV1Pullback(
-                    swing_high_time=_as_utc(peak.time),
-                    swing_high=swing_high,
-                    pullback_low_time=_as_utc(candle.time),
-                    pullback_low=low,
-                    pullback_pct=pullback_pct,
-                )
+            active = _pullback_from_peak_window(
+                candles,
+                peak_index,
+                index,
+                threshold=safe_threshold,
+                use_wicks=use_wicks,
+            )
+            if active is not None:
                 confirmed_recovery_bars = 0
+            continue
+
+        if allow_peak_extension:
+            active_peak_index = _index_for_time(candles, active.swing_high_time, fallback=index)
+            candidate_peak_index = _highest_high_index(
+                candles,
+                max(segment_start_index, active_peak_index, index - safe_lookback + 1),
+                index,
+            )
+            candidate_peak = candles[candidate_peak_index]
+            candidate_peak_time = _as_utc(candidate_peak.time)
+            if candidate_peak_time > active.swing_high_time and float(candidate_peak.high) > active.swing_high:
+                updated = _pullback_from_peak_window(
+                    candles,
+                    candidate_peak_index,
+                    index,
+                    threshold=safe_threshold,
+                    use_wicks=use_wicks,
+                )
+                if updated is None:
+                    peak = candidate_peak
+                    active = None
+                    segment_start_index = candidate_peak_index
+                else:
+                    active = updated
+                confirmed_recovery_bars = 0
+                continue
+
+        if _as_utc(candle.time) < active.swing_high_time:
             continue
 
         if low < active.pullback_low:
@@ -212,6 +245,7 @@ def detect_pullbacks(
             active = None
             confirmed_recovery_bars = 0
             bars_until_next_pullback = safe_min_bars_between
+            segment_start_index = index
 
     active = (
         _apply_live_pullback_update(
@@ -230,6 +264,72 @@ def detect_pullbacks(
         pullbacks.append(replace(active, is_live=True))
 
     return _latest_pullbacks(pullbacks, max_count=max_count)
+
+
+def _highest_high_index(candles: list[object], start: int, end: int) -> int:
+    safe_start = max(0, start)
+    safe_end = min(len(candles) - 1, end)
+    best_index = safe_start
+    best_high = float(candles[best_index].high)
+    for index in range(safe_start + 1, safe_end + 1):
+        high = float(candles[index].high)
+        if high > best_high:
+            best_high = high
+            best_index = index
+    return best_index
+
+
+def _lowest_pullback_index(candles: list[object], start: int, end: int, use_wicks: bool) -> int:
+    safe_start = max(0, start)
+    safe_end = min(len(candles) - 1, end)
+    best_index = safe_start
+    best_low = _pullback_low_source(candles[best_index], use_wicks)
+    for index in range(safe_start + 1, safe_end + 1):
+        low = _pullback_low_source(candles[index], use_wicks)
+        if low <= best_low:
+            best_low = low
+            best_index = index
+    return best_index
+
+
+def _index_for_time(candles: list[object], target_time: datetime, fallback: int = 0) -> int:
+    target = _as_utc(target_time)
+    for index, candle in enumerate(candles):
+        if _as_utc(candle.time) == target:
+            return index
+    return max(0, min(len(candles) - 1, fallback))
+
+
+def _pullback_from_peak_window(
+    candles: list[object],
+    peak_index: int,
+    end_index: int,
+    *,
+    threshold: float,
+    use_wicks: bool,
+) -> TorumV1Pullback | None:
+    if peak_index > end_index:
+        return None
+    peak = candles[peak_index]
+    swing_high = float(peak.high)
+    if swing_high <= 0:
+        return None
+    low_start_index = peak_index + 1 if peak_index < end_index else peak_index
+    low_index = _lowest_pullback_index(candles, low_start_index, end_index, use_wicks)
+    low_candle = candles[low_index]
+    low = _pullback_low_source(low_candle, use_wicks)
+    if low >= swing_high:
+        return None
+    pullback_pct = _pullback_pct(swing_high, low)
+    if pullback_pct < threshold:
+        return None
+    return TorumV1Pullback(
+        swing_high_time=_as_utc(peak.time),
+        swing_high=swing_high,
+        pullback_low_time=_as_utc(low_candle.time),
+        pullback_low=low,
+        pullback_pct=pullback_pct,
+    )
 
 
 def _pullback_pct(swing_high: float, pullback_low: float) -> float:
@@ -408,6 +508,8 @@ def should_buy_torum_v1(
     recovery_pct = _nonnegative_float_param(params.get("pullback_recovery_pct"), 0.10)
     confirmation_bars = _int_param(params.get("pullback_end_confirmation_bars"), 1)
     min_bars_between = _nonnegative_int_param(params.get("pullback_min_bars_between"), 0)
+    swing_confirm_bars = _nonnegative_int_param(params.get("pullback_swing_confirm_bars"), 1)
+    allow_peak_extension = _bool(params.get("pullback_allow_peak_extension"), True)
     pullbacks = [
         pullback
         for pullback in detect_pullbacks(
@@ -421,6 +523,8 @@ def should_buy_torum_v1(
             use_wicks=_bool(params.get("pullback_use_wicks"), True),
             use_close_confirmation=_bool(params.get("pullback_use_close_confirmation"), True),
             live_update_enabled=False,
+            swing_confirm_bars=swing_confirm_bars,
+            allow_peak_extension=allow_peak_extension,
         )
         if not pullback.is_live and pullback.pullback_low_time < confirmation_time
     ]
@@ -491,6 +595,8 @@ def pullback_debug_payload(
     confirmation_bars = _int_param(params.get("pullback_end_confirmation_bars"), 1)
     max_count = _int_param(params.get("pullback_max_count"), 10)
     min_bars_between = _nonnegative_int_param(params.get("pullback_min_bars_between"), 0)
+    swing_confirm_bars = _nonnegative_int_param(params.get("pullback_swing_confirm_bars"), 1)
+    allow_peak_extension = _bool(params.get("pullback_allow_peak_extension"), True)
     show_only_live = _bool(params.get("pullback_show_only_live"), False)
     show_labels = _bool(params.get("pullback_show_labels"), True)
     label_decimals = max(0, min(6, _nonnegative_int_param(params.get("pullback_label_decimals"), 2)))
@@ -511,6 +617,8 @@ def pullback_debug_payload(
         live_update_enabled=_bool(params.get("pullback_live_update_enabled"), True),
         live_price=live_price,
         live_time=live_time,
+        swing_confirm_bars=swing_confirm_bars,
+        allow_peak_extension=allow_peak_extension,
     )
     if show_only_live:
         pullbacks = [pullback for pullback in pullbacks if pullback.is_live]
