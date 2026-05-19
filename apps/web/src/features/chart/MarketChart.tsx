@@ -165,6 +165,19 @@ function drawingTimeSpanFromPoints(firstTime: number, secondTime: number, timefr
   return { time1: left, time2: right <= left ? left + tfSec : right };
 }
 
+function candlesMatchCurrentMarket(candles: Candle[], symbol: string, timeframe: string): boolean {
+  if (candles.length === 0) return false;
+  const expectedSymbol = symbol.toUpperCase();
+  const first = candles[0];
+  const last = candles[candles.length - 1];
+  return (
+    first.internal_symbol?.toUpperCase() === expectedSymbol &&
+    last.internal_symbol?.toUpperCase() === expectedSymbol &&
+    first.timeframe === timeframe &&
+    last.timeframe === timeframe
+  );
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 interface MeasurePoint {
   time: number;
@@ -223,6 +236,7 @@ export function MarketChart({
   const futurePaddingSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bidPriceLineRef = useRef<IPriceLine | null>(null);
   const askPriceLineRef = useRef<IPriceLine | null>(null);
+  const previousPriceLineSymbolRef = useRef(symbol);
   const loadedResetKeyRef = useRef<string | null>(null);
   const hasFullDataRef = useRef(false);
   const firstDataTimeRef = useRef<number | null>(null);
@@ -355,6 +369,31 @@ export function MarketChart({
     firstDataTimeRef.current = null;
     lastDataTimeRef.current = null;
     dataLengthRef.current = 0;
+  }
+
+  function removeBidPriceLine(series = seriesRef.current) {
+    if (series && bidPriceLineRef.current) series.removePriceLine(bidPriceLineRef.current);
+    bidPriceLineRef.current = null;
+  }
+
+  function removeAskPriceLine(series = seriesRef.current) {
+    if (series && askPriceLineRef.current) series.removePriceLine(askPriceLineRef.current);
+    askPriceLineRef.current = null;
+  }
+
+  function syncBidAskPriceLines() {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    removeBidPriceLine(series);
+    removeAskPriceLine(series);
+
+    if (showBidLine && typeof bidPrice === "number" && Number.isFinite(bidPrice)) {
+      bidPriceLineRef.current = series.createPriceLine({ price: bidPrice, color: "#2be0d0", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "BID" });
+    }
+    if (showAskLine && typeof askPrice === "number" && Number.isFinite(askPrice)) {
+      askPriceLineRef.current = series.createPriceLine({ price: askPrice, color: "#f45d5d", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "ASK" });
+    }
   }
 
   function applyCenterRequestIfNeeded(sc: ReturnType<typeof normalizeCandlesForChart>, nextKey: string): boolean {
@@ -957,28 +996,35 @@ export function MarketChart({
   useEffect(() => {
     const series = seriesRef.current; const chart = chartRef.current;
     if (!series || !chart) return;
-    const sc = normalizeCandlesForChart(candles);
     const nextKey = resetKey ?? `${symbol}:${timeframe}`;
+    const dataMatchesMarket = candlesMatchCurrentMarket(candles, symbol, timeframe);
+    const sc = dataMatchesMarket ? normalizeCandlesForChart(candles) : [];
     const shouldReset = loadedResetKeyRef.current !== nextKey;
     const shouldSymReset = appliedSymbolResetTokenRef.current !== symbolResetToken;
+    const symbolChangedForPriceLines = previousPriceLineSymbolRef.current !== symbol;
     if (shouldReset) {
-      loadedResetKeyRef.current = nextKey;centeredResetKeyRef.current = null;pendingCenterResetKeyRef.current = nextKey;
+      centeredResetKeyRef.current = null;pendingCenterResetKeyRef.current = nextKey;
       appliedCenterRequestKeyRef.current = null;clearMainSeriesData();series.setMarkers([]);
       
-      if (bidPriceLineRef.current) { series.removePriceLine(bidPriceLineRef.current); bidPriceLineRef.current = null; }
-      if (askPriceLineRef.current) { series.removePriceLine(askPriceLineRef.current); askPriceLineRef.current = null; }
+      if (symbolChangedForPriceLines) {
+        removeBidPriceLine(series);
+        removeAskPriceLine(series);
+        previousPriceLineSymbolRef.current = symbol;
+      } else {
+        syncBidAskPriceLines();
+      }
       lineSeriesRef.current.forEach(ls => ls.setData([]));
       setOverlays([]); setDrawingShapes([]); setTradeLineOverlays([]); setPriceAlertOverlays([]); setTradeMarkerOverlays([]); setPullbackDebugOverlays([]);
       setAthZoneOverlays([]);
       priceScaleManuallyAdjustedRef.current = false; resetPriceScale(chart, series);
     }
-    if (sc.length === 0) { clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return; }
-    if (loadingCandles && sc.length <= 2 && !hasFullDataRef.current) {
-      setMainSeriesData(sc); series.setMarkers([]);
-      window.setTimeout(recalculateOverlays, 0); return;
+    if (!dataMatchesMarket) {
+      clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return;
     }
+    if (sc.length === 0) { clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return; }
     if (shouldReset || !hasFullDataRef.current) {
       setMainSeriesData(sc);series.setMarkers([]);hasFullDataRef.current = true;
+      loadedResetKeyRef.current = nextKey;
 
       const shouldCenterPendingReset = pendingCenterResetKeyRef.current === nextKey;
 
@@ -1006,6 +1052,20 @@ export function MarketChart({
 
           recalculateOverlays();
         });
+
+        window.setTimeout(() => {
+          if (loadedResetKeyRef.current !== nextKey) return;
+
+          hardResetChartView(
+            chart,
+            series,
+            sc.length,
+            timeframe,
+            getPreferredVisibleBars(sc.length),
+          );
+
+          recalculateOverlays();
+        }, 40);
 
         if (shouldSymReset) {
           appliedSymbolResetTokenRef.current = symbolResetToken;
@@ -1049,6 +1109,7 @@ export function MarketChart({
 
   useEffect(() => {
     const chart = chartRef.current; if (!chart || candles.length === 0) return;
+    if (!candlesMatchCurrentMarket(candles, symbol, timeframe)) return;
     const sc = normalizeCandlesForChart(candles); if (sc.length === 0 || appliedSymbolResetTokenRef.current === symbolResetToken) return;
     const series = seriesRef.current; if (!series) return;
     priceScaleManuallyAdjustedRef.current = false;
@@ -1064,13 +1125,11 @@ export function MarketChart({
   }, [effectiveRecenterToken]);
 
   useEffect(() => {
-    const series = seriesRef.current; if (!series) return;
-    if (bidPriceLineRef.current) { series.removePriceLine(bidPriceLineRef.current); bidPriceLineRef.current = null; }
-    if (askPriceLineRef.current) { series.removePriceLine(askPriceLineRef.current); askPriceLineRef.current = null; }
-    if (loadingCandles) return;
-    if (showBidLine && typeof bidPrice === "number" && Number.isFinite(bidPrice)) bidPriceLineRef.current = series.createPriceLine({ price: bidPrice, color: "#2be0d0", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "BID" });
-    if (showAskLine && typeof askPrice === "number" && Number.isFinite(askPrice)) askPriceLineRef.current = series.createPriceLine({ price: askPrice, color: "#f45d5d", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "ASK" });
-  }, [askPrice, bidPrice, loadingCandles, showAskLine, showBidLine]);
+    if (previousPriceLineSymbolRef.current !== symbol) {
+      previousPriceLineSymbolRef.current = symbol;
+    }
+    syncBidAskPriceLines();
+  }, [askPrice, bidPrice, resetKey, showAskLine, showBidLine, symbol]);
 
   useEffect(() => {
     const chart = chartRef.current; if (!chart) return;

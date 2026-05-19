@@ -360,9 +360,29 @@ const candleCacheLimit = 5000;
 const candleInitialLimit = 1000;
 const candleNewerSyncLimit = 5000;
 const candleOlderPageLimit = 500;
+const drawingMemoryCache = new Map<string, ChartDrawingRead[]>();
 
 function candleCacheKey(symbol: string, timeframe: Timeframe): string {
   return `${symbol.toUpperCase()}:${timeframe}`;
+}
+
+function drawingCacheKey(symbol: string, timeframe: Timeframe): string {
+  return `${symbol.toUpperCase()}:${timeframe}`;
+}
+
+function cloneDrawings(drawings: ChartDrawingRead[]): ChartDrawingRead[] {
+  return drawings.map((drawing) => ({ ...drawing, payload: { ...drawing.payload }, style: { ...drawing.style }, metadata: { ...drawing.metadata } }));
+}
+
+function readCachedDrawings(symbol: string, timeframe: Timeframe): ChartDrawingRead[] | null {
+  const cached = drawingMemoryCache.get(drawingCacheKey(symbol, timeframe));
+  return cached ? cloneDrawings(cached) : null;
+}
+
+function writeCachedDrawings(symbol: string, timeframe: Timeframe, drawings: ChartDrawingRead[]): ChartDrawingRead[] {
+  const cloned = cloneDrawings(drawings);
+  drawingMemoryCache.set(drawingCacheKey(symbol, timeframe), cloned);
+  return cloneDrawings(cloned);
 }
 
 function cloneCandles(candles: Candle[]): Candle[] {
@@ -795,14 +815,18 @@ function SplitMarketChart({
   const [autoFollowEnabled, setAutoFollowEnabled] = useState(true);
   const generationRef = useRef(0);
   const candleAbortRef = useRef<AbortController | null>(null);
-  const latestBid = latestTick?.bid ?? null;
-  const latestAsk = latestTick?.ask ?? null;
+  const previousSplitSymbolRef = useRef(symbol);
+  const visibleSplitLatestTick = latestTick?.internal_symbol === symbol ? latestTick : null;
+  const latestBid = visibleSplitLatestTick?.bid ?? null;
+  const latestAsk = visibleSplitLatestTick?.ask ?? null;
   const tradeLines = useMemo(
     () => tradeLinesForSymbol(positions, symbol, symbolMappings, latestBid, latestAsk, accountCurrency, selectedPositionId),
     [accountCurrency, latestAsk, latestBid, positions, selectedPositionId, symbol, symbolMappings]
   );
 
   useEffect(() => {
+    const symbolChanged = previousSplitSymbolRef.current !== symbol;
+    previousSplitSymbolRef.current = symbol;
     generationRef.current += 1;
     const generation = generationRef.current;
     const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
@@ -818,8 +842,14 @@ function SplitMarketChart({
     setLocalStrategyDebugPullbacks([]);
     setAthZones([]);
     setPriceAlerts([]);
-    setDrawings([]);
-    setSelectedDrawingId(null);
+    const cachedDrawings = readCachedDrawings(symbol, timeframe);
+    if (symbolChanged) {
+      setDrawings(cachedDrawings ?? []);
+      setSelectedDrawingId(null);
+    } else if (cachedDrawings) {
+      setDrawings(cachedDrawings);
+      setSelectedDrawingId((current) => (current && cachedDrawings.some((drawing) => drawing.id === current) ? current : null));
+    }
     setAutoFollowEnabled(true);
 
     async function refresh() {
@@ -867,13 +897,16 @@ function SplitMarketChart({
         void getDrawings(symbol, timeframe, true)
           .then((nextDrawings) => {
             if (generation !== generationRef.current) return;
-            setDrawings(nextDrawings);
-            setSelectedDrawingId((current) => (current && nextDrawings.some((drawing) => drawing.id === current) ? current : null));
+            const cached = writeCachedDrawings(symbol, timeframe, nextDrawings);
+            setDrawings(cached);
+            setSelectedDrawingId((current) => (current && cached.some((drawing) => drawing.id === current) ? current : null));
           })
           .catch(() => {
             if (generation !== generationRef.current) return;
-            setDrawings([]);
-            setSelectedDrawingId(null);
+            if (symbolChanged) {
+              setDrawings([]);
+              setSelectedDrawingId(null);
+            }
           });
 
         const nextCandles = await getCandles(symbol, timeframe, candleInitialLimit, { signal: controller.signal });
@@ -921,8 +954,10 @@ function SplitMarketChart({
         setLocalStrategyDebugPullbacks([]);
         setAthZones([]);
         setPriceAlerts([]);
-        setDrawings([]);
-        setSelectedDrawingId(null);
+        if (symbolChanged) {
+          setDrawings([]);
+          setSelectedDrawingId(null);
+        }
       } finally {
         if (candleAbortRef.current === controller) {
           candleAbortRef.current = null;
@@ -991,32 +1026,36 @@ function SplitMarketChart({
 
   async function handleCreateDrawing(drawing: ChartDrawingCreate) {
     const created = await createDrawing(drawing);
-    setDrawings((current) => [...current, created]);
+    setDrawings((current) => writeCachedDrawings(symbol, timeframe, [...current, created]));
     setSelectedDrawingId(created.id);
   }
 
   async function handleUpdateDrawing(drawing: ChartDrawingRead, patch: ChartDrawingUpdate) {
     setDrawings((current) =>
-      current.map((item) =>
-        item.id === drawing.id
-          ? {
-              ...item,
-              ...patch,
-              payload: patch.payload ?? item.payload,
-              style: patch.style ?? item.style,
-              metadata: patch.metadata ?? item.metadata
-            }
-          : item
+      writeCachedDrawings(
+        symbol,
+        timeframe,
+        current.map((item) =>
+          item.id === drawing.id
+            ? {
+                ...item,
+                ...patch,
+                payload: patch.payload ?? item.payload,
+                style: patch.style ?? item.style,
+                metadata: patch.metadata ?? item.metadata
+              }
+            : item
+        )
       )
     );
 
     const updated = await patchDrawing(drawing.id, patch);
-    setDrawings((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    setDrawings((current) => writeCachedDrawings(symbol, timeframe, current.map((item) => (item.id === updated.id ? updated : item))));
   }
 
   async function handleDeleteDrawing(drawingId: string) {
     await deleteDrawing(drawingId);
-    setDrawings((current) => current.filter((drawing) => drawing.id !== drawingId));
+    setDrawings((current) => writeCachedDrawings(symbol, timeframe, current.filter((drawing) => drawing.id !== drawingId)));
     setSelectedDrawingId((current) => (current === drawingId ? null : current));
   }
 
@@ -1304,10 +1343,11 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   }, [chartSymbols, selectedSymbol]);
 
   const currentCandle = candles.length > 0 ? candles[candles.length - 1] : undefined;
-  const latestBid = latestTick?.bid ?? null;
-  const latestAsk = latestTick?.ask ?? null;
+  const visibleLatestTick = latestTick?.internal_symbol === selectedSymbol ? latestTick : null;
+  const latestBid = visibleLatestTick?.bid ?? null;
+  const latestAsk = visibleLatestTick?.ask ?? null;
   const lastPrice = latestBid ?? undefined;
-  const frontendTickAgeMs = latestTick ? Math.max(0, Date.now() - latestTick.time_msc) : null;
+  const frontendTickAgeMs = visibleLatestTick ? Math.max(0, Date.now() - visibleLatestTick.time_msc) : null;
   const mt5LastTickTime = mt5Status?.last_tick_time_by_symbol[selectedSymbol] ?? null;
   const mt5LastTickAgeMs = mt5LastTickTime ? Math.max(0, Date.now() - Date.parse(mt5LastTickTime)) : null;
   const backendTickAgeMs = backendLatestTick?.age_ms ?? null;
@@ -1512,8 +1552,14 @@ useEffect(() => {
   setStrategyDebugPullbacks([]);
   setAthZones([]);
   setPriceAlerts([]);
-  setDrawings([]);
-  setSelectedDrawingId(null);
+  const cachedDrawings = readCachedDrawings(symbol, timeframe);
+  if (symbolChanged) {
+    setDrawings(cachedDrawings ?? []);
+    setSelectedDrawingId(null);
+  } else if (cachedDrawings) {
+    setDrawings(cachedDrawings);
+    setSelectedDrawingId((current) => (current && cachedDrawings.some((drawing) => drawing.id === current) ? current : null));
+  }
   setSelectedPositionId(null);
   setClosePositionId(null);
   setTradeMessage(null);
@@ -1964,15 +2010,14 @@ useEffect(() => {
       return;
     }
 
-    setDrawings(response);
-    setSelectedDrawingId((current) => (current && response.some((drawing) => drawing.id === current) ? current : null));
+    const cached = writeCachedDrawings(symbol, timeframe, response);
+    setDrawings(cached);
+    setSelectedDrawingId((current) => (current && cached.some((drawing) => drawing.id === current) ? current : null));
   } catch (requestError) {
     if (!isCurrentMarketContext(symbol, timeframe, generation)) {
       return;
     }
 
-    setDrawings([]);
-    setSelectedDrawingId(null);
     setError(requestError instanceof Error ? requestError.message : "No se pudieron cargar los dibujos");
   }
 }
@@ -1980,7 +2025,7 @@ useEffect(() => {
   async function handleCreateDrawing(drawing: ChartDrawingCreate) {
     try {
       const created = await createDrawing(drawing);
-      setDrawings((current) => [...current, created]);
+      setDrawings((current) => writeCachedDrawings(selectedSymbol, selectedTimeframe, [...current, created]));
       setSelectedDrawingId(created.id);
       setDrawingTool("select");
       setDrawingMenuOpen(false);
@@ -1993,20 +2038,24 @@ useEffect(() => {
   async function handleUpdateDrawing(drawing: ChartDrawingRead, patch: ChartDrawingUpdate) {
     try {
       setDrawings((current) =>
-        current.map((item) =>
-          item.id === drawing.id
-            ? {
-                ...item,
-                ...patch,
-                payload: patch.payload ?? item.payload,
-                style: patch.style ?? item.style,
-                metadata: patch.metadata ?? item.metadata
-              }
-            : item
+        writeCachedDrawings(
+          selectedSymbol,
+          selectedTimeframe,
+          current.map((item) =>
+            item.id === drawing.id
+              ? {
+                  ...item,
+                  ...patch,
+                  payload: patch.payload ?? item.payload,
+                  style: patch.style ?? item.style,
+                  metadata: patch.metadata ?? item.metadata
+                }
+              : item
+          )
         )
       );
       const updated = await patchDrawing(drawing.id, patch);
-      setDrawings((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setDrawings((current) => writeCachedDrawings(selectedSymbol, selectedTimeframe, current.map((item) => (item.id === updated.id ? updated : item))));
       void refreshChartOverlays();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo actualizar el dibujo");
@@ -2017,7 +2066,7 @@ useEffect(() => {
   async function handleDeleteDrawing(drawingId: string) {
     try {
       await deleteDrawing(drawingId);
-      setDrawings((current) => current.filter((drawing) => drawing.id !== drawingId));
+      setDrawings((current) => writeCachedDrawings(selectedSymbol, selectedTimeframe, current.filter((drawing) => drawing.id !== drawingId)));
       setSelectedDrawingId((current) => (current === drawingId ? null : current));
       void refreshChartOverlays();
     } catch (requestError) {
@@ -2687,6 +2736,24 @@ useEffect(() => {
   setChartHardResetToken((current) => current + 1);
 }
 
+  function handleTimeframeChange(nextTimeframe: Timeframe) {
+    if (nextTimeframe === selectedTimeframe) {
+      return;
+    }
+
+    setChartAutoFollowEnabled(true);
+    marketGenerationRef.current += 1;
+    activeMarketKeyRef.current = `${selectedSymbol}:${nextTimeframe}`;
+    candleAbortRef.current?.abort();
+    setCandles([]);
+    setNoTradeZones([]);
+    setIndicatorLines([]);
+    setStrategyDebugPullbacks([]);
+    setAthZones([]);
+    setPriceAlerts([]);
+    setSelectedTimeframe(nextTimeframe);
+  }
+
   function handlePullbackOverlayToggle(visible: boolean) {
     setShowPullbackOverlays(visible);
     saveBooleanPreference(showPullbackOverlaysStorageKey, visible);
@@ -2741,7 +2808,7 @@ useEffect(() => {
         onMenuClick={() => setDrawerOpen(true)}
         onSystemStatusClick={() => setSystemStatusOpen(true)}
         onSymbolChange={setSelectedSymbol}
-        onTimeframeChange={setSelectedTimeframe}
+        onTimeframeChange={handleTimeframeChange}
         selectedSymbol={selectedSymbol}
         selectedTimeframe={selectedTimeframe}
         symbolLabels={strategySymbolLabels}
@@ -2827,7 +2894,7 @@ useEffect(() => {
               className={timeframe === selectedTimeframe ? "segment segment--active" : "segment"}
               key={timeframe}
               type="button"
-              onClick={() => setSelectedTimeframe(timeframe)}
+              onClick={() => handleTimeframeChange(timeframe)}
             >
               {timeframe}
             </button>
