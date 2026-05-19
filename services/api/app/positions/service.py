@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -8,9 +9,12 @@ from app.mt5.schemas import MT5AccountPayload
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.positions.models import Position
 from app.positions.repository import get_position, list_positions
+from app.risk.snapshot import RiskSnapshotService
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.ticks.service import latest_tick_order_by
+
+logger = logging.getLogger(__name__)
 
 
 class PositionService:
@@ -55,6 +59,7 @@ class PositionService:
             position.closed_at = datetime.now(UTC)
             position.close_price = position.current_price
             self.db.commit()
+            self._refresh_risk_snapshot(position.internal_symbol)
             return True, "Paper position closed", position
 
         if position.mt5_position_ticket is None:
@@ -93,6 +98,7 @@ class PositionService:
             position.close_payload_json = response
         position.raw_payload_json = {**(position.raw_payload_json or {}), "close_response": response}
         self.db.commit()
+        self._refresh_risk_snapshot(position.internal_symbol)
         return True, "MT5 position closed", position
     def reconcile_missing_mt5_positions(self) -> dict[str, int]:
         """
@@ -138,6 +144,8 @@ class PositionService:
             position.closed_at = datetime.now(UTC)
             count += 1
         self.db.commit()
+        for symbol in ("XAUUSD", "XAUEUR"):
+            self._refresh_risk_snapshot(symbol)
         return count
 
     def modify_take_profit(self, position_id: int, tp: float) -> tuple[bool, str, Position | None]:
@@ -281,6 +289,8 @@ class PositionService:
             close_deals_by_position=close_deals_by_position,
         )
         self.db.commit()
+        for symbol in ("XAUUSD", "XAUEUR"):
+            self._refresh_risk_snapshot(symbol)
         return {
             "created": created,
             "updated": updated,
@@ -323,6 +333,14 @@ class PositionService:
             return 1.0
 
         return mapping.contract_size
+
+    def _refresh_risk_snapshot(self, symbol: str) -> None:
+        try:
+            RiskSnapshotService(self.db).mark_dirty(symbol)
+            RiskSnapshotService(self.db).recompute(symbol)
+            RiskSnapshotService(self.db).recompute(symbol, source="STRATEGY")
+        except Exception:  # noqa: BLE001
+            logger.exception("risk_snapshot_recompute_failed symbol=%s", symbol)
     
     def _is_really_open_position(self, position: Position) -> bool:
         if position.status != "OPEN":

@@ -5,14 +5,19 @@ import type { MT5Status } from "../../services/market";
 import {
   type LotSizeResponse,
   type ManualOrderResponse,
-  type RiskPreviewResponse,
   type TradingMode,
   type TradingSettings,
   getLotSize,
-  getManualRiskPreview,
   getTradingSettings,
   submitManualOrder
 } from "../../services/trading";
+import {
+  type RiskSnapshot,
+  getRiskSnapshot,
+  projectRiskCandidate,
+  readCachedRiskSnapshot,
+  recomputeRiskSnapshot
+} from "../../services/risk";
 import { LotSizeControl } from "./LotSizeControl";
 
 interface BuyOnlyOrderPanelProps {
@@ -64,12 +69,13 @@ export function BuyOnlyOrderPanel({
   const [lotInputText, setLotInputText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
-  const [riskPreview, setRiskPreview] = useState<RiskPreviewResponse | null>(null);
-  const [riskPreviewLoading, setRiskPreviewLoading] = useState(false);
-  const [riskPreviewError, setRiskPreviewError] = useState<string | null>(null);
+  const [riskSnapshot, setRiskSnapshot] = useState<RiskSnapshot | null>(null);
+  const [riskSnapshotLoading, setRiskSnapshotLoading] = useState(false);
+  const [riskSnapshotError, setRiskSnapshotError] = useState<string | null>(null);
+  const [riskAccepted, setRiskAccepted] = useState(false);
   const [liveText, setLiveText] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const riskPreviewRequestRef = useRef(0);
+  const riskSnapshotRequestRef = useRef(0);
 
   const tpPercent = settings?.default_take_profit_percent ?? 0.09;
   const previewTp = useMemo(() => calculateTp(lastPrice, tpPercent), [lastPrice, tpPercent]);
@@ -89,9 +95,10 @@ export function BuyOnlyOrderPanel({
   useEffect(() => {
     setMultiplier(1);
     setLotInputText("");
-    setRiskPreview(null);
-    setRiskPreviewError(null);
-    setRiskPreviewLoading(false);
+    setRiskSnapshot(readCachedRiskSnapshot(symbol));
+    setRiskSnapshotError(null);
+    setRiskSnapshotLoading(false);
+    setRiskAccepted(false);
   }, [symbol]);
 
   useEffect(() => {
@@ -154,7 +161,9 @@ export function BuyOnlyOrderPanel({
       });
       setModalOpen(false);
       setLiveText("");
+      setRiskAccepted(false);
       onOrderCompleted(response);
+      void recomputeRiskSnapshot(symbol).catch(() => undefined);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo enviar la compra");
     } finally {
@@ -168,35 +177,56 @@ export function BuyOnlyOrderPanel({
     }
     setError(null);
     setModalOpen(true);
-    setRiskPreview(null);
-    setRiskPreviewError(null);
-    setRiskPreviewLoading(true);
-    const requestId = riskPreviewRequestRef.current + 1;
-    riskPreviewRequestRef.current = requestId;
-    void getManualRiskPreview({
-        internal_symbol: symbol,
-        side: "BUY",
-        volume: selectedLot,
-        price: lastPrice ?? null
-      })
-      .then((preview) => {
-        if (riskPreviewRequestRef.current !== requestId) return;
-        setRiskPreview(preview);
+    setRiskAccepted(false);
+    setRiskSnapshotError(null);
+    const cached = readCachedRiskSnapshot(symbol);
+    setRiskSnapshot(cached);
+    setRiskSnapshotLoading(cached === null);
+    const requestId = riskSnapshotRequestRef.current + 1;
+    riskSnapshotRequestRef.current = requestId;
+    void getRiskSnapshot(symbol)
+      .then((snapshot) => {
+        if (riskSnapshotRequestRef.current !== requestId) return;
+        setRiskSnapshot(snapshot);
+        if (snapshot.dirty || !snapshot.valid) {
+          setRiskSnapshotLoading(true);
+          void recomputeRiskSnapshot(symbol)
+            .then((updated) => {
+              if (riskSnapshotRequestRef.current === requestId) setRiskSnapshot(updated);
+            })
+            .catch((requestError) => {
+              if (riskSnapshotRequestRef.current === requestId) {
+                setRiskSnapshotError(requestError instanceof Error ? requestError.message : "No se pudo actualizar riesgo");
+              }
+            })
+            .finally(() => {
+              if (riskSnapshotRequestRef.current === requestId) setRiskSnapshotLoading(false);
+            });
+        } else {
+          setRiskSnapshotLoading(false);
+        }
       })
       .catch((requestError) => {
-        if (riskPreviewRequestRef.current !== requestId) return;
-        setRiskPreview(null);
-        setRiskPreviewError(requestError instanceof Error ? requestError.message : "No se pudo calcular riesgo");
+        if (riskSnapshotRequestRef.current !== requestId) return;
+        setRiskSnapshot(cached);
+        setRiskSnapshotError(requestError instanceof Error ? requestError.message : "No se pudo cargar riesgo");
+        setRiskSnapshotLoading(false);
       })
       .finally(() => {
-        if (riskPreviewRequestRef.current === requestId) setRiskPreviewLoading(false);
+        if (riskSnapshotRequestRef.current === requestId && cached !== null) setRiskSnapshotLoading(false);
       });
   }
 
-  const highRiskPreview =
-    riskPreview && riskPreview.breaches_bot_limit && riskPreview.projected_balance !== null ? riskPreview : null;
-  const normalRiskPreview =
-    riskPreview && !riskPreview.breaches_bot_limit && riskPreview.projected_balance !== null ? riskPreview : null;
+  const riskProjection = useMemo(
+    () => projectRiskCandidate(riskSnapshot, selectedLot, lastPrice),
+    [lastPrice, riskSnapshot, selectedLot]
+  );
+  const canAcceptRisk = riskSnapshot?.valid === true && riskProjection !== null;
+  const confirmDisabled =
+    submitting ||
+    !riskAccepted ||
+    !canAcceptRisk ||
+    (mode === "LIVE" && liveText.trim().toUpperCase() !== "CONFIRM LIVE");
 
   return (
     <section className="buy-panel" aria-label="Compra rapida">
@@ -268,21 +298,32 @@ export function BuyOnlyOrderPanel({
               </div>
             </dl>
             <p>Esta orden no tendra stop loss. El TP mostrado es aproximado. MT5 devuelve el precio real y Torum ajusta el TP final despues.</p>
-            {riskPreviewLoading ? <div className="risk-preview-note">Calculando riesgo...</div> : null}
-            {riskPreviewError ? <div className="risk-preview-note">Riesgo estimado no disponible: {riskPreviewError}</div> : null}
-            {highRiskPreview ? (
-              <div className="risk-preview-warning">
-                <strong>Riesgo estimado</strong>
-                <span>
-                  {highRiskPreview.message ?? `Esta operacion supondra que si el activo desciende un 30% tu capital sera de ${highRiskPreview.projected_balance!.toFixed(2)}`}
-                </span>
-                {highRiskPreview.potential_loss !== null ? <small>Perdida potencial conjunta: {highRiskPreview.potential_loss.toFixed(2)}</small> : null}
+            {riskSnapshotLoading ? <div className="risk-preview-note">Calculando riesgo inicial...</div> : null}
+            {riskSnapshot?.dirty ? <div className="risk-preview-note">Riesgo pendiente de actualizar.</div> : null}
+            {riskSnapshotError ? <div className="risk-preview-note">Riesgo no disponible: {riskSnapshotError}</div> : null}
+            {riskSnapshot && riskProjection ? (
+              <div className={riskProjection.breaches_limit ? "risk-preview-warning" : "risk-preview-note"}>
+                <strong>Riesgo cacheado</strong>
+                <span>ATH: {riskSnapshot.ath_price?.toFixed(2) ?? "--"} | Stress: {riskSnapshot.stress_price?.toFixed(2) ?? "--"}</span>
+                <small>Balance MT5: {riskSnapshot.balance?.toFixed(2) ?? "--"}</small>
+                <small>Perdida actual: {riskSnapshot.current_loss?.toFixed(2) ?? "--"}</small>
+                <small>Perdida candidata: {riskProjection.candidate_loss?.toFixed(2) ?? "--"}</small>
+                <small>Perdida proyectada: {riskProjection.projected_loss?.toFixed(2) ?? "--"} ({riskProjection.projected_balance_pct?.toFixed(2) ?? "--"}%)</small>
+                <small>Capital si ATH -30%: {riskProjection.projected_balance?.toFixed(2) ?? "--"}</small>
+                <small>Riesgo restante: {riskSnapshot.remaining_risk?.toFixed(2) ?? "--"}</small>
               </div>
-            ) : normalRiskPreview ? (
-              <div className="risk-preview-note">
-                {normalRiskPreview.message}
-              </div>
+            ) : riskSnapshot ? (
+              <div className="risk-preview-note">{riskSnapshot.message ?? "Faltan datos para calcular riesgo."}</div>
             ) : null}
+            <label>
+              <input
+                checked={riskAccepted}
+                disabled={!canAcceptRisk}
+                type="checkbox"
+                onChange={(event) => setRiskAccepted(event.target.checked)}
+              />
+              Acepto el riesgo calculado
+            </label>
             {mode === "LIVE" ? (
               <label>
                 Escribe CONFIRM LIVE
@@ -293,7 +334,7 @@ export function BuyOnlyOrderPanel({
               <button className="toolbar-action" type="button" onClick={() => setModalOpen(false)}>
                 Cancelar
               </button>
-              <button className="primary-button" disabled={submitting || (mode === "LIVE" && liveText.trim().toUpperCase() !== "CONFIRM LIVE")} type="button" onClick={() => void confirmBuy()}>
+              <button className="primary-button" disabled={confirmDisabled} type="button" onClick={() => void confirmBuy()}>
                 Confirmar BUY
               </button>
             </div>

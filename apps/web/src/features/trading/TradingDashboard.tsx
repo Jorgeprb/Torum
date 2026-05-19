@@ -61,6 +61,7 @@ import {
   getTradingSettings,
   modifyPositionTp
 } from "../../services/trading";
+import { recomputeRiskSnapshot } from "../../services/risk";
 import { type AthPriceZone, type IndicatorLineOutput, type StrategyPullbackDebug, getChartOverlays, isLineOutput } from "../../services/indicators";
 import { type NoTradeZone } from "../../services/news";
 import { type TorumV1Status, getTorumV1Status } from "../../services/strategies";
@@ -2167,6 +2168,7 @@ useEffect(() => {
       setTradeMessage(successMessage);
       setSelectedPositionId(null);
       setClosePositionId(null);
+      void recomputeRiskSnapshot(position.internal_symbol).catch(() => undefined);
       void refreshTradingData();
     } catch (requestError) {
       setTradeMessage(requestError instanceof Error ? requestError.message : "No se pudo cerrar la posicion");

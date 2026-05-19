@@ -213,25 +213,34 @@ def plan_torum_v1_bot_exposure(
     open_positions = bot_open_positions(db, normalized_symbol, user_id)
     open_equiv = open_lot_equivalents(open_positions, base_lot)
     max_multiplier = min(max(1, int(desired_multiplier)), 3)
-    contract_size = float(symbol_mapping.contract_size) if symbol_mapping is not None else 100.0
 
     if balance is None or balance <= 0:
         return _blocked("missing_account_balance", ath, zone, max_equivalents, open_equiv)
+    if current_price is None or current_price <= 0:
+        return _blocked("missing_current_price", ath, zone, max_equivalents, open_equiv)
 
+    from app.risk.snapshot import RiskSnapshotService, candidate_loss
+
+    snapshot = RiskSnapshotService(db).get_snapshot(normalized_symbol, source="STRATEGY")
+    if snapshot.dirty or not snapshot.valid:
+        snapshot = RiskSnapshotService(db).recompute(normalized_symbol, source="STRATEGY")
+    if not snapshot.valid or snapshot.current_loss is None or snapshot.stress_price is None:
+        return _blocked("missing_risk_snapshot", ath, zone, max_equivalents, open_equiv)
+    risk_limit = snapshot.risk_limit if snapshot.risk_limit is not None else balance * ATH_RISK_LIMIT_RATIO
     for multiplier in range(max_multiplier, 0, -1):
         if open_equiv + multiplier > max_equivalents + 1e-9:
             continue
         volume = round(base_lot * multiplier, 8)
-        potential_loss = total_potential_loss_after_adverse_move(
-            positions=open_positions,
-            new_symbol=normalized_symbol,
-            new_side="BUY",
-            new_volume=volume,
-            new_price=current_price,
-            contract_size=contract_size,
+        added_loss = candidate_loss(
+            side="BUY",
+            volume=volume,
+            price=current_price,
+            stress_price=snapshot.stress_price,
+            contract_size=snapshot.contract_size,
         )
+        potential_loss = round(snapshot.current_loss + added_loss, 2)
         projected_balance = balance - potential_loss
-        if potential_loss <= balance * ATH_RISK_LIMIT_RATIO:
+        if potential_loss <= risk_limit:
             return BotExposurePlan(
                 allowed=True,
                 multiplier=multiplier,
@@ -269,24 +278,32 @@ def preview_manual_risk(
     balance: float | None,
     contract_size: float,
 ) -> RiskPreview:
-    positions = list(db.scalars(select(Position).where(Position.status == "OPEN")))
-    if balance is None or balance <= 0 or price is None or price <= 0:
-        return RiskPreview(balance=balance, potential_loss=None, projected_balance=None, breaches_bot_limit=False, positions_count=len(positions))
-    mappings = {
-        str(mapping.internal_symbol).upper(): float(mapping.contract_size)
-        for mapping in db.scalars(select(SymbolMapping))
-        if getattr(mapping, "contract_size", None) and float(mapping.contract_size) > 0
-    }
-    mappings[symbol.upper()] = contract_size
+    del contract_size
+    from app.risk.snapshot import RiskSnapshotService, candidate_loss
 
-    loss = total_potential_loss_after_adverse_move(
-        positions=positions,
-        new_symbol=symbol.upper(),
-        new_side=side.upper(),
-        new_volume=volume,
-        new_price=price,
-        contract_size=contract_size,
-        contract_sizes=mappings,
+    snapshot = RiskSnapshotService(db).get_snapshot(symbol)
+    if snapshot.dirty or not snapshot.valid:
+        snapshot = RiskSnapshotService(db).recompute(symbol)
+    if (
+        not snapshot.valid
+        or snapshot.current_loss is None
+        or snapshot.stress_price is None
+        or balance is None
+        or balance <= 0
+        or price is None
+        or price <= 0
+    ):
+        return RiskPreview(balance=balance, potential_loss=None, projected_balance=None, breaches_bot_limit=False, positions_count=snapshot.positions_count)
+    loss = round(
+        snapshot.current_loss
+        + candidate_loss(
+            side=side.upper(),
+            volume=volume,
+            price=price,
+            stress_price=snapshot.stress_price,
+            contract_size=snapshot.contract_size,
+        ),
+        2,
     )
     projected = balance - loss
     return RiskPreview(
@@ -294,7 +311,7 @@ def preview_manual_risk(
         potential_loss=loss,
         projected_balance=projected,
         breaches_bot_limit=loss > balance * ATH_RISK_LIMIT_RATIO,
-        positions_count=len(positions) + 1,
+        positions_count=snapshot.positions_count + 1,
     )
 
 

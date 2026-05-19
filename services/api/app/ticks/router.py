@@ -9,6 +9,7 @@ from app.alerts.push import PushNotificationService
 from app.db.session import get_db
 from app.mt5.status_store import mt5_status_store
 from app.market_data.tick_time import tick_time_msc_from_datetime
+from app.risk.snapshot import RiskSnapshotService
 from app.settings.trading_service import get_global_trading_settings
 from app.strategies.auto_runner import run_torum_v1_for_symbols
 from app.strategies.notifications import notify_torum_v1_unlocks_for_symbols
@@ -84,13 +85,21 @@ def ingest_ticks_batch(
         last_tick_time_by_symbol[str(row["internal_symbol"])] = row["time"]
 
     account_trade_mode = payload.account.trade_mode if payload.account else "UNKNOWN"
-    mt5_status_store.update_from_tick_batch(
+    previous_account = mt5_status_store.get().account
+    previous_balance = previous_account.balance if previous_account else None
+    status_snapshot = mt5_status_store.update_from_tick_batch(
         source=payload.source,
         inserted_ticks=inserted_ticks,
         last_tick_time_by_symbol=last_tick_time_by_symbol,
         account_trade_mode=account_trade_mode,
         account=payload.account,
     )
+    next_balance = status_snapshot.account.balance if status_snapshot and status_snapshot.account else None
+    if next_balance is not None and next_balance != previous_balance:
+        for symbol in ("XAUUSD", "XAUEUR"):
+            RiskSnapshotService(db).mark_dirty(symbol)
+            RiskSnapshotService(db).recompute(symbol)
+            RiskSnapshotService(db).recompute(symbol, source="STRATEGY")
     if inserted_rows:
         last_tick_time = max(row["time"] for row in inserted_rows)
         background_tasks.add_task(market_ws_manager.broadcast_market_status, True, payload.source, last_tick_time)

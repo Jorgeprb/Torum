@@ -11,6 +11,7 @@ from app.mt5.status_store import mt5_status_store
 from app.orders.models import Order
 from app.positions.models import Position
 from app.risk.manager import RiskManager
+from app.risk.snapshot import RiskSnapshotService
 from app.settings.trading_service import get_global_trading_settings
 from app.symbols.service import get_symbol_by_internal
 from app.ticks.models import Tick
@@ -222,6 +223,7 @@ class OrderManager:
         self.db.add(position)
         self.db.commit()
         self.db.refresh(order)
+        self._refresh_risk_snapshot(order.internal_symbol)
         return ManualOrderResponse(
             ok=True,
             order_id=order.id,
@@ -355,6 +357,7 @@ class OrderManager:
         )
         self.db.add(position)
         self.db.commit()
+        self._refresh_risk_snapshot(order.internal_symbol)
         return ManualOrderResponse(
             ok=True,
             order_id=order.id,
@@ -371,6 +374,14 @@ class OrderManager:
         if side == "BUY":
             return tick.ask or tick.last or tick.bid
         return tick.bid or tick.last or tick.ask
+
+    def _refresh_risk_snapshot(self, symbol: str) -> None:
+        try:
+            RiskSnapshotService(self.db).mark_dirty(symbol)
+            RiskSnapshotService(self.db).recompute(symbol)
+            RiskSnapshotService(self.db).recompute(symbol, source="STRATEGY")
+        except Exception:  # noqa: BLE001
+            logger.exception("risk_snapshot_recompute_failed symbol=%s", symbol)
 
 
 def _float_or_none(value: Any) -> float | None:
