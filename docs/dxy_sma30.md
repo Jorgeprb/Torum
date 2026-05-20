@@ -31,39 +31,50 @@ analysis_only = true
 
 DXY aparece en el grafico, pero no puede operarse desde el panel manual.
 
-## Broker symbol en MT5
+## DXY sintetico
 
-Cada broker puede llamar distinto al indice:
+Torum calcula DXY con velas D1 cerradas de:
 
-- `DXY`
-- `USDX`
-- `USDIDX`
-- `US Dollar Index`
+```text
+EURUSD, USDJPY, GBPUSD, USDCAD, USDSEK, USDCHF
+```
 
-En MT5:
+Formula:
 
-1. Abre Market Watch.
-2. Click derecho.
-3. Selecciona Symbols.
-4. Busca `DXY`, `USDX` o `Dollar`.
-5. Activa el simbolo si existe.
-6. Copia el nombre exacto en `symbol_mappings.broker_symbol`.
+```text
+DXY = 50.14348112
+  * EURUSD^-0.576
+  * USDJPY^0.136
+  * GBPUSD^-0.119
+  * USDCAD^0.091
+  * USDSEK^0.042
+  * USDCHF^0.036
+```
 
-Si tu broker no ofrece DXY, Torum necesitara un proveedor externo de datos en una fase futura.
+Endpoint rapido:
+
+```text
+GET /api/market-context/dollar-strength
+```
+
+Recalculo manual:
+
+```text
+POST /api/market-context/dollar-strength/recompute
+```
 
 ## mt5_bridge
 
-El bridge lee todos los simbolos `enabled`, incluso si `tradable=false`.
-
-Si DXY existe en `symbol_mappings` y el broker_symbol es correcto, el bridge intentara leer ticks y Torum construira velas.
+El bridge no mete DXY en el streaming principal.
+Solo expone velas MT5 bajo demanda para los pares usados por DXY.
 
 Fallback local:
 
 ```text
-MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:XAUUSD,XAUEUR:XAUEUR,XAUAUD:XAUAUD,XAUJPY:XAUJPY,DXY:DXY
+MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:XAUUSD,XAUEUR:XAUEUR
 ```
 
-Si el broker no tiene el simbolo, el bridge registrara warning y seguira con el resto.
+Si falta algun par, el snapshot queda `UNKNOWN` y muestra el simbolo faltante.
 
 ## Abrir DXY D1
 
@@ -87,9 +98,10 @@ Si hay al menos 30 velas D1, devuelve puntos de linea. Si hay menos, devuelve la
 
 ## Interpretacion
 
-SMA30 no es una señal automatica. Se usa como referencia visual:
+SMA30 se usa como referencia visual y filtro del BOT:
 
-- DXY por encima de SMA30 puede sugerir dolar relativamente fuerte.
-- DXY por debajo de SMA30 puede sugerir dolar relativamente debil.
+- DXY por encima de SMA30 suele bloquear compras automaticas.
+- DXY por debajo de SMA30 permite compras automaticas.
+- Si DXY esta por encima pero cae fuerte, puede permitir compras.
 
-La decision de trading sigue fuera del indicador y no dispara ordenes.
+El filtro solo afecta al BOT. El usuario manual siempre puede operar.

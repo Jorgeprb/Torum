@@ -13,6 +13,7 @@ import { StrategyPanel } from "../strategies/StrategyPanel";
 import { PriceAlertPanel } from "../alerts/PriceAlertPanel";
 import { activatePushForPriceAlert, type PushStatus } from "../alerts/pushNotifications";
 import { SystemStatusModal } from "../admin/SystemStatusModal";
+import { DollarStrengthBadge } from "../marketContext/DollarStrengthBadge";
 import { AccountDrawer, type MobileView } from "../mobile/AccountDrawer";
 import { MobileTopBar } from "../mobile/MobileTopBar";
 import { TradingSettingsPage } from "../settings/TradingSettingsPage";
@@ -37,7 +38,7 @@ import {
   stopMockMarket
 } from "../../services/market";
 import { MarketSocketManager, type MarketSocketStatus } from "../../services/marketSocket";
-import { readPersistedCandles, writePersistedCandles } from "../../services/candleCache";
+import { readPersistedCandles, sanitizeCandlesForCache, writePersistedCandles } from "../../services/candleCache";
 import {
   type ChartDrawingCreate,
   type ChartDrawingRead,
@@ -74,8 +75,10 @@ import {
   patchPriceAlert
 } from "../../services/alerts";
 
-const fallbackSymbols = ["XAUUSD", "XAUEUR", "XAUAUD", "XAUJPY", "DXY"];
+const fallbackSymbols = ["XAUUSD", "XAUEUR", "DXY"];
 const timeframes: Timeframe[] = ["M1", "M5", "H1", "H2", "H3", "H4", "D1", "W1"];
+const dxyTimeframes: Timeframe[] = ["D1"];
+const deprecatedSymbols = new Set(["XAUAUD", "XAUJPY"]);
 type ChartSplitCount = 1 | 2 | 3;
 type ChartSplitOrientation = "vertical" | "horizontal";
 interface SplitChartSelection {
@@ -212,6 +215,10 @@ function torumTopbarAssetTone(status: TorumV1Status | null, symbol: string): "un
   }
 
   return asset.status === "UNLOCKED" ? "unlocked" : "locked";
+}
+
+function isAnalysisOnlySymbol(symbol: string): boolean {
+  return symbol.toUpperCase() === "DXY";
 }
 
 function pullbackLabelDecimals(label: string): number {
@@ -393,11 +400,15 @@ function cloneCandles(candles: Candle[]): Candle[] {
 function normalizeDashboardCandles(candles: Candle[], symbol?: string, timeframe?: Timeframe): Candle[] {
   const expectedSymbol = symbol?.toUpperCase();
   const byTime = new Map<number, Candle>();
-  const normalizedCandles = candles
+  const normalizedCandles = sanitizeCandlesForCache(
+    expectedSymbol ?? "",
+    timeframe ?? "D1",
+    candles
     .map(normalizeDashboardCandle)
     .filter((candle): candle is Candle => candle !== null)
     .filter((candle) => (expectedSymbol ? candle.internal_symbol.toUpperCase() === expectedSymbol : true))
-    .filter((candle) => (timeframe ? candle.timeframe === timeframe : true));
+    .filter((candle) => (timeframe ? candle.timeframe === timeframe : true))
+  );
 
   for (const candle of normalizedCandles) {
     byTime.set(candle.time, candle);
@@ -830,6 +841,7 @@ function SplitMarketChart({
     previousSplitSymbolRef.current = symbol;
     generationRef.current += 1;
     const generation = generationRef.current;
+    const analysisOnly = isAnalysisOnlySymbol(symbol);
     const from = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
     const to = new Date(Date.now() + futureOverlayLookaheadDays * 24 * 60 * 60 * 1000).toISOString();
     const cachedCandles = readCachedCandles(symbol, timeframe);
@@ -869,6 +881,7 @@ function SplitMarketChart({
           setCandles(cachedBeforeFetch);
         }
 
+        if (!analysisOnly) {
         void getTicks(symbol, 1)
           .then((ticks) => {
             if (generation === generationRef.current) setLatestTick(ticks[ticks.length - 1] ?? null);
@@ -876,6 +889,9 @@ function SplitMarketChart({
           .catch(() => {
             if (generation === generationRef.current) setLatestTick(null);
           });
+        } else {
+          setLatestTick(null);
+        }
 
         void getChartOverlays(symbol, timeframe, from, to)
           .then((overlays) => {
@@ -970,6 +986,12 @@ function SplitMarketChart({
     }
 
     void refresh();
+
+    if (analysisOnly) {
+      return () => {
+        candleAbortRef.current?.abort();
+      };
+    }
 
     const socket = new MarketSocketManager({
       onMessage: (message) => {
@@ -1234,7 +1256,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
         return;
       }
 
-      setSelectedSymbol(data.symbol.toUpperCase());
+      handleSymbolChange(data.symbol);
       setActiveMobileView("chart");
     }
 
@@ -1319,7 +1341,12 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
     [selectedSymbol, symbolMappings]
   );
   const chartSymbols = useMemo(
-    () => (symbolMappings.length > 0 ? symbolMappings.filter((mapping) => mapping.enabled).map((mapping) => mapping.internal_symbol) : fallbackSymbols),
+    () =>
+      symbolMappings.length > 0
+        ? symbolMappings
+            .filter((mapping) => mapping.enabled && !deprecatedSymbols.has(mapping.internal_symbol))
+            .map((mapping) => mapping.internal_symbol)
+        : fallbackSymbols,
     [symbolMappings]
   );
   const strategySymbolLabels = useMemo(
@@ -1357,13 +1384,17 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const mt5HeartbeatHealthy =
     Boolean(mt5Status?.connected_to_mt5 && mt5Status.connected_to_backend) && mt5StatusAgeMs !== null && mt5StatusAgeMs <= 45000;
   const tickOldOrMissing = effectiveTickAgeMs === null || effectiveTickAgeMs > 30000;
-  const marketClosedWarning = socketStatus === "connected" && mt5HeartbeatHealthy && tickOldOrMissing && sourceLabelForStatus(mt5Status, mockStatus, streamSource) === "MT5";
-  const marketDataStale = socketStatus === "stale" || socketStatus === "reconnecting" || socketStatus === "disconnected" || tickOldOrMissing;
-  const marketConnectionHealthy = socketStatus === "connected" && !marketDataStale;
+  const selectedAnalysisOnly = Boolean(selectedMapping?.analysis_only) || isAnalysisOnlySymbol(selectedSymbol);
+  const marketClosedWarning =
+    !selectedAnalysisOnly && socketStatus === "connected" && mt5HeartbeatHealthy && tickOldOrMissing && sourceLabelForStatus(mt5Status, mockStatus, streamSource) === "MT5";
+  const marketDataStale = selectedAnalysisOnly ? false : socketStatus === "stale" || socketStatus === "reconnecting" || socketStatus === "disconnected" || tickOldOrMissing;
+  const marketConnectionHealthy = selectedAnalysisOnly ? true : socketStatus === "connected" && !marketDataStale;
   const staleTradingReason = marketClosedWarning ? "Mercado cerrado" : "Datos desconectados o desactualizados. Reconectando...";
   const sourceLabel = mt5Status?.connected_to_mt5 ? "MT5" : mockStatus?.running ? "MOCK" : streamSource;
   const streamStatusLabel =
-    marketClosedWarning
+    selectedAnalysisOnly
+      ? "Solo analisis"
+      : marketClosedWarning
       ? "Mercado cerrado"
       : socketStatus === "connected"
       ? "Stream conectado"
@@ -1374,7 +1405,9 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
           : socketStatus === "connecting"
             ? "Conectando"
             : "Stream desconectado";
-  const streamStatusTone = marketClosedWarning
+  const streamStatusTone = selectedAnalysisOnly
+    ? "neutral"
+    : marketClosedWarning
     ? "warning"
     : socketStatus === "connected"
       ? "success"
@@ -1383,7 +1416,8 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
         : "danger";
   const accountMode = mt5Status?.account_trade_mode ?? "UNKNOWN";
   const accountCurrency = mt5Status?.account?.currency ?? "EUR";
-  const symbolTradable = selectedMapping ? selectedMapping.tradable && !selectedMapping.analysis_only : true;
+  const symbolTradable = selectedMapping ? selectedMapping.tradable && !selectedMapping.analysis_only : !selectedAnalysisOnly;
+  const visibleTimeframes = selectedAnalysisOnly ? dxyTimeframes : timeframes;
   const symbolTradingNotice = selectedMapping?.analysis_only
     ? `${selectedSymbol} es un activo de analisis. Trading deshabilitado.`
     : `${selectedSymbol} no esta habilitado para trading.`;
@@ -1416,6 +1450,17 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
 );
   function currentMarketKey(symbol = selectedSymbol, timeframe = selectedTimeframe) {
   return `${symbol}:${timeframe}`;
+  }
+
+  function handleSymbolChange(symbol: string) {
+    const nextSymbol = symbol.toUpperCase();
+    if (deprecatedSymbols.has(nextSymbol)) {
+      return;
+    }
+    if (isAnalysisOnlySymbol(nextSymbol) && selectedTimeframe !== "D1") {
+      setSelectedTimeframe("D1");
+    }
+    setSelectedSymbol(nextSymbol);
   }
 
   function isCurrentMarketContext(symbol: string, timeframe: Timeframe, generation: number) {
@@ -1470,11 +1515,12 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
   useEffect(() => {
     void getSymbols()
       .then((response) => {
-        setSymbolMappings(response);
-        const selectedStillEnabled = response.some((mapping) => mapping.enabled && mapping.internal_symbol === selectedSymbol);
-        const firstEnabled = response.find((mapping) => mapping.enabled);
+        const available = response.filter((mapping) => !deprecatedSymbols.has(mapping.internal_symbol));
+        setSymbolMappings(available);
+        const selectedStillEnabled = available.some((mapping) => mapping.enabled && mapping.internal_symbol === selectedSymbol);
+        const firstEnabled = available.find((mapping) => mapping.enabled);
         if (!selectedStillEnabled && firstEnabled) {
-          setSelectedSymbol(firstEnabled.internal_symbol);
+          handleSymbolChange(firstEnabled.internal_symbol);
         }
       })
       .catch((requestError) => {
@@ -1503,6 +1549,12 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
     const intervalId = window.setInterval(() => void refreshTorumV1Status(), 30000);
     return () => window.clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    if (isAnalysisOnlySymbol(selectedSymbol) && selectedTimeframe !== "D1") {
+      handleTimeframeChange("D1");
+    }
+  }, [selectedSymbol, selectedTimeframe]);
 
   useEffect(() => {
     let active = true;
@@ -1538,9 +1590,10 @@ useEffect(() => {
   const generation = marketGenerationRef.current;
   const symbol = selectedSymbol;
   const timeframe = selectedTimeframe;
+  const analysisOnly = isAnalysisOnlySymbol(symbol);
 
   setChartAutoFollowEnabled(true);
-  setLatestTick(latestTickBySymbolRef.current.get(symbol) ?? null);
+  setLatestTick(analysisOnly ? null : latestTickBySymbolRef.current.get(symbol) ?? null);
   setBackendLatestTick(null);
   const cachedCandles = readCachedCandles(symbol, timeframe);
   if (cachedCandles) {
@@ -1571,7 +1624,9 @@ useEffect(() => {
     setChartSymbolResetToken((current) => current + 1);
   }
 
-  void refreshMarketDiagnostics(generation, symbol);
+  if (!analysisOnly) {
+    void refreshMarketDiagnostics(generation, symbol);
+  }
   void refreshCandlesAndLatestTick(generation, symbol, timeframe);
 }, [selectedSymbol, selectedTimeframe]);
 
@@ -1585,10 +1640,17 @@ useEffect(() => {
  useEffect(() => {
   socketManagerRef.current?.disconnect();
 
-  const generation = marketGenerationRef.current;
-  const symbol = selectedSymbol;
-  const timeframe = selectedTimeframe;
-  const socketKey = `${symbol}:${timeframe}`;
+ const generation = marketGenerationRef.current;
+ const symbol = selectedSymbol;
+ const timeframe = selectedTimeframe;
+ const socketKey = `${symbol}:${timeframe}`;
+
+  if (isAnalysisOnlySymbol(symbol)) {
+    setSocketStatus("disconnected");
+    setStreamConnected(false);
+    socketManagerRef.current = null;
+    return;
+  }
 
   const manager = new MarketSocketManager({
     onMessage: (message) => {
@@ -1769,6 +1831,7 @@ useEffect(() => {
       setCandles(cachedBeforeFetch);
     }
 
+    if (!isAnalysisOnlySymbol(symbol)) {
     void getTicks(symbol, 1)
       .then((ticks) => {
         if (!isCurrentMarketContext(symbol, timeframe, generation)) {
@@ -1787,6 +1850,7 @@ useEffect(() => {
           setLatestTick(null);
         }
       });
+    }
 
     const nextCandles = await getCandles(symbol, timeframe, candleInitialLimit, { signal: controller.signal });
 
@@ -1904,6 +1968,13 @@ useEffect(() => {
   symbol = selectedSymbol
 ) {
   try {
+    if (isAnalysisOnlySymbol(symbol)) {
+      if (generation === marketGenerationRef.current && symbol === selectedSymbol) {
+        setBackendLatestTick(null);
+        setLatestTick(null);
+      }
+      return;
+    }
     const tick = await getLatestTick(symbol);
 
     if (generation !== marketGenerationRef.current || symbol !== selectedSymbol) {
@@ -2739,6 +2810,9 @@ useEffect(() => {
 }
 
   function handleTimeframeChange(nextTimeframe: Timeframe) {
+    if (selectedAnalysisOnly && nextTimeframe !== "D1") {
+      return;
+    }
     if (nextTimeframe === selectedTimeframe) {
       return;
     }
@@ -2809,13 +2883,13 @@ useEffect(() => {
         onDrawingMenuClick={() => setDrawingMenuOpen((current) => !current)}
         onMenuClick={() => setDrawerOpen(true)}
         onSystemStatusClick={() => setSystemStatusOpen(true)}
-        onSymbolChange={setSelectedSymbol}
+        onSymbolChange={handleSymbolChange}
         onTimeframeChange={handleTimeframeChange}
         selectedSymbol={selectedSymbol}
         selectedTimeframe={selectedTimeframe}
         symbolLabels={strategySymbolLabels}
         symbolStatusTones={topbarSymbolStatusTones}
-        timeframes={timeframes}
+        timeframes={visibleTimeframes}
       />
       <AccountDrawer
         activeView={activeMobileView}
@@ -2846,7 +2920,7 @@ useEffect(() => {
         {activeMobileView === "strategies" ? (
           <StrategyPanel
             symbols={chartSymbols}
-            timeframes={timeframes}
+            timeframes={visibleTimeframes}
             onChanged={() => {
               void refreshTorumV1Status();
               void refreshChartOverlays();
@@ -2883,7 +2957,7 @@ useEffect(() => {
               className={symbol === selectedSymbol ? "segment segment--active" : "segment"}
               key={symbol}
               type="button"
-              onClick={() => setSelectedSymbol(symbol)}
+              onClick={() => handleSymbolChange(symbol)}
             >
               {torumAssetLabel(torumV1Status, symbol)}
             </button>
@@ -2891,7 +2965,7 @@ useEffect(() => {
         </div>
 
         <div className="segmented-control" aria-label="Timeframe">
-          {timeframes.map((timeframe) => (
+          {visibleTimeframes.map((timeframe) => (
             <button
               className={timeframe === selectedTimeframe ? "segment segment--active" : "segment"}
               key={timeframe}
@@ -2929,6 +3003,7 @@ useEffect(() => {
         />
       </div>
 
+      {!selectedAnalysisOnly ? (
       <BuyOnlyOrderPanel
         accountMode={accountMode}
         disabledReason={symbolTradingNotice}
@@ -2941,6 +3016,7 @@ useEffect(() => {
         symbol={selectedSymbol}
         tradable={symbolTradable}
       />
+      ) : null}
 
       <section className={chartSplitCount > 1 ? "chart-panel chart-panel--split" : "chart-panel"} aria-label="Grafico">
         {chartSplitCount === 1 ? (
@@ -2966,7 +3042,7 @@ useEffect(() => {
           <div className="chart-split-pane chart-split-pane--primary">
             {chartSplitCount > 1 ? (
               <div className="chart-split-pane__controls" onPointerDown={(event) => event.stopPropagation()}>
-                <select aria-label="Simbolo grafico principal" value={selectedSymbol} onChange={(event) => setSelectedSymbol(event.target.value)}>
+                <select aria-label="Simbolo grafico principal" value={selectedSymbol} onChange={(event) => handleSymbolChange(event.target.value)}>
                   {chartSymbols.map((symbol) => (
                     <option key={symbol} value={symbol}>
                       {torumAssetLabel(torumV1Status, symbol)}
@@ -3016,7 +3092,9 @@ useEffect(() => {
             timeframe={selectedTimeframe}
             tradeLines={tradeLines}
             tradeMarkers={tradeMarkers}
+            dollarStrengthBadge={<DollarStrengthBadge />}
           />
+          {selectedAnalysisOnly ? <div className="analysis-only-pill">DXY sintetico - Solo analisis</div> : null}
           <button
             className="chart-hard-reset-button"
             type="button"
@@ -3054,7 +3132,7 @@ useEffect(() => {
               symbol={chart.symbol}
               symbolMappings={symbolMappings}
               symbolLabels={strategySymbolLabels}
-              timeframe={selectedTimeframe}
+              timeframe={chart.symbol === "DXY" ? "D1" : selectedTimeframe}
             />
           ))}
         </div>
@@ -3101,6 +3179,7 @@ useEffect(() => {
           {!symbolTradable ? <div className="notice-strip">{symbolTradingNotice}</div> : null}
         </section>
 
+        {!selectedAnalysisOnly ? (
         <BuyOnlyOrderPanel
           accountMode={accountMode}
           disabledReason={symbolTradingNotice}
@@ -3113,6 +3192,11 @@ useEffect(() => {
           symbol={selectedSymbol}
           tradable={symbolTradable}
         />
+        ) : (
+          <section className="panel">
+            <div className="notice-strip">DXY sintetico. Solo analisis.</div>
+          </section>
+        )}
 
         <PriceAlertPanel
           activeAlerts={priceAlerts}

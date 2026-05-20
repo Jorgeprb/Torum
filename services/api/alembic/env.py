@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.candles.models import Candle  # noqa: F401
 from app.db.base import Base
 from app.indicators.models import Indicator, IndicatorConfig, IndicatorValue  # noqa: F401
+from app.market_context.models import DollarStrengthSnapshot  # noqa: F401
 from app.drawings.models import ChartDrawing  # noqa: F401
 from app.strategies.models import StrategyConfig, StrategyDefinition, StrategyRun, StrategySettings, StrategySignal  # noqa: F401
 from app.strategies.ath_models import SymbolAthLevel  # noqa: F401

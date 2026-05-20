@@ -106,9 +106,9 @@ def test_import_json_generates_default_usd_high_zones() -> None:
     response = NewsService(db).import_json(_news_payload(datetime.now(UTC) + timedelta(hours=1)))
 
     assert response.saved == 1
-    assert response.zones_generated == 4
+    assert response.zones_generated == 2
     assert db.query(NewsEvent).count() == 1
-    assert db.query(NoTradeZone).count() == 4
+    assert db.query(NoTradeZone).count() == 2
 
 
 def test_existing_news_settings_adds_missing_xaueur_zone() -> None:
@@ -119,7 +119,7 @@ def test_existing_news_settings_adds_missing_xaueur_zone() -> None:
 
     response = NewsService(db).import_json(_news_payload(datetime.now(UTC) + timedelta(hours=1)))
 
-    assert response.zones_generated == 4
+    assert response.zones_generated == 2
     assert "XAUEUR" in get_global_news_settings(db).affected_symbols
     assert db.query(NoTradeZone).filter(NoTradeZone.internal_symbol == "XAUEUR").count() == 1
 
@@ -246,7 +246,7 @@ def test_regenerate_zones_uses_new_minutes() -> None:
     settings, regenerated = NewsService(db).update_settings(NewsSettingsUpdate(minutes_before=30, minutes_after=90))
 
     zone = db.query(NoTradeZone).filter(NoTradeZone.internal_symbol == "XAUUSD").one()
-    assert regenerated == 4
+    assert regenerated == 2
     assert settings.minutes_before == 30
     assert abs((zone.start_time.replace(tzinfo=UTC) - (event_time - timedelta(minutes=30))).total_seconds()) < 1
     assert abs((zone.end_time.replace(tzinfo=UTC) - (event_time + timedelta(minutes=90))).total_seconds()) < 1
@@ -301,9 +301,9 @@ def test_sync_provider_mock_filters_usd_high_and_generates_zones() -> None:
 
     assert response.received == 2
     assert response.saved == 1
-    assert response.zones_generated == 4
+    assert response.zones_generated == 2
     assert db.query(NewsEvent).count() == 1
-    assert db.query(NoTradeZone).count() == 4
+    assert db.query(NoTradeZone).count() == 2
 
 
 def test_manual_risk_manager_does_not_block_when_news_block_enabled() -> None:

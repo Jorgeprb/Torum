@@ -10,7 +10,7 @@ class ExampleSmaDxyFilter:
     version = "0.1.0"
     description = "Reads DXY D1 SMA30 context and returns a NONE signal with dollar strength metadata."
     default_params: dict[str, Any] = {"dxy_symbol": "DXY", "dxy_timeframe": "D1", "sma_period": 30}
-    supported_symbols = ("XAUUSD", "XAUEUR", "XAUAUD", "XAUJPY")
+    supported_symbols = ("XAUUSD", "XAUEUR")
     supported_timeframes = ("M1", "M5", "H1", "H2", "H3", "H4", "D1", "W1")
     required_indicators = ("SMA:DXY:D1:30",)
     required_context = ("candles", "indicators")

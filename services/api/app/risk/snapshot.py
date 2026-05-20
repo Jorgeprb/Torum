@@ -61,6 +61,10 @@ class RiskSnapshot:
 _SNAPSHOTS: dict[str, RiskSnapshot] = {}
 
 
+def clear_risk_snapshot_cache() -> None:
+    _SNAPSHOTS.clear()
+
+
 class RiskSnapshotService:
     def __init__(self, db: Session) -> None:
         self.db = db

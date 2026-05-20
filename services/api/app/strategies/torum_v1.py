@@ -31,6 +31,7 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "pullback_max_count": 10,
     "pullback_min_pct": 0.0,
     "pullback_threshold_pct": 0.0,
+    "pullback_entry_min_pct": 0.20,
     "pullback_lookback_bars": 12,
     "pullback_swing_confirm_bars": 1,
     "pullback_allow_peak_extension": True,
@@ -47,7 +48,18 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "pullback_opacity": 0.95,
     "show_pullback_debug": False,
     "require_zone": True,
-    "one_position_per_symbol": True,
+    "one_position_per_symbol": False,
+    "usd_strength_filter_enabled": True,
+    "usd_strength_apply_to_symbols": ["XAUUSD", "XAUEUR"],
+    "usd_strength_mode": "only_operate_when_weak",
+    "usd_sma_period": 30,
+    "usd_neutral_band_points": 0.10,
+    "usd_allow_when_neutral": False,
+    "usd_strong_drop_override_enabled": True,
+    "usd_strong_drop_lookback_days": 3,
+    "usd_strong_drop_min_pct": 0.45,
+    "usd_strong_drop_require_bearish_close": True,
+    "usd_strength_strict": False,
     "assets": {
         "XAUEUR": {
             "enabled": True,
@@ -468,6 +480,18 @@ def is_candle_inside_operation_zone(candle: object, zone: TorumV1OperationZone, 
     return zone.price_min <= close_price <= zone.price_max
 
 
+def is_pullback_low_inside_operation_zone(pullback: TorumV1Pullback, zone: TorumV1OperationZone, timeframe_seconds: int = 300) -> bool:
+    del timeframe_seconds
+    low_time = int(_as_utc(pullback.pullback_low_time).timestamp())
+    low_price = float(pullback.pullback_low)
+
+    if low_time < zone.time1:
+        return False
+    if zone.time2 is not None and low_time > zone.time2:
+        return False
+    return zone.price_min <= low_price <= zone.price_max
+
+
 def should_buy_torum_v1(
     *,
     symbol: str,
@@ -503,7 +527,10 @@ def should_buy_torum_v1(
     if not _bool(params.get("pullback_enabled"), True):
         return TorumV1BuyDecision(False, "pullback_disabled")
 
-    threshold = _pullback_threshold(params)
+    entry_threshold = _pullback_entry_threshold(params)
+    if entry_threshold <= 0:
+        return TorumV1BuyDecision(False, "missing_pullback_entry_min_pct")
+    threshold = entry_threshold
     lookback = _int_param(params.get("pullback_lookback_bars"), 12)
     recovery_pct = _nonnegative_float_param(params.get("pullback_recovery_pct"), 0.10)
     confirmation_bars = _int_param(params.get("pullback_end_confirmation_bars"), 1)
@@ -527,6 +554,7 @@ def should_buy_torum_v1(
             allow_peak_extension=allow_peak_extension,
         )
         if not pullback.is_live and pullback.pullback_low_time < confirmation_time
+        and pullback.pullback_pct >= entry_threshold
     ]
     if not pullbacks:
         return TorumV1BuyDecision(False, "missing_pullback")
@@ -536,21 +564,24 @@ def should_buy_torum_v1(
     zones_enabled = _bool(params.get("enable_operation_zones"), True)
     matching_zone = None
     if zones_enabled:
-        matching_zone = next((zone for zone in operation_zones if zone.direction == "BUY" and is_candle_inside_operation_zone(confirmation, zone)), None)
+        matching_zone = next(
+            (
+                zone
+                for zone in operation_zones
+                if zone.direction == "BUY" and is_pullback_low_inside_operation_zone(pullback, zone)
+            ),
+            None,
+        )
 
     if require_zone and matching_zone is None:
-        return TorumV1BuyDecision(False, "confirmation_outside_operation_zone", confirmation_time, pullback)
+        return TorumV1BuyDecision(False, "pullback_low_outside_operation_zone", confirmation_time, pullback)
 
-    confirmation_close = float(confirmation.close)
-    support_price = current_price if current_price is not None else confirmation_close
-    matching_support = next(
-        (
-            support
-            for support in support_zones or []
-            if support.enabled and support.lower_price <= support_price <= support.upper_price
-        ),
-        None,
-    )
+    last_pullback_time = _int_or_none(params.get("last_signal_pullback_low_time"))
+    pullback_low_time_int = int(pullback.pullback_low_time.timestamp())
+    if last_pullback_time == pullback_low_time_int:
+        return TorumV1BuyDecision(False, "duplicate_signal_pullback", confirmation_time, pullback, matching_zone)
+
+    matching_support = _matching_support_for_pullback(pullback, support_zones or [])
     desired_multiplier = desired_multiplier_for_support(
         matching_support.level if matching_support is not None else None,
         open_positions or [],
@@ -559,10 +590,14 @@ def should_buy_torum_v1(
     metadata = {
         "symbol": symbol.upper(),
         "entry_timeframe": "M5",
+        "entry_setup": "pullback_low_inside_zone_bullish_confirmation",
         "confirmation_candle_time": confirmation_time_int,
         "pullback_pct": pullback.pullback_pct,
         "swing_high": pullback.swing_high,
+        "swing_high_time": int(pullback.swing_high_time.timestamp()),
         "pullback_low": pullback.pullback_low,
+        "pullback_low_time": pullback_low_time_int,
+        "pullback_entry_min_pct": entry_threshold,
         "operation_zone_id": matching_zone.drawing_id if matching_zone else None,
         "support_zone_id": matching_support.drawing_id if matching_support else None,
         "support_level": matching_support.level if matching_support else None,
@@ -577,6 +612,18 @@ def desired_multiplier_for_support(level: int | None, open_positions: list[objec
     if level == 3:
         return 3 if len(open_positions) == 0 else 2
     return 1
+
+
+def _matching_support_for_pullback(pullback: TorumV1Pullback, support_zones: list[TorumV1SupportZone]) -> TorumV1SupportZone | None:
+    low = float(pullback.pullback_low)
+    matches = [
+        support
+        for support in support_zones
+        if support.enabled and support.lower_price <= low <= support.upper_price
+    ]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda support: (-support.level, abs(float(support.price) - low)))[0]
 
 
 def pullback_debug_payload(
@@ -879,6 +926,12 @@ def _pullback_threshold(params: dict[str, Any]) -> float:
     if "pullback_min_pct" in params:
         return _nonnegative_float_param(params.get("pullback_min_pct"), 0.0)
     return _nonnegative_float_param(params.get("pullback_threshold_pct"), 0.0)
+
+
+def _pullback_entry_threshold(params: dict[str, Any]) -> float:
+    if "pullback_entry_min_pct" in params:
+        return _nonnegative_float_param(params.get("pullback_entry_min_pct"), 0.20)
+    return _nonnegative_float_param(params.get("pullback_threshold_pct"), 0.20)
 
 
 def _int_or_none(value: object) -> int | None:

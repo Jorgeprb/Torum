@@ -81,8 +81,6 @@ Fase 2 incluye un generador mock backend. Genera ticks para:
 
 - `XAUUSD`
 - `XAUEUR`
-- `XAUAUD`
-- `XAUJPY`
 
 Los ticks mock usan exactamente el mismo camino que usara MT5:
 

@@ -226,7 +226,8 @@ export function MarketChart({
   showFutureNewsZones = true,
   autoExtendToFutureNews = true,
   pullbackDebugVisible = true,
-  onPullbackDebugToggle
+  onPullbackDebugToggle,
+  dollarStrengthBadge
 }: MarketChartProps) {
   // ── Refs ───────────────────────────────────────────────────────────────────
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1697,6 +1698,7 @@ export function MarketChart({
         onStyleButton={handleSelectedStyleButton}
         onDeleteButton={handleSelectedDeleteButton}
       />
+      {dollarStrengthBadge}
       <DrawingStyleEditor
         styleEditorTarget={styleEditorTarget}
         drawings={drawings}

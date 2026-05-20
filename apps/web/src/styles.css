@@ -1681,6 +1681,132 @@ button.system-status-card:disabled {
   background: rgba(12, 28, 48, 0.92);
 }
 
+.dollar-strength {
+  position: absolute;
+  right: calc(var(--chart-price-scale-width) + 12px);
+  bottom: 18px;
+  z-index: 34;
+  pointer-events: auto;
+}
+
+.dollar-strength__button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(24, 30, 33, 0.92);
+  color: #edf6f0;
+  font-size: 1.08rem;
+  font-weight: 950;
+  line-height: 1;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.36);
+}
+
+.dollar-strength__button--allowed {
+  border-color: rgba(45, 212, 117, 0.95);
+  color: #2dd475;
+  box-shadow: 0 0 16px rgba(45, 212, 117, 0.22);
+}
+
+.dollar-strength__button--blocked {
+  border-color: rgba(244, 93, 93, 0.95);
+  color: #ff6f7c;
+  box-shadow: 0 0 16px rgba(244, 93, 93, 0.22);
+}
+
+.dollar-strength__button--unknown {
+  border-color: rgba(155, 164, 173, 0.8);
+  color: #aab3bc;
+}
+
+.dollar-strength__popover {
+  position: absolute;
+  right: 0;
+  bottom: 42px;
+  width: min(310px, calc(100vw - 24px));
+  padding: 12px;
+  border: 1px solid rgba(70, 84, 94, 0.9);
+  border-radius: 8px;
+  background: rgba(14, 18, 20, 0.96);
+  color: #edf2ef;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+.dollar-strength__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.dollar-strength__title button,
+.dollar-strength__refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid rgba(75, 164, 255, 0.5);
+  border-radius: 7px;
+  background: rgba(20, 32, 40, 0.9);
+  color: #78b8ff;
+}
+
+.dollar-strength__metrics {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.dollar-strength__metrics div {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.dollar-strength__metrics dt {
+  color: #8e9aa3;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.dollar-strength__metrics dd {
+  margin: 0;
+  color: #f5f8f6;
+  font-size: 0.78rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.dollar-strength__error {
+  margin: 8px 0 0;
+  color: #ff9aa3;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.dollar-strength__refresh {
+  width: 100%;
+  height: 34px;
+  margin-top: 10px;
+  font-weight: 900;
+}
+
+.analysis-only-pill {
+  position: absolute;
+  left: 12px;
+  bottom: 16px;
+  z-index: 31;
+  padding: 6px 9px;
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  border-radius: 999px;
+  background: rgba(14, 18, 20, 0.72);
+  color: #b9c2ca;
+  font-size: 0.72rem;
+  font-weight: 900;
+  pointer-events: none;
+}
+
 .chart-object-delete-button {
   right: 182px;
   width: 38px;

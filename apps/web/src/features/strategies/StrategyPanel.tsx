@@ -25,6 +25,7 @@ interface StrategyPanelProps {
 
 type NumericParamKey =
   | "pullback_min_pct"
+  | "pullback_entry_min_pct"
   | "pullback_max_count"
   | "pullback_lookback_bars"
   | "pullback_recovery_pct"
@@ -33,7 +34,11 @@ type NumericParamKey =
   | "pullback_swing_confirm_bars"
   | "pullback_label_decimals"
   | "pullback_line_width"
-  | "pullback_opacity";
+  | "pullback_opacity"
+  | "usd_sma_period"
+  | "usd_neutral_band_points"
+  | "usd_strong_drop_lookback_days"
+  | "usd_strong_drop_min_pct";
 
 interface NumericParamConfig {
   key: NumericParamKey;
@@ -48,6 +53,7 @@ interface NumericParamConfig {
 
 const numericParams: NumericParamConfig[] = [
   { key: "pullback_min_pct", label: "PB min %", help: "Pullback minimo para pintar/calcular. 0 muestra todos.", min: 0, step: "0.01", decimals: 3 },
+  { key: "pullback_entry_min_pct", label: "PB entrada %", help: "Pullback minimo para que el bot pueda entrar. No afecta necesariamente al PB visual.", min: 0.01, max: 20, step: "0.01", decimals: 3 },
   { key: "pullback_max_count", label: "Max PB", help: "Cantidad maxima de pullbacks recientes a mostrar.", min: 1, max: 50, step: "1", integer: true },
   { key: "pullback_lookback_bars", label: "Lookback M5", help: "Velas usadas para buscar estructura/pullback.", min: 2, max: 300, step: "1", integer: true },
   { key: "pullback_recovery_pct", label: "Recuperacion %", help: "Rebote necesario desde el minimo para cerrar el pullback.", min: 0, max: 20, step: "0.01", decimals: 3 },
@@ -57,6 +63,10 @@ const numericParams: NumericParamConfig[] = [
   { key: "pullback_label_decimals", label: "Decimales etiqueta", help: "Decimales del porcentaje mostrado.", min: 0, max: 6, step: "1", integer: true },
   { key: "pullback_line_width", label: "Ancho linea", help: "Grosor visual.", min: 1, max: 8, step: "1", integer: true },
   { key: "pullback_opacity", label: "Opacidad", help: "Transparencia visual.", min: 0.1, max: 1, step: "0.05", decimals: 2 },
+  { key: "usd_sma_period", label: "SMA DXY", help: "Periodo diario usado para la media del DXY sintetico.", min: 5, max: 200, step: "1", integer: true },
+  { key: "usd_neutral_band_points", label: "Banda neutra DXY", help: "Distancia entre DXY y SMA donde el dolar se considera neutro.", min: 0, max: 5, step: "0.01", decimals: 3 },
+  { key: "usd_strong_drop_lookback_days", label: "Dias caida fuerte", help: "Dias usados para medir caida fuerte del DXY.", min: 1, max: 30, step: "1", integer: true },
+  { key: "usd_strong_drop_min_pct", label: "Caida fuerte %", help: "Caida minima para permitir compras aunque DXY este sobre SMA30.", min: 0, max: 10, step: "0.01", decimals: 3 },
 ];
 
 const booleanParamHelps: Record<string, string> = {
@@ -71,6 +81,11 @@ const booleanParamHelps: Record<string, string> = {
   pullback_allow_peak_extension: "Si aparece un high mayor dentro del mismo tramo, mueve el inicio del PB a ese maximo.",
   require_zone: "Bot solo opera dentro de zona operativa.",
   one_position_per_symbol: "Limita entradas simultaneas del bot.",
+  usd_strength_filter_enabled: "DXY > SMA30 bloquea compras automaticas. Solo afecta al BOT.",
+  usd_allow_when_neutral: "Permite operar si DXY esta cerca de SMA30.",
+  usd_strong_drop_override_enabled: "Si DXY cae fuerte, permite operar aunque este sobre SMA30.",
+  usd_strong_drop_require_bearish_close: "Exige vela diaria bajista para activar la caida fuerte.",
+  usd_strength_strict: "Si DXY es desconocido, bloquea el BOT.",
 };
 
 function defaultTorumParams(symbol: string): Record<string, unknown> {
@@ -86,6 +101,7 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
     pullback_max_count: 10,
     pullback_min_pct: 0,
     pullback_threshold_pct: 0,
+    pullback_entry_min_pct: 0.20,
     pullback_lookback_bars: 12,
     pullback_swing_confirm_bars: 1,
     pullback_allow_peak_extension: true,
@@ -102,7 +118,18 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
     pullback_opacity: 0.95,
     show_pullback_debug: false,
     require_zone: true,
-    one_position_per_symbol: true
+    one_position_per_symbol: false,
+    usd_strength_filter_enabled: true,
+    usd_strength_apply_to_symbols: ["XAUUSD", "XAUEUR"],
+    usd_strength_mode: "only_operate_when_weak",
+    usd_sma_period: 30,
+    usd_neutral_band_points: 0.10,
+    usd_allow_when_neutral: false,
+    usd_strong_drop_override_enabled: true,
+    usd_strong_drop_lookback_days: 3,
+    usd_strong_drop_min_pct: 0.45,
+    usd_strong_drop_require_bearish_close: true,
+    usd_strength_strict: false
   };
 }
 
@@ -342,6 +369,11 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
                 ["pullback_allow_peak_extension", "Permitir actualizar maximo", torumParams.pullback_allow_peak_extension !== false],
                 ["require_zone", "Requerir zona", torumParams.require_zone !== false],
                 ["one_position_per_symbol", "Una posicion por activo", torumParams.one_position_per_symbol !== false],
+                ["usd_strength_filter_enabled", "Filtro fortaleza USD", torumParams.usd_strength_filter_enabled !== false],
+                ["usd_allow_when_neutral", "Permitir dolar neutro", torumParams.usd_allow_when_neutral === true],
+                ["usd_strong_drop_override_enabled", "Permitir caida fuerte DXY", torumParams.usd_strong_drop_override_enabled !== false],
+                ["usd_strong_drop_require_bearish_close", "DXY diario bajista", torumParams.usd_strong_drop_require_bearish_close !== false],
+                ["usd_strength_strict", "Bloquear si DXY desconocido", torumParams.usd_strength_strict === true],
               ].map(([key, label, checked]) => (
                 <label className="toggle-line strategy-param-line" key={String(key)} title={booleanParamHelps[String(key)]}>
                   <input
@@ -405,6 +437,8 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
               <p>Compra solo dentro de rectangulo operativo activo si exigir zona esta activo.</p>
               <p>Soportes S1/S2/S3 aumentan agresividad si hay capacidad.</p>
               <p>Zonas ATH limitan BOT: roja bloquea, naranja 1, amarilla 2, verde 3 lotajes.</p>
+              <p>Filtro USD: si DXY esta sobre SMA30, bloquea compras del BOT.</p>
+              <p>Si DXY cae fuerte, puede permitir compras aunque este sobre SMA30.</p>
               <p>Riesgo BOT: perdida potencial 30% no puede superar 50% del balance.</p>
             </div>
           </section>

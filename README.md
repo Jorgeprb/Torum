@@ -518,6 +518,8 @@ Incluido:
 - DXY como activo de analisis no operable.
 - Indicadores backend con plugin SMA.
 - SMA30 DXY/D1 como overlay de grafico.
+- DXY sintetico diario desde EURUSD, USDJPY, GBPUSD, USDCAD, USDSEK y USDCHF.
+- Filtro USD de Torum V1: bloquea solo BOT si el dolar esta fuerte.
 - Base para indicadores tipo linea, zona, marker, banda y shape.
 - Dibujos persistentes por usuario/simbolo/timeframe.
 - Herramientas iniciales: horizontal, vertical, tendencia, rectangulo, texto y zona manual.

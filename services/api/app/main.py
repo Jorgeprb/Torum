@@ -18,6 +18,8 @@ from app.core.logging import configure_logging
 from app.market_data.mock import MockMarketService
 from app.market_data.diagnostics_router import router as market_diagnostics_router
 from app.market_data.router import router as mock_market_router
+from app.market_context.routes import router as market_context_router
+from app.market_context.scheduler import dollar_strength_scheduler
 from app.mt5.router import router as mt5_router
 from app.news.routes import router as news_router
 from app.news.scheduler import news_provider_scheduler
@@ -52,10 +54,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     seed_default_indicators()
     seed_strategy_engine_defaults()
     news_provider_scheduler.start()
+    dollar_strength_scheduler.start()
     logger.info("Torum API started")
     try:
         yield
     finally:
+        dollar_strength_scheduler.stop()
         news_provider_scheduler.stop()
         await app.state.mock_market.stop()
 
@@ -82,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(candles_router, prefix="/api")
     app.include_router(mock_market_router, prefix="/api")
     app.include_router(market_diagnostics_router, prefix="/api")
+    app.include_router(market_context_router, prefix="/api")
     app.include_router(mt5_router, prefix="/api")
     app.include_router(news_router, prefix="/api")
     app.include_router(no_trade_zones_router, prefix="/api")

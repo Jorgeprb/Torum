@@ -10,6 +10,7 @@ from app.orders.service import OrderManager
 from app.risk.manager import RiskManager
 from app.settings.trading_service import get_global_trading_settings
 from app.strategies.ath import latest_executable_price, plan_torum_v1_bot_exposure
+from app.market_context.dollar_strength import DollarStrengthService, usd_strength_decision_for_symbol
 from app.strategies.engine import StrategyContextBuilder
 from app.strategies.models import StrategyConfig, StrategyRun, StrategySignal
 from app.strategies.registry import strategy_registry
@@ -73,6 +74,27 @@ class StrategyRunner:
                 )
 
             if signal.strategy_key == "torum_v1" and signal.signal_type == "ENTRY" and signal.side == "BUY":
+                params = (signal.metadata_json or {}).get("params")
+                usd_snapshot = DollarStrengthService(self.db).latest_snapshot_read()
+                usd_decision = usd_strength_decision_for_symbol(
+                    signal.internal_symbol,
+                    params if isinstance(params, dict) else {},
+                    usd_snapshot,
+                )
+                signal.metadata_json = {**(signal.metadata_json or {}), **usd_decision.metadata}
+                if not usd_decision.allowed:
+                    signal.status = "REJECTED_BY_RISK"
+                    signal.risk_result_json = {"allowed": False, "reasons": [usd_decision.reason], "warnings": []}
+                    run.status = "FINISHED"
+                    run.finished_at = datetime.now(UTC)
+                    self.db.commit()
+                    return StrategyRunResult(
+                        ok=False,
+                        run=StrategyRunRead.model_validate(run),
+                        signal=StrategySignalRead.model_validate(signal),
+                        message="Signal rejected by USD strength filter",
+                        reasons=[usd_decision.reason],
+                    )
                 trading_settings = _strategy_trading_settings(get_global_trading_settings(self.db), config.mode)
                 latest_price = latest_executable_price(context.latest_tick, "BUY")
                 account = mt5_status_store.get().account
@@ -86,7 +108,14 @@ class StrategyRunner:
                     trading_settings=trading_settings,
                     symbol_mapping=get_symbol_by_internal(self.db, signal.internal_symbol),
                 )
-                signal.metadata_json = {**(signal.metadata_json or {}), "bot_exposure_plan": asdict(plan)}
+                signal.metadata_json = {
+                    **(signal.metadata_json or {}),
+                    "desired_multiplier": int((signal.metadata_json or {}).get("desired_multiplier") or 1),
+                    "accepted_multiplier": plan.multiplier,
+                    "accepted_volume": plan.volume,
+                    "plan_reason": plan.reason,
+                    "bot_exposure_plan": asdict(plan),
+                }
                 if not plan.allowed:
                     signal.status = "REJECTED_BY_RISK"
                     signal.risk_result_json = {"allowed": False, "reasons": [plan.reason], "warnings": []}

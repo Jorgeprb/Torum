@@ -17,16 +17,20 @@ from app.orders.models import Order  # noqa: F401
 from app.risk.manager import RiskManager
 from app.settings.trading_settings import TradingSettings
 from app.strategies.ath import ath_price_zones, get_or_update_symbol_ath, set_symbol_ath_level
-from app.strategies.models import StrategyConfig
+from app.strategies.models import StrategyConfig, StrategySignal
 from app.strategies.notifications import send_torum_v1_unlock_notifications
 from app.strategies.repository import get_global_strategy_settings
 from app.strategies.runner import StrategyRunner
+from app.strategies.service import StrategyCatalogService
+from app.market_context.models import DollarStrengthSnapshot
 from app.strategies.torum_v1 import (
     TorumV1OperationZone,
+    TorumV1SupportZone,
     TorumV1StatusService,
     detect_pullbacks,
     is_bullish_confirmation,
     is_candle_inside_operation_zone,
+    is_pullback_low_inside_operation_zone,
     operation_zones_from_drawings,
     pullback_debug_payload,
     should_buy_torum_v1,
@@ -765,7 +769,7 @@ def test_pullback_detected_bullish_outside_zone_no_buy() -> None:
     )
 
     assert decision.should_buy is False
-    assert decision.reason == "confirmation_outside_operation_zone"
+    assert decision.reason == "pullback_low_outside_operation_zone"
 
 
 def test_pullback_detected_bullish_inside_zone_buy() -> None:
@@ -786,6 +790,153 @@ def test_pullback_detected_bullish_inside_zone_buy() -> None:
 
     assert decision.should_buy is True
     assert decision.zone is zone
+
+
+def test_pullback_entry_min_pct_blocks_small_pullback_inside_zone() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.81, 99.84),
+        _m5_candle(_madrid(1, 9, 10), 99.84, 99.95, 99.82, 99.94),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99, 101)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is False
+    assert decision.reason == "missing_pullback"
+
+
+def test_pullback_low_inside_zone_buys_even_when_confirmation_outside_zone() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9, 4).timestamp()), int(_madrid(1, 9, 6).timestamp()), 99.65, 99.75)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is True
+    assert decision.zone is zone
+    assert decision.metadata["entry_setup"] == "pullback_low_inside_zone_bullish_confirmation"
+    assert decision.metadata["pullback_low_time"] == int(_madrid(1, 9, 5).timestamp())
+
+
+def test_confirmation_inside_zone_but_pullback_low_outside_no_buy() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9, 10).timestamp()), int(_madrid(1, 9, 20).timestamp()), 99.85, 100.0)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is False
+    assert decision.reason == "pullback_low_outside_operation_zone"
+
+
+def test_pullback_low_inside_by_price_but_outside_by_time_no_buy() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9, 6).timestamp()), int(_madrid(1, 9, 20).timestamp()), 99.65, 99.75)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is False
+    assert decision.reason == "pullback_low_outside_operation_zone"
+
+
+def test_pullback_low_inside_by_time_but_outside_by_price_no_buy() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9, 4).timestamp()), int(_madrid(1, 9, 6).timestamp()), 98.0, 99.0)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+    )
+
+    assert decision.should_buy is False
+    assert decision.reason == "pullback_low_outside_operation_zone"
+
+
+def test_pullback_low_zone_helper_accepts_open_ended_time2() -> None:
+    pullback = detect_pullbacks(
+        [
+            _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+            _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+            _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+        ],
+        threshold=0.2,
+    )[0]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), None, 99.65, 99.75)
+
+    assert is_pullback_low_inside_operation_zone(pullback, zone) is True
+
+
+def test_support_level_uses_pullback_low_for_desired_multiplier() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99.65, 99.75)
+    s1 = TorumV1SupportZone("s1", 1, 99.7, 99.65, 99.75, 0.2)
+    s2 = TorumV1SupportZone("s2", 2, 99.7, 99.65, 99.75, 0.2)
+    s3 = TorumV1SupportZone("s3", 3, 99.7, 99.65, 99.75, 0.2)
+
+    base_params = {"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12, "one_position_per_symbol": False}
+    s1_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s1], params=base_params, now=_madrid(1, 9, 16))
+    s2_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s2], params=base_params, now=_madrid(1, 9, 16))
+    s3_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s3], params=base_params, now=_madrid(1, 9, 16))
+    s3_with_open = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        support_zones=[s3],
+        params=base_params,
+        now=_madrid(1, 9, 16),
+        open_positions=[object()],
+    )
+
+    assert s1_decision.metadata["desired_multiplier"] == 1
+    assert s2_decision.metadata["desired_multiplier"] == 2
+    assert s3_decision.metadata["desired_multiplier"] == 3
+    assert s3_with_open.metadata["desired_multiplier"] == 2
 
 
 def test_rectangle_not_activated_does_not_count() -> None:
@@ -866,6 +1017,7 @@ def test_locked_asset_rejects_strategy_order_no_manual_block() -> None:
     _m5(db, "XAUUSD", _madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8)
     _m5(db, "XAUUSD", _madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9)
     db.commit()
+    StrategyCatalogService(db).register_defaults()
 
     result = StrategyRunner(db).run_config(config, db.get(User, 1))
     manual = RiskManager(db).evaluate(
@@ -879,3 +1031,64 @@ def test_locked_asset_rejects_strategy_order_no_manual_block() -> None:
     assert result.ok is False
     assert result.order_id is None
     assert manual.allowed is True
+
+
+def test_torum_v1_usd_strong_snapshot_blocks_bot_signal() -> None:
+    db = _session()
+    config = _config(db, "XAUUSD", "H2")
+    config.params_json = {
+        **config.params_json,
+        "enable_operation_zones": True,
+        "require_zone": True,
+        "pullback_entry_min_pct": 0.2,
+        "pullback_lookback_bars": 12,
+        "usd_strength_filter_enabled": True,
+    }
+    db.add(
+        DollarStrengthSnapshot(
+            symbol="DXY",
+            dxy_value=101.0,
+            sma30=100.0,
+            difference=1.0,
+            state="STRONG",
+            trading_allowed=False,
+            reason="dxy_above_sma30",
+            slope_days=3,
+            slope_pct=0.5,
+            strong_drop_override_active=False,
+            source="synthetic_mt5",
+            missing_symbols=[],
+            symbols_used=["EURUSD", "USDJPY", "GBPUSD", "USDCAD", "USDSEK", "USDCHF"],
+            stale=False,
+        )
+    )
+    db.add(
+        ChartDrawing(
+            user_id=1,
+            internal_symbol="XAUUSD",
+            timeframe="M5",
+            drawing_type="rectangle",
+            name=None,
+            payload_json={"time1": int(_madrid(1, 9).timestamp()), "time2": int(_madrid(1, 10).timestamp()), "price1": 99, "price2": 101},
+            style_json={},
+            metadata_json={"torum_v1_zone_enabled": True, "zone_type": "OPERATION_ZONE", "direction": "BUY"},
+            locked=False,
+            visible=True,
+            source="MANUAL",
+        )
+    )
+    _m5(db, "XAUUSD", _madrid(1, 9), 100, 100, 99.9, 99.95)
+    _m5(db, "XAUUSD", _madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8)
+    _m5(db, "XAUUSD", _madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9)
+    db.commit()
+    StrategyCatalogService(db).register_defaults()
+
+    result = StrategyRunner(db).run_config(config, db.get(User, 1))
+
+    assert result.ok is False
+    assert result.order_id is None
+    assert result.reasons == ["usd_strength_blocked"]
+    assert result.signal is not None
+    stored_signal = db.query(StrategySignal).order_by(StrategySignal.id.desc()).first()
+    assert stored_signal is not None
+    assert stored_signal.metadata_json["usd_strength_state"] == "STRONG"

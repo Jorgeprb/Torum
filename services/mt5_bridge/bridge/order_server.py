@@ -2,7 +2,7 @@ import logging
 from threading import Thread
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from bridge.account_state import AccountState
 from bridge.config import BridgeSettings
@@ -55,6 +55,15 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
         if mt5_positions is None:
             return []
         return [position._asdict() if hasattr(position, "_asdict") else dict(position) for position in mt5_positions]
+
+    @app.get("/rates/{broker_symbol}")
+    def rates(
+        broker_symbol: str,
+        timeframe: str = Query(default="D1"),
+        count: int = Query(default=120, ge=1, le=500),
+        start_pos: int = Query(default=1, ge=0),
+    ) -> list[dict[str, object]]:
+        return mt5_client.get_rates(broker_symbol, timeframe=timeframe, count=count, start_pos=start_pos)
 
     @app.get("/settings/order-execution", response_model=OrderExecutionSettingsResponse)
     def get_order_execution_settings() -> OrderExecutionSettingsResponse:

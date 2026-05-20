@@ -23,6 +23,7 @@ class TorumV1Strategy:
         "pullback_max_count": 10,
         "pullback_min_pct": 0.0,
         "pullback_threshold_pct": 0.0,
+        "pullback_entry_min_pct": 0.20,
         "pullback_lookback_bars": 12,
         "pullback_recovery_pct": 0.10,
         "pullback_end_confirmation_bars": 1,
@@ -37,7 +38,18 @@ class TorumV1Strategy:
         "pullback_opacity": 0.95,
         "show_pullback_debug": False,
         "require_zone": True,
-        "one_position_per_symbol": True,
+        "one_position_per_symbol": False,
+        "usd_strength_filter_enabled": True,
+        "usd_strength_apply_to_symbols": ["XAUUSD", "XAUEUR"],
+        "usd_strength_mode": "only_operate_when_weak",
+        "usd_sma_period": 30,
+        "usd_neutral_band_points": 0.10,
+        "usd_allow_when_neutral": False,
+        "usd_strong_drop_override_enabled": True,
+        "usd_strong_drop_lookback_days": 3,
+        "usd_strong_drop_min_pct": 0.45,
+        "usd_strong_drop_require_bearish_close": True,
+        "usd_strength_strict": False,
     }
     supported_symbols = ("XAUEUR", "XAUUSD")
     supported_timeframes = ("H2", "H3", "M5")
@@ -65,7 +77,7 @@ class TorumV1Strategy:
             params=params,
             now=context.now,
             current_price=latest_executable_price(context.latest_tick, "BUY"),
-            open_positions=context.open_positions if params.get("one_position_per_symbol", True) else [],
+            open_positions=context.open_positions,
         )
         if not decision.should_buy:
             return StrategySignalData(
@@ -82,6 +94,8 @@ class TorumV1Strategy:
             context.config.params_json = {
                 **(context.config.params_json or {}),
                 "last_signal_candle_time": int(decision.confirmation_candle_time.timestamp()),
+                "last_signal_pullback_low_time": int(decision.pullback.pullback_low_time.timestamp()) if decision.pullback is not None else None,
+                "last_signal_operation_zone_id": decision.zone.drawing_id if decision.zone is not None else None,
             }
 
         return StrategySignalData(

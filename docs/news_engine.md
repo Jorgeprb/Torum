@@ -37,7 +37,7 @@ country = US / United States
 Las noticias USD de alto impacto afectan a:
 
 ```text
-XAUUSD, XAUEUR, XAUAUD, XAUJPY
+XAUUSD, XAUEUR
 ```
 
 Por defecto, cada noticia crea zonas desde 60 minutos antes hasta 60 minutos despues.
@@ -70,7 +70,7 @@ Campos principales:
   "currencies_filter": ["USD"],
   "countries_filter": ["US", "United States"],
   "impact_filter": ["HIGH"],
-  "affected_symbols": ["XAUUSD", "XAUEUR", "XAUAUD", "XAUJPY"]
+  "affected_symbols": ["XAUUSD", "XAUEUR"]
 }
 ```
 
@@ -115,7 +115,7 @@ El sync usa el mismo filtrado de `proba.py`:
 Luego crea o actualiza `news_events` y regenera `no_trade_zones` para:
 
 ```text
-XAUUSD, XAUEUR, XAUAUD, XAUJPY
+XAUUSD, XAUEUR
 ```
 
 La deduplicacion usa primero:

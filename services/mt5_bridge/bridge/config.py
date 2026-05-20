@@ -39,7 +39,7 @@ class BridgeSettings(BaseSettings):
     mt5_market_data_only: bool = True
     mt5_symbols: str = ""
     mt5_fallback_symbol_mappings: str = Field(
-        default="XAUUSD:XAUUSD,XAUEUR:XAUEUR,XAUAUD:XAUAUD,XAUJPY:XAUJPY,DXY:DXY"
+        default="XAUUSD:XAUUSD,XAUEUR:XAUEUR"
     )
     mt5_bridge_host: str = "127.0.0.1"
     mt5_bridge_port: int = 9100

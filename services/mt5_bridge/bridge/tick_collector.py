@@ -120,6 +120,9 @@ class TickCollector:
                 mapping.tradable,
                 mapping.analysis_only,
             )
+            if mapping.analysis_only:
+                logger.info("Skipping analysis-only symbol in tick stream: %s", mapping.internal_symbol)
+                continue
             if self.mt5_client.select_symbol(mapping.broker_symbol):
                 active.append(mapping)
             else:

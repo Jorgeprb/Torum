@@ -38,8 +38,6 @@ class MockMarketService:
         self._prices: dict[str, float] = {
             "XAUUSD": 2325.0,
             "XAUEUR": 2180.0,
-            "XAUAUD": 3540.0,
-            "XAUJPY": 362000.0,
         }
 
     @property

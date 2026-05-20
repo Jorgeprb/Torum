@@ -11,9 +11,48 @@ interface CandleCacheRecord {
 }
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+const removedMockDateRanges = [
+  {
+    symbols: new Set(["XAUUSD", "XAUEUR"]),
+    from: Date.UTC(2026, 3, 24) / 1000,
+    to: Date.UTC(2026, 3, 27) / 1000
+  }
+];
 
 export function candleStorageKey(symbol: string, timeframe: Timeframe): string {
   return `${symbol.toUpperCase()}:${timeframe}`;
+}
+
+function isFinitePrice(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+function isSyntheticDxyCandle(candle: Candle, timeframe: Timeframe): boolean {
+  if (timeframe !== "D1" || candle.timeframe !== "D1") {
+    return false;
+  }
+
+  if (candle.source !== "synthetic_dxy") {
+    return false;
+  }
+
+  return [candle.open, candle.high, candle.low, candle.close].every((value) => isFinitePrice(value) && value < 200);
+}
+
+export function sanitizeCandlesForCache(symbol: string, timeframe: Timeframe, candles: Candle[]): Candle[] {
+  const normalizedSymbol = symbol.toUpperCase();
+  const withoutRemovedMockDates = candles.filter(
+    (candle) =>
+      !removedMockDateRanges.some(
+        (range) => range.symbols.has(normalizedSymbol) && candle.time >= range.from && candle.time < range.to
+      )
+  );
+
+  if (normalizedSymbol !== "DXY") {
+    return withoutRemovedMockDates;
+  }
+
+  return withoutRemovedMockDates.filter((candle) => isSyntheticDxyCandle(candle, timeframe));
 }
 
 function openCandleDb(): Promise<IDBDatabase | null> {
@@ -61,7 +100,11 @@ export async function readPersistedCandles(symbol: string, timeframe: Timeframe)
 
     request.onsuccess = () => {
       const record = request.result as CandleCacheRecord | undefined;
-      resolve(record?.candles?.length ? record.candles : null);
+      const candles = record?.candles?.length ? sanitizeCandlesForCache(symbol, timeframe, record.candles) : [];
+      if (record?.candles?.length && candles.length !== record.candles.length) {
+        void writePersistedCandles(symbol, timeframe, candles);
+      }
+      resolve(candles.length ? candles : null);
     };
     request.onerror = () => resolve(null);
   });
@@ -73,14 +116,25 @@ export async function writePersistedCandles(symbol: string, timeframe: Timeframe
     return;
   }
 
+  const cleanCandles = sanitizeCandlesForCache(symbol, timeframe, candles);
+
   await new Promise<void>((resolve) => {
     const transaction = db.transaction(storeName, "readwrite");
+    const store = transaction.objectStore(storeName);
+    if (candles.length > 0 && cleanCandles.length === 0) {
+      const request = store.delete(candleStorageKey(symbol, timeframe));
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      transaction.onabort = () => resolve();
+      return;
+    }
+
     const record: CandleCacheRecord = {
       key: candleStorageKey(symbol, timeframe),
-      candles,
+      candles: cleanCandles,
       updatedAt: Date.now()
     };
-    const request = transaction.objectStore(storeName).put(record);
+    const request = store.put(record);
 
     request.onsuccess = () => resolve();
     request.onerror = () => resolve();

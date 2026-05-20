@@ -47,7 +47,7 @@ MT5_BRIDGE_HOST=127.0.0.1
 MT5_BRIDGE_PORT=9100
 MT5_ALLOW_ORDER_EXECUTION=false
 MT5_ENABLE_REAL_TRADING=false
-MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:XAUUSD,XAUEUR:XAUEUR,XAUAUD:XAUAUD,XAUJPY:XAUJPY,DXY:DXY
+MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:XAUUSD,XAUEUR:XAUEUR
 ```
 
 Si MT5 no esta ya logueado o aparece `Terminal: Authorization failed`, deja credenciales en `.env`:
@@ -64,7 +64,7 @@ MT5_SERVER=NombreBroker-Demo
 Si tu broker usa `GOLD`:
 
 ```text
-MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:GOLD,XAUEUR:XAUEUR,XAUAUD:XAUAUD,XAUJPY:XAUJPY,DXY:DXY
+MT5_FALLBACK_SYMBOL_MAPPINGS=XAUUSD:GOLD,XAUEUR:XAUEUR
 ```
 
 El bridge primero intenta leer mapeos desde:
@@ -75,7 +75,8 @@ GET /api/symbols
 
 Si el backend no esta disponible, usa `MT5_FALLBACK_SYMBOL_MAPPINGS`.
 
-Desde Fase 6, DXY se carga como activo `analysis_only`. El bridge debe intentar leer sus ticks si el simbolo esta `enabled`, aunque `tradable=false`; si tu broker usa `USDX`, `DOLLARINDEX` u otro nombre, ajusta `broker_symbol` en `/api/symbols` o en el fallback local.
+Desde Fase DXY sintetico, DXY es `analysis_only` y no entra en el streaming de ticks.
+El bridge solo expone velas D1 bajo demanda para EURUSD, USDJPY, GBPUSD, USDCAD, USDSEK y USDCHF.
 
 ## Arranque
 

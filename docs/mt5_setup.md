@@ -148,15 +148,11 @@ tradable=false
 analysis_only=true
 ```
 
-El bridge intentara leer ticks de DXY si el simbolo esta `enabled` y el broker_symbol existe en MT5.
+El bridge no lee ticks de DXY ni lo mete en streaming principal.
+Torum calcula DXY sintetico bajo demanda con velas D1 cerradas de:
 
-Para encontrar el nombre exacto:
+```text
+EURUSD, USDJPY, GBPUSD, USDCAD, USDSEK, USDCHF
+```
 
-1. Abre MT5.
-2. Abre Market Watch.
-3. Click derecho -> Symbols.
-4. Busca `DXY`, `USDX` o `Dollar`.
-5. Activa el simbolo.
-6. Actualiza `broker_symbol` en Torum si tu broker usa otro nombre.
-
-El bridge no usa velas MT5 para DXY. Lee ticks y Torum construye D1 desde esos ticks. Si el broker no ofrece DXY, se necesitara un proveedor externo en el futuro.
+Si falta algun par en MT5, el popup del dolar mostrara el simbolo faltante.

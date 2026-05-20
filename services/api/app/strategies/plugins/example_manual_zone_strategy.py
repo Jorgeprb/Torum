@@ -10,7 +10,7 @@ class ExampleManualZoneStrategy:
     version = "0.1.0"
     description = "Reads visible manual_zone drawings and can generate a PAPER-only example ENTRY signal."
     default_params: dict[str, Any] = {"dry_run": True, "volume": 0.01}
-    supported_symbols = ("XAUUSD", "XAUEUR", "XAUAUD", "XAUJPY")
+    supported_symbols = ("XAUUSD", "XAUEUR")
     supported_timeframes = ("M1", "M5", "H1", "H2", "H3", "H4", "D1", "W1")
     required_indicators: tuple[str, ...] = ()
     required_context = ("candles", "latest_tick", "manual_zones", "no_trade_zones")

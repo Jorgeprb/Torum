@@ -133,8 +133,49 @@ class MT5Client:
             return []
         return list(ticks)
 
+    def get_rates(self, broker_symbol: str, timeframe: str = "D1", count: int = 120, start_pos: int = 1) -> list[dict[str, Any]]:
+        if self.mt5 is None:
+            raise MT5ClientError("MetaTrader5 package is not installed. Run: pip install -r requirements.txt")
+        timeframe_id = _mt5_timeframe(self.mt5, timeframe)
+        self.select_symbol(broker_symbol)
+        rates = self.mt5.copy_rates_from_pos(broker_symbol, timeframe_id, max(0, start_pos), max(1, count))
+        if rates is None:
+            logger.warning("copy_rates_from_pos failed for %s %s: %s", broker_symbol, timeframe, self.mt5.last_error())
+            return []
+        return [_rate_to_payload(rates, row) for row in rates]
+
 
 def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _mt5_timeframe(mt5: Any, timeframe: str) -> Any:
+    normalized = timeframe.strip().upper()
+    mapping = {
+        "M1": "TIMEFRAME_M1",
+        "M5": "TIMEFRAME_M5",
+        "M15": "TIMEFRAME_M15",
+        "H1": "TIMEFRAME_H1",
+        "H2": "TIMEFRAME_H2",
+        "H3": "TIMEFRAME_H3",
+        "H4": "TIMEFRAME_H4",
+        "D1": "TIMEFRAME_D1",
+        "W1": "TIMEFRAME_W1",
+    }
+    attr = mapping.get(normalized, "TIMEFRAME_D1")
+    return getattr(mt5, attr)
+
+
+def _rate_to_payload(rates: Any, row: Any) -> dict[str, Any]:
+    names = getattr(getattr(rates, "dtype", None), "names", None)
+    if names:
+        return {name: _scalar(row[name]) for name in names}
+    if hasattr(row, "_asdict"):
+        return {key: _scalar(value) for key, value in row._asdict().items()}
+    return dict(row)
+
+
+def _scalar(value: Any) -> Any:
+    return value.item() if hasattr(value, "item") else value

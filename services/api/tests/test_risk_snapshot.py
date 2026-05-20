@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -11,14 +12,18 @@ from app.mt5.schemas import MT5AccountPayload, MT5StatusPayload
 from app.mt5.status_store import mt5_status_store
 from app.orders.models import Order
 from app.positions.models import Position
-from app.risk.snapshot import RiskSnapshotService
+from app.risk.snapshot import RiskSnapshotService, clear_risk_snapshot_cache
+from app.strategies.ath import plan_torum_v1_bot_exposure
 from app.symbols.models import SymbolMapping
+from app.symbols.service import get_symbol_by_internal
 
 
 @pytest.fixture(autouse=True)
 def _reset_mt5_status() -> None:
+    clear_risk_snapshot_cache()
     mt5_status_store.update(MT5StatusPayload())
     yield
+    clear_risk_snapshot_cache()
     mt5_status_store.update(MT5StatusPayload())
 
 
@@ -97,6 +102,35 @@ def _position(db: Session, *, order_id: int | None, volume: float, open_price: f
     db.commit()
 
 
+def _bot_order(db: Session, *, volume: float = 0.01) -> Order:
+    order = Order(
+        user_id=1,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=1,
+        account_server="test",
+        side="BUY",
+        order_type="MARKET",
+        volume=volume,
+        status="EXECUTED",
+        source="STRATEGY",
+        strategy_key="torum_v1",
+    )
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+def _trading_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        lot_per_equity_enabled=True,
+        equity_per_0_01_lot=2500.0,
+        minimum_lot=0.01,
+    )
+
+
 def test_risk_snapshot_uses_ath_stress_and_cached_candidate_loss() -> None:
     db = _session()
     _position(db, order_id=None, volume=0.04, open_price=4700.0)
@@ -116,23 +150,7 @@ def test_risk_snapshot_uses_ath_stress_and_cached_candidate_loss() -> None:
 def test_strategy_snapshot_counts_only_torum_v1_bot_positions() -> None:
     db = _session()
     _position(db, order_id=None, volume=0.04, open_price=4700.0)
-    order = Order(
-        user_id=1,
-        internal_symbol="XAUUSD",
-        broker_symbol="XAUUSD",
-        mode="DEMO",
-        account_login=1,
-        account_server="test",
-        side="BUY",
-        order_type="MARKET",
-        volume=0.01,
-        status="EXECUTED",
-        source="STRATEGY",
-        strategy_key="torum_v1",
-    )
-    db.add(order)
-    db.commit()
-    db.refresh(order)
+    order = _bot_order(db)
     _position(db, order_id=order.id, volume=0.01, open_price=4600.0)
 
     all_snapshot = RiskSnapshotService(db).recompute("XAUUSD")
@@ -142,3 +160,81 @@ def test_strategy_snapshot_counts_only_torum_v1_bot_positions() -> None:
     assert all_snapshot.current_loss == 5900.0
     assert strategy_snapshot.positions_count == 1
     assert strategy_snapshot.current_loss == 1100.0
+
+
+def test_torum_v1_plan_blocks_ath_red_zone() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=1,
+        current_price=4900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is False
+    assert plan.reason == "ath_red_zone"
+
+
+def test_torum_v1_plan_green_allows_three_equivalents_when_risk_fits() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=3,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 3
+    assert plan.volume == 0.12
+
+
+def test_torum_v1_plan_degrades_when_risk_exceeds_limit() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=3,
+        current_price=4000.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 2
+
+
+def test_torum_v1_plan_counts_only_bot_positions_not_manual() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    _position(db, order_id=None, volume=0.04, open_price=4700.0)
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=1,
+        current_price=4600.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.open_lot_equivalents == 0.0

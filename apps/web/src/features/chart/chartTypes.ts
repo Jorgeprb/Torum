@@ -1,4 +1,5 @@
 import type { Time } from "lightweight-charts";
+import type { ReactNode } from "react";
 
 import type { PriceAlertRead } from "../../services/alerts";
 import type { NoTradeZone } from "../../services/news";
@@ -45,6 +46,7 @@ export interface MarketChartProps {
   autoExtendToFutureNews?: boolean;
   pullbackDebugVisible?: boolean;
   onPullbackDebugToggle?: (visible: boolean) => void;
+  dollarStrengthBadge?: ReactNode;
 }
 
 export interface ZoneOverlay {

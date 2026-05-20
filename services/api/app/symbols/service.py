@@ -31,30 +31,6 @@ DEFAULT_SYMBOL_MAPPINGS: tuple[dict[str, object], ...] = (
         "contract_size": 100.0,
     },
     {
-        "internal_symbol": "XAUAUD",
-        "broker_symbol": "XAUAUD",
-        "display_name": "Gold / AUD",
-        "enabled": True,
-        "asset_class": "METAL",
-        "tradable": True,
-        "analysis_only": False,
-        "digits": 2,
-        "point": 0.01,
-        "contract_size": 100.0,
-    },
-    {
-        "internal_symbol": "XAUJPY",
-        "broker_symbol": "XAUJPY",
-        "display_name": "Gold / JPY",
-        "enabled": True,
-        "asset_class": "METAL",
-        "tradable": True,
-        "analysis_only": False,
-        "digits": 2,
-        "point": 0.01,
-        "contract_size": 100.0,
-    },
-    {
         "internal_symbol": "DXY",
         "broker_symbol": "DXY",
         "display_name": "US Dollar Index",
@@ -67,6 +43,8 @@ DEFAULT_SYMBOL_MAPPINGS: tuple[dict[str, object], ...] = (
         "contract_size": 1.0,
     },
 )
+
+DEPRECATED_SYMBOLS = {"XAUAUD", "XAUJPY"}
 
 
 def list_symbol_mappings(db: Session) -> list[SymbolMapping]:
@@ -118,4 +96,7 @@ def seed_default_symbols() -> None:
             if mapping["internal_symbol"] in existing_symbols:
                 continue
             db.add(SymbolMapping(**mapping))
+        for mapping in db.scalars(select(SymbolMapping).where(SymbolMapping.internal_symbol.in_(DEPRECATED_SYMBOLS))):
+            mapping.enabled = False
+            mapping.tradable = False
         db.commit()

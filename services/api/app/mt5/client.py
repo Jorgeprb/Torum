@@ -108,3 +108,19 @@ class MT5BridgeClient:
         except requests.RequestException as exc:
             logger.warning("MT5 bridge profit preview failed: %s", exc)
             raise MT5BridgeClientError(str(exc)) from exc
+
+    def get_rates(self, broker_symbol: str, timeframe: str = "D1", *, count: int = 120, start_pos: int = 1) -> list[dict[str, Any]]:
+        if not self.is_configured():
+            raise MT5BridgeClientError("MT5 bridge base URL is not configured")
+        try:
+            response = requests.get(
+                f"{self.base_url}/rates/{broker_symbol}",
+                params={"timeframe": timeframe, "count": count, "start_pos": start_pos},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return payload if isinstance(payload, list) else []
+        except requests.RequestException as exc:
+            logger.warning("MT5 bridge rates request failed: %s", exc)
+            raise MT5BridgeClientError(str(exc)) from exc
