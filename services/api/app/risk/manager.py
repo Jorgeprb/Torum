@@ -131,6 +131,7 @@ class RiskManager:
                 reasons.append("Strategy LIVE execution is disabled")
         reasons.extend(TorumV1StatusService(self.db).bot_block_reasons(order.internal_symbol, user_id))
         if strategy_key == "torum_v1":
+            latest_tick = self.latest_tick(order.internal_symbol)
             current_price = latest_executable_price(latest_tick, order.side)
             balance = getattr(mt5_status.account, "balance", None) if mt5_status.account is not None else None
             base_lot = calculate_lot_size(

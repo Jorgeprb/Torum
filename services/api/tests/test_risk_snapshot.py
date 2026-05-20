@@ -102,6 +102,33 @@ def _position(db: Session, *, order_id: int | None, volume: float, open_price: f
     db.commit()
 
 
+def _stale_demo_position_without_ticket(db: Session) -> None:
+    db.add(
+        Position(
+            user_id=1,
+            order_id=None,
+            internal_symbol="XAUUSD",
+            broker_symbol="XAUUSD",
+            mode="DEMO",
+            account_login=1,
+            account_server="test",
+            side="BUY",
+            volume=0.04,
+            open_price=4700.0,
+            current_price=4700.0,
+            sl=None,
+            tp=None,
+            profit=0.0,
+            status="OPEN",
+            mt5_position_ticket=None,
+            magic_number=260426,
+            opened_at=datetime(2026, 5, 1, tzinfo=UTC),
+            raw_payload_json={},
+        )
+    )
+    db.commit()
+
+
 def _bot_order(db: Session, *, volume: float = 0.01) -> Order:
     order = Order(
         user_id=1,
@@ -145,6 +172,21 @@ def test_risk_snapshot_uses_ath_stress_and_cached_candidate_loss() -> None:
     assert preview.candidate_loss == 1100.0
     assert preview.projected_loss == 5900.0
     assert preview.breaches_limit is True
+
+
+def test_risk_snapshot_ignores_stale_demo_positions_without_mt5_ticket() -> None:
+    db = _session()
+    _stale_demo_position_without_ticket(db)
+
+    snapshot = RiskSnapshotService(db).recompute("XAUUSD")
+    preview = RiskSnapshotService(db).preview_candidate("XAUUSD", side="BUY", volume=0.01, price=4600.0)
+
+    assert snapshot.positions_count == 0
+    assert snapshot.current_loss == 0.0
+    assert snapshot.remaining_risk == 5000.0
+    assert preview.candidate_loss == 1100.0
+    assert preview.projected_loss == 1100.0
+    assert preview.breaches_limit is False
 
 
 def test_strategy_snapshot_counts_only_torum_v1_bot_positions() -> None:

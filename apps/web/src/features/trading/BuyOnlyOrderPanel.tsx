@@ -222,10 +222,10 @@ export function BuyOnlyOrderPanel({
     [lastPrice, riskSnapshot, selectedLot]
   );
   const canAcceptRisk = riskSnapshot?.valid === true && riskProjection !== null;
+  const riskAcceptanceRequired = riskProjection?.breaches_limit === true;
   const confirmDisabled =
     submitting ||
-    !riskAccepted ||
-    !canAcceptRisk ||
+    (riskAcceptanceRequired && !riskAccepted) ||
     (mode === "LIVE" && liveText.trim().toUpperCase() !== "CONFIRM LIVE");
 
   return (
@@ -297,33 +297,30 @@ export function BuyOnlyOrderPanel({
                 <dd>{previewTp ? previewTp.toFixed(2) : "--"}</dd>
               </div>
             </dl>
-            <p>Esta orden no tendra stop loss. El TP mostrado es aproximado. MT5 devuelve el precio real y Torum ajusta el TP final despues.</p>
             {riskSnapshotLoading ? <div className="risk-preview-note">Calculando riesgo inicial...</div> : null}
             {riskSnapshot?.dirty ? <div className="risk-preview-note">Riesgo pendiente de actualizar.</div> : null}
             {riskSnapshotError ? <div className="risk-preview-note">Riesgo no disponible: {riskSnapshotError}</div> : null}
             {riskSnapshot && riskProjection ? (
               <div className={riskProjection.breaches_limit ? "risk-preview-warning" : "risk-preview-note"}>
                 <strong>Riesgo cacheado</strong>
-                <span>ATH: {riskSnapshot.ath_price?.toFixed(2) ?? "--"} | Stress: {riskSnapshot.stress_price?.toFixed(2) ?? "--"}</span>
                 <small>Balance MT5: {riskSnapshot.balance?.toFixed(2) ?? "--"}</small>
-                <small>Perdida actual: {riskSnapshot.current_loss?.toFixed(2) ?? "--"}</small>
-                <small>Perdida candidata: {riskProjection.candidate_loss?.toFixed(2) ?? "--"}</small>
-                <small>Perdida proyectada: {riskProjection.projected_loss?.toFixed(2) ?? "--"} ({riskProjection.projected_balance_pct?.toFixed(2) ?? "--"}%)</small>
-                <small>Capital si ATH -30%: {riskProjection.projected_balance?.toFixed(2) ?? "--"}</small>
-                <small>Riesgo restante: {riskSnapshot.remaining_risk?.toFixed(2) ?? "--"}</small>
+                <small>Perdida acumulada abiertas: {riskSnapshot.current_loss?.toFixed(2) ?? "--"}</small>
+                <small>Perdida operacion nueva: {riskProjection.candidate_loss?.toFixed(2) ?? "--"}</small>
               </div>
             ) : riskSnapshot ? (
               <div className="risk-preview-note">{riskSnapshot.message ?? "Faltan datos para calcular riesgo."}</div>
             ) : null}
-            <label>
-              <input
-                checked={riskAccepted}
-                disabled={!canAcceptRisk}
-                type="checkbox"
-                onChange={(event) => setRiskAccepted(event.target.checked)}
-              />
-              Acepto el riesgo calculado
-            </label>
+            {riskAcceptanceRequired ? (
+              <label>
+                <input
+                  checked={riskAccepted}
+                  disabled={!canAcceptRisk}
+                  type="checkbox"
+                  onChange={(event) => setRiskAccepted(event.target.checked)}
+                />
+                Acepto superar el limite de riesgo
+              </label>
+            ) : null}
             {mode === "LIVE" ? (
               <label>
                 Escribe CONFIRM LIVE

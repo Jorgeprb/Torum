@@ -1684,7 +1684,7 @@ button.system-status-card:disabled {
 .dollar-strength {
   position: absolute;
   right: calc(var(--chart-price-scale-width) + 12px);
-  bottom: 18px;
+  bottom: 52px;
   z-index: 34;
   pointer-events: auto;
 }

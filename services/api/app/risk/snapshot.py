@@ -74,6 +74,8 @@ class RiskSnapshotService:
         normalized_source = _normalize_source(source)
         cached = _SNAPSHOTS.get(_cache_key(normalized_symbol, normalized_source))
         if cached is not None:
+            if cached.dirty and recompute_if_missing:
+                return self.recompute(normalized_symbol, source=normalized_source)
             return cached
         if not recompute_if_missing:
             return _empty_snapshot(normalized_symbol, "Sin snapshot de riesgo")
@@ -217,7 +219,7 @@ class RiskSnapshotService:
                 stmt.join(Order, Position.order_id == Order.id)
                 .where(Order.source == "STRATEGY", Order.strategy_key == "torum_v1")
             )
-        return list(self.db.scalars(stmt))
+        return [position for position in self.db.scalars(stmt) if _is_risk_open_position(position)]
 
 
 def candidate_loss(*, side: str, volume: float, price: float, stress_price: float, contract_size: float) -> float:
@@ -226,6 +228,16 @@ def candidate_loss(*, side: str, volume: float, price: float, stress_price: floa
     if side.upper() == "BUY":
         return max(0.0, price - stress_price) * volume * contract_size
     return max(0.0, stress_price - price) * volume * contract_size
+
+
+def _is_risk_open_position(position: Position) -> bool:
+    if position.status != "OPEN":
+        return False
+    if position.closed_at is not None or position.close_price is not None:
+        return False
+    if position.mode != "PAPER" and position.mt5_position_ticket is None:
+        return False
+    return True
 
 
 def _empty_snapshot(symbol: str, message: str) -> RiskSnapshot:
