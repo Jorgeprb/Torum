@@ -20,7 +20,7 @@ from app.strategies.ath import ath_price_zones, get_or_update_symbol_ath, set_sy
 from app.strategies.models import StrategyConfig, StrategySignal
 from app.strategies.notifications import send_torum_v1_unlock_notifications
 from app.strategies.repository import get_global_strategy_settings
-from app.strategies.runner import StrategyRunner
+from app.strategies.runner import StrategyRunner, _torum_v1_desired_multiplier_for_ath_zone
 from app.strategies.service import StrategyCatalogService
 from app.market_context.models import DollarStrengthSnapshot
 from app.strategies.torum_v1 import (
@@ -664,6 +664,37 @@ def test_green_hammer_after_bearish_leg_is_pullback() -> None:
     assert pullbacks[0].pullback_low == 99.4
 
 
+def test_pullback_recovery_new_high_preserves_middle_pullback() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.6, 99.7),
+        _m5_candle(_madrid(1, 9, 10), 99.7, 99.75, 99.4, 99.5),
+        _m5_candle(_madrid(1, 9, 15), 99.5, 100.4, 99.5, 100.2),
+    ]
+
+    pullbacks = detect_pullbacks(candles, threshold=0.20, recovery_pct=0.10, end_confirmation_bars=1)
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].swing_high == 100.0
+    assert pullbacks[0].pullback_low == 99.4
+    assert pullbacks[0].is_live is False
+
+
+def test_invalid_peak_extension_keeps_active_pullback() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.6, 99.7),
+        _m5_candle(_madrid(1, 9, 10), 99.7, 100.5, 99.65, 99.68),
+    ]
+
+    pullbacks = detect_pullbacks(candles, threshold=0.20, recovery_pct=0.10, end_confirmation_bars=1)
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].swing_high == 100.0
+    assert pullbacks[0].pullback_low == 99.6
+    assert pullbacks[0].is_live is True
+
+
 def test_same_candle_high_low_does_not_create_pullback() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 99.8, 100.5, 99.5, 100.2),
@@ -788,6 +819,27 @@ def test_pullback_peak_extension_can_move_start_three_candles_right() -> None:
     assert payload[-1]["pullback_low"] == 101.0
 
 
+def test_peak_extension_still_moves_when_new_high_has_later_drop() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.6, 99.7),
+        _m5_candle(_madrid(1, 9, 10), 99.7, 100.5, 99.7, 100.3),
+        _m5_candle(_madrid(1, 9, 15), 100.3, 100.4, 99.8, 99.9),
+    ]
+
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        recovery_pct=5.0,
+        end_confirmation_bars=1,
+        allow_peak_extension=True,
+    )
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].swing_high == 100.5
+    assert pullbacks[0].pullback_low == 99.8
+
+
 def test_pullback_detected_next_bearish_no_buy() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
@@ -888,6 +940,52 @@ def test_pullback_low_inside_zone_buys_even_when_confirmation_outside_zone() -> 
     assert decision.zone is zone
     assert decision.metadata["entry_setup"] == "pullback_low_inside_zone_bullish_confirmation"
     assert decision.metadata["pullback_low_time"] == int(_madrid(1, 9, 5).timestamp())
+
+
+def test_pullback_recovery_new_high_can_trigger_buy_from_zone_low() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.6, 99.7),
+        _m5_candle(_madrid(1, 9, 10), 99.7, 99.75, 99.4, 99.5),
+        _m5_candle(_madrid(1, 9, 15), 99.5, 100.4, 99.5, 100.2),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9, 5).timestamp()), int(_madrid(1, 9, 12).timestamp()), 99.3, 99.5)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 21),
+    )
+
+    assert decision.should_buy is True
+    assert decision.metadata["pullback_low"] == 99.4
+    assert decision.metadata["operation_zone_id"] == "z1"
+
+
+def test_should_buy_uses_latest_valid_pullback() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.6, 99.7),
+        _m5_candle(_madrid(1, 9, 10), 99.7, 100.2, 99.7, 100.1),
+        _m5_candle(_madrid(1, 9, 15), 100.1, 101.0, 100.1, 100.9),
+        _m5_candle(_madrid(1, 9, 20), 100.9, 100.95, 100.6, 100.7),
+        _m5_candle(_madrid(1, 9, 25), 100.7, 101.2, 100.7, 101.0),
+    ]
+    zone = TorumV1OperationZone("latest", "rectangle", int(_madrid(1, 9, 20).timestamp()), int(_madrid(1, 9, 21).timestamp()), 100.5, 100.7)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 31),
+    )
+
+    assert decision.should_buy is True
+    assert decision.metadata["pullback_low"] == 100.6
+    assert decision.metadata["operation_zone_id"] == "latest"
 
 
 def test_confirmation_inside_zone_but_pullback_low_outside_no_buy() -> None:
@@ -993,6 +1091,37 @@ def test_support_level_uses_pullback_low_for_desired_multiplier() -> None:
     assert s2_decision.metadata["desired_multiplier"] == 2
     assert s3_decision.metadata["desired_multiplier"] == 3
     assert s3_with_open.metadata["desired_multiplier"] == 2
+
+
+def test_green_ath_option_prefers_x2_multiplier() -> None:
+    db = _session()
+    set_symbol_ath_level(db, "XAUUSD", "manual", 6000)
+
+    preferred = _torum_v1_desired_multiplier_for_ath_zone(
+        db,
+        symbol="XAUUSD",
+        current_price=5000,
+        params={"ath_green_prefer_x2_entries": True},
+        desired_multiplier=1,
+    )
+    disabled = _torum_v1_desired_multiplier_for_ath_zone(
+        db,
+        symbol="XAUUSD",
+        current_price=5000,
+        params={"ath_green_prefer_x2_entries": False},
+        desired_multiplier=1,
+    )
+    not_green = _torum_v1_desired_multiplier_for_ath_zone(
+        db,
+        symbol="XAUUSD",
+        current_price=5300,
+        params={"ath_green_prefer_x2_entries": True},
+        desired_multiplier=1,
+    )
+
+    assert preferred == 2
+    assert disabled == 1
+    assert not_green == 1
 
 
 def test_rectangle_not_activated_does_not_count() -> None:

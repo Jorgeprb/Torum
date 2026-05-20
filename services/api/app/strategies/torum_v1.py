@@ -54,6 +54,7 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "show_pullback_debug": False,
     "require_zone": True,
     "one_position_per_symbol": False,
+    "ath_green_prefer_x2_entries": True,
     "usd_strength_filter_enabled": True,
     "usd_strength_apply_to_symbols": ["XAUUSD", "XAUEUR"],
     "usd_strength_mode": "only_operate_when_weak",
@@ -230,37 +231,6 @@ def detect_pullbacks(
                 confirmed_recovery_bars = 0
             continue
 
-        if allow_peak_extension:
-            active_peak_index = _index_for_time(candles, active.swing_high_time, fallback=index)
-            candidate_peak_index = _highest_high_index(
-                candles,
-                max(segment_start_index, active_peak_index, index - safe_lookback + 1),
-                index,
-            )
-            candidate_peak = candles[candidate_peak_index]
-            candidate_peak_time = _as_utc(candidate_peak.time)
-            if candidate_peak_time > active.swing_high_time and float(candidate_peak.high) > active.swing_high:
-                updated = _pullback_from_peak_window(
-                    candles,
-                    candidate_peak_index,
-                    index,
-                    threshold=safe_threshold,
-                    use_wicks=use_wicks,
-                    require_bearish_leg=require_bearish_leg,
-                    min_bearish_candles=safe_min_bearish_candles,
-                    min_lower_close_candles=safe_min_lower_close_candles,
-                    disallow_same_candle_peak_low=disallow_same_candle_peak_low,
-                    impulse_green_filter_enabled=impulse_green_filter_enabled,
-                )
-                if updated is None:
-                    peak = candidate_peak
-                    active = None
-                    segment_start_index = candidate_peak_index
-                else:
-                    active = updated
-                confirmed_recovery_bars = 0
-                continue
-
         if _as_utc(candle.time) < active.swing_high_time:
             continue
 
@@ -280,6 +250,36 @@ def detect_pullbacks(
             confirmed_recovery_bars = 0
             bars_until_next_pullback = safe_min_bars_between
             segment_start_index = index
+            continue
+
+        if allow_peak_extension:
+            active_peak_index = _index_for_time(candles, active.swing_high_time, fallback=index)
+            candidate_peak_index = _highest_high_index(
+                candles,
+                max(segment_start_index, active_peak_index, index - safe_lookback + 1),
+                index,
+            )
+            if candidate_peak_index == index:
+                continue
+            candidate_peak = candles[candidate_peak_index]
+            candidate_peak_time = _as_utc(candidate_peak.time)
+            if candidate_peak_time > active.swing_high_time and float(candidate_peak.high) > active.swing_high:
+                updated = _pullback_from_peak_window(
+                    candles,
+                    candidate_peak_index,
+                    index,
+                    threshold=safe_threshold,
+                    use_wicks=use_wicks,
+                    require_bearish_leg=require_bearish_leg,
+                    min_bearish_candles=safe_min_bearish_candles,
+                    min_lower_close_candles=safe_min_lower_close_candles,
+                    disallow_same_candle_peak_low=disallow_same_candle_peak_low,
+                    impulse_green_filter_enabled=impulse_green_filter_enabled,
+                )
+                if updated is not None:
+                    active = updated
+                    confirmed_recovery_bars = 0
+                    continue
 
     active = (
         _apply_live_pullback_update(

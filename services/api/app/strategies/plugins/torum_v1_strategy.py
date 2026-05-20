@@ -46,6 +46,7 @@ class TorumV1Strategy:
         "show_pullback_debug": False,
         "require_zone": True,
         "one_position_per_symbol": False,
+        "ath_green_prefer_x2_entries": True,
         "usd_strength_filter_enabled": True,
         "usd_strength_apply_to_symbols": ["XAUUSD", "XAUEUR"],
         "usd_strength_mode": "only_operate_when_weak",

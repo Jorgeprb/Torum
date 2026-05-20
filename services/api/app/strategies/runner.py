@@ -9,7 +9,7 @@ from app.mt5.status_store import mt5_status_store
 from app.orders.service import OrderManager
 from app.risk.manager import RiskManager
 from app.settings.trading_service import get_global_trading_settings
-from app.strategies.ath import latest_executable_price, plan_torum_v1_bot_exposure
+from app.strategies.ath import ath_zone_for_price, get_or_update_symbol_ath, latest_executable_price, plan_torum_v1_bot_exposure
 from app.market_context.dollar_strength import DollarStrengthService, usd_strength_decision_for_symbol
 from app.strategies.engine import StrategyContextBuilder
 from app.strategies.models import StrategyConfig, StrategyRun, StrategySignal
@@ -98,11 +98,19 @@ class StrategyRunner:
                 trading_settings = _strategy_trading_settings(get_global_trading_settings(self.db), config.mode)
                 latest_price = latest_executable_price(context.latest_tick, "BUY")
                 account = mt5_status_store.get().account
+                raw_desired_multiplier = int((signal.metadata_json or {}).get("desired_multiplier") or 1)
+                desired_multiplier = _torum_v1_desired_multiplier_for_ath_zone(
+                    self.db,
+                    symbol=signal.internal_symbol,
+                    current_price=latest_price,
+                    params=params if isinstance(params, dict) else {},
+                    desired_multiplier=raw_desired_multiplier,
+                )
                 plan = plan_torum_v1_bot_exposure(
                     self.db,
                     symbol=signal.internal_symbol,
                     user_id=config.user_id,
-                    desired_multiplier=int((signal.metadata_json or {}).get("desired_multiplier") or 1),
+                    desired_multiplier=desired_multiplier,
                     current_price=latest_price,
                     balance=account.balance if account is not None else None,
                     trading_settings=trading_settings,
@@ -110,7 +118,8 @@ class StrategyRunner:
                 )
                 signal.metadata_json = {
                     **(signal.metadata_json or {}),
-                    "desired_multiplier": int((signal.metadata_json or {}).get("desired_multiplier") or 1),
+                    "raw_desired_multiplier": raw_desired_multiplier,
+                    "desired_multiplier": desired_multiplier,
                     "accepted_multiplier": plan.multiplier,
                     "accepted_volume": plan.volume,
                     "plan_reason": plan.reason,
@@ -250,3 +259,31 @@ def _strategy_trading_settings(trading_settings: object, mode: str) -> object:
         mt5_order_execution_enabled=getattr(trading_settings, "mt5_order_execution_enabled", False),
         market_data_source=getattr(trading_settings, "market_data_source", "MT5"),
     )
+
+
+def _torum_v1_desired_multiplier_for_ath_zone(
+    db: Session,
+    *,
+    symbol: str,
+    current_price: float | None,
+    params: dict[str, object],
+    desired_multiplier: int,
+) -> int:
+    safe_desired = max(1, min(3, int(desired_multiplier)))
+    if not _bool_param(params.get("ath_green_prefer_x2_entries"), True):
+        return safe_desired
+    ath = get_or_update_symbol_ath(db, symbol)
+    zone = ath_zone_for_price(ath, current_price)
+    if zone is not None and zone.key in {"green", "deep_green"}:
+        return max(safe_desired, 2)
+    return safe_desired
+
+
+def _bool_param(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+    return bool(value)
