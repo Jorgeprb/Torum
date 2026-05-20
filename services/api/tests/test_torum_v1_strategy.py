@@ -633,6 +633,60 @@ def test_live_pullback_updates_current_segment_low() -> None:
     assert pullbacks[0].is_live is True
 
 
+def test_green_impulse_candle_does_not_create_pullback() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.8, 100.2, 99.4, 100.1),
+    ]
+
+    assert detect_pullbacks(candles, threshold=0.20) == []
+
+
+def test_two_green_impulse_candles_do_not_create_pullbacks() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100.4, 99.9, 100.3),
+        _m5_candle(_madrid(1, 9, 5), 100.3, 100.8, 100.0, 100.7),
+    ]
+
+    assert detect_pullbacks(candles, threshold=0.20) == []
+
+
+def test_green_hammer_after_bearish_leg_is_pullback() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.6, 99.7),
+        _m5_candle(_madrid(1, 9, 10), 99.7, 99.95, 99.4, 99.9),
+    ]
+
+    pullbacks = detect_pullbacks(candles, threshold=0.20)
+
+    assert len(pullbacks) == 1
+    assert pullbacks[0].pullback_low == 99.4
+
+
+def test_same_candle_high_low_does_not_create_pullback() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 99.8, 100.5, 99.5, 100.2),
+    ]
+
+    assert detect_pullbacks(candles, threshold=0.20) == []
+
+
+def test_live_price_does_not_create_pullback_without_bearish_leg() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 99.8, 100.5, 99.8, 100.2),
+    ]
+
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.6,
+        live_time=_madrid(1, 9, 2),
+    )
+
+    assert pullbacks == []
+
+
 def test_pullback_debug_payload_returns_one_segment_per_down_leg() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 100, 100, 99, 99.5),
@@ -664,10 +718,12 @@ def test_pullback_zero_threshold_detects_small_pullback() -> None:
 def test_pullback_payload_returns_only_latest_max_count() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 100, 100, 99.5, 99.6),
-        _m5_candle(_madrid(1, 9, 5), 99.6, 99.7, 99.5, 99.7),
-        _m5_candle(_madrid(1, 9, 10), 101, 101, 100.5, 100.6),
-        _m5_candle(_madrid(1, 9, 15), 100.6, 100.7, 100.5, 100.7),
-        _m5_candle(_madrid(1, 9, 20), 102, 102, 101.5, 101.6),
+        _m5_candle(_madrid(1, 9, 5), 99.6, 99.8, 99.6, 99.75),
+        _m5_candle(_madrid(1, 9, 10), 100.8, 101, 100.7, 100.9),
+        _m5_candle(_madrid(1, 9, 15), 100.9, 101, 100.5, 100.6),
+        _m5_candle(_madrid(1, 9, 20), 100.6, 100.9, 100.6, 100.8),
+        _m5_candle(_madrid(1, 9, 25), 101.8, 102, 101.7, 101.9),
+        _m5_candle(_madrid(1, 9, 30), 101.9, 102, 101.5, 101.6),
     ]
 
     payload = pullback_debug_payload(
@@ -726,7 +782,7 @@ def test_pullback_peak_extension_can_move_start_three_candles_right() -> None:
         },
     )
 
-    assert len(payload) == 2
+    assert len(payload) == 1
     assert payload[-1]["swing_high"] == 103.0
     assert payload[-1]["swing_high_time"] == int(_madrid(1, 9, 25).timestamp())
     assert payload[-1]["pullback_low"] == 101.0

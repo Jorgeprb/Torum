@@ -35,6 +35,11 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "pullback_lookback_bars": 12,
     "pullback_swing_confirm_bars": 1,
     "pullback_allow_peak_extension": True,
+    "pullback_require_bearish_leg": True,
+    "pullback_min_bearish_candles": 1,
+    "pullback_min_lower_close_candles": 1,
+    "pullback_disallow_same_candle_peak_low": True,
+    "pullback_impulse_green_filter_enabled": True,
     "pullback_recovery_pct": 0.10,
     "pullback_end_confirmation_bars": 1,
     "pullback_min_bars_between": 0,
@@ -170,6 +175,11 @@ def detect_pullbacks(
     live_time: datetime | None = None,
     swing_confirm_bars: int = 1,
     allow_peak_extension: bool = True,
+    require_bearish_leg: bool = True,
+    min_bearish_candles: int = 1,
+    min_lower_close_candles: int = 1,
+    disallow_same_candle_peak_low: bool = True,
+    impulse_green_filter_enabled: bool = True,
 ) -> list[TorumV1Pullback]:
     candles = _sorted_candles(candles_m5)
     if not candles:
@@ -181,6 +191,8 @@ def detect_pullbacks(
     required_recovery_bars = max(1, int(end_confirmation_bars))
     safe_swing_confirm_bars = max(0, int(swing_confirm_bars))
     safe_min_bars_between = max(0, int(min_bars_between))
+    safe_min_bearish_candles = max(0, int(min_bearish_candles))
+    safe_min_lower_close_candles = max(0, int(min_lower_close_candles))
     pullbacks: list[TorumV1Pullback] = []
     peak = candles[0]
     active: TorumV1Pullback | None = None
@@ -208,6 +220,11 @@ def detect_pullbacks(
                 index,
                 threshold=safe_threshold,
                 use_wicks=use_wicks,
+                require_bearish_leg=require_bearish_leg,
+                min_bearish_candles=safe_min_bearish_candles,
+                min_lower_close_candles=safe_min_lower_close_candles,
+                disallow_same_candle_peak_low=disallow_same_candle_peak_low,
+                impulse_green_filter_enabled=impulse_green_filter_enabled,
             )
             if active is not None:
                 confirmed_recovery_bars = 0
@@ -229,6 +246,11 @@ def detect_pullbacks(
                     index,
                     threshold=safe_threshold,
                     use_wicks=use_wicks,
+                    require_bearish_leg=require_bearish_leg,
+                    min_bearish_candles=safe_min_bearish_candles,
+                    min_lower_close_candles=safe_min_lower_close_candles,
+                    disallow_same_candle_peak_low=disallow_same_candle_peak_low,
+                    impulse_green_filter_enabled=impulse_green_filter_enabled,
                 )
                 if updated is None:
                     peak = candidate_peak
@@ -262,12 +284,18 @@ def detect_pullbacks(
     active = (
         _apply_live_pullback_update(
             active=active,
+            candles=candles,
             peak=peak,
             last_candle=candles[-1],
             live_price=live_price,
             live_time=live_time,
             threshold=safe_threshold,
             use_wicks=use_wicks,
+            require_bearish_leg=require_bearish_leg,
+            min_bearish_candles=safe_min_bearish_candles,
+            min_lower_close_candles=safe_min_lower_close_candles,
+            disallow_same_candle_peak_low=disallow_same_candle_peak_low,
+            impulse_green_filter_enabled=impulse_green_filter_enabled,
         )
         if live_update_enabled
         else active
@@ -319,6 +347,11 @@ def _pullback_from_peak_window(
     *,
     threshold: float,
     use_wicks: bool,
+    require_bearish_leg: bool,
+    min_bearish_candles: int,
+    min_lower_close_candles: int,
+    disallow_same_candle_peak_low: bool,
+    impulse_green_filter_enabled: bool,
 ) -> TorumV1Pullback | None:
     if peak_index > end_index:
         return None
@@ -326,9 +359,25 @@ def _pullback_from_peak_window(
     swing_high = float(peak.high)
     if swing_high <= 0:
         return None
-    low_start_index = peak_index + 1 if peak_index < end_index else peak_index
+    low_start_index = peak_index + 1 if disallow_same_candle_peak_low else (peak_index + 1 if peak_index < end_index else peak_index)
+    if low_start_index > end_index:
+        return None
     low_index = _lowest_pullback_index(candles, low_start_index, end_index, use_wicks)
+    if disallow_same_candle_peak_low and low_index <= peak_index:
+        return None
+    leg_start = peak_index + 1
+    has_bearish_leg = _has_bearish_leg(
+        candles,
+        leg_start,
+        low_index,
+        min_bearish_candles=min_bearish_candles,
+        min_lower_close_candles=min_lower_close_candles,
+    )
+    if require_bearish_leg and not has_bearish_leg:
+        return None
     low_candle = candles[low_index]
+    if impulse_green_filter_enabled and _is_bullish_candle(low_candle) and not has_bearish_leg:
+        return None
     low = _pullback_low_source(low_candle, use_wicks)
     if low >= swing_high:
         return None
@@ -354,6 +403,44 @@ def _pullback_low_source(candle: object, use_wicks: bool) -> float:
     return float(candle.close)
 
 
+def _is_bullish_candle(candle: object) -> bool:
+    return float(candle.close) > float(candle.open)
+
+
+def _bearish_leg_counts(candles: list[object], start_index: int, low_index: int) -> tuple[int, int]:
+    safe_start = max(0, start_index)
+    safe_end = min(len(candles) - 1, low_index)
+    if safe_start > safe_end:
+        return 0, 0
+
+    bearish = 0
+    lower_close = 0
+    for index in range(safe_start, safe_end + 1):
+        candle = candles[index]
+        previous = candles[index - 1] if index > 0 else None
+        if float(candle.close) < float(candle.open):
+            bearish += 1
+        if previous is not None and float(candle.close) < float(previous.close):
+            lower_close += 1
+    return bearish, lower_close
+
+
+def _has_bearish_leg(
+    candles: list[object],
+    start_index: int,
+    low_index: int,
+    *,
+    min_bearish_candles: int,
+    min_lower_close_candles: int,
+) -> bool:
+    if min_bearish_candles <= 0 and min_lower_close_candles <= 0:
+        return True
+    bearish, lower_close = _bearish_leg_counts(candles, start_index, low_index)
+    return (min_bearish_candles > 0 and bearish >= min_bearish_candles) or (
+        min_lower_close_candles > 0 and lower_close >= min_lower_close_candles
+    )
+
+
 def _latest_pullbacks(pullbacks: list[TorumV1Pullback], max_count: int | None) -> list[TorumV1Pullback]:
     ordered = sorted(pullbacks, key=lambda pullback: pullback.swing_high_time)
     if max_count is None:
@@ -377,17 +464,23 @@ def _updated_pullback_low(pullback: TorumV1Pullback, low_time: datetime, low: fl
 def _apply_live_pullback_update(
     *,
     active: TorumV1Pullback | None,
+    candles: list[object],
     peak: object,
     last_candle: object,
     live_price: float | None,
     live_time: datetime | None,
     threshold: float,
     use_wicks: bool,
+    require_bearish_leg: bool,
+    min_bearish_candles: int,
+    min_lower_close_candles: int,
+    disallow_same_candle_peak_low: bool,
+    impulse_green_filter_enabled: bool,
 ) -> TorumV1Pullback | None:
     if live_price is None:
         return active
 
-    del last_candle, use_wicks
+    del last_candle, use_wicks, impulse_green_filter_enabled
     live_low = float(live_price)
     low_time = _as_utc(live_time or datetime.now(UTC))
 
@@ -396,6 +489,19 @@ def _apply_live_pullback_update(
 
     swing_high = float(peak.high)
     if swing_high <= 0 or live_low >= swing_high:
+        return None
+    peak_index = _index_for_time(candles, _as_utc(peak.time), fallback=len(candles) - 1)
+    if disallow_same_candle_peak_low and peak_index >= len(candles) - 1:
+        return None
+    if require_bearish_leg and not _has_bearish_leg(
+        candles,
+        peak_index + 1,
+        len(candles) - 1,
+        min_bearish_candles=min_bearish_candles,
+        min_lower_close_candles=min_lower_close_candles,
+    ):
+        return None
+    if low_time <= _as_utc(peak.time):
         return None
 
     pullback_pct = _pullback_pct(swing_high, live_low)
@@ -537,6 +643,11 @@ def should_buy_torum_v1(
     min_bars_between = _nonnegative_int_param(params.get("pullback_min_bars_between"), 0)
     swing_confirm_bars = _nonnegative_int_param(params.get("pullback_swing_confirm_bars"), 1)
     allow_peak_extension = _bool(params.get("pullback_allow_peak_extension"), True)
+    require_bearish_leg = _bool(params.get("pullback_require_bearish_leg"), True)
+    min_bearish_candles = _nonnegative_int_param(params.get("pullback_min_bearish_candles"), 1)
+    min_lower_close_candles = _nonnegative_int_param(params.get("pullback_min_lower_close_candles"), 1)
+    disallow_same_candle_peak_low = _bool(params.get("pullback_disallow_same_candle_peak_low"), True)
+    impulse_green_filter_enabled = _bool(params.get("pullback_impulse_green_filter_enabled"), True)
     pullbacks = [
         pullback
         for pullback in detect_pullbacks(
@@ -552,6 +663,11 @@ def should_buy_torum_v1(
             live_update_enabled=False,
             swing_confirm_bars=swing_confirm_bars,
             allow_peak_extension=allow_peak_extension,
+            require_bearish_leg=require_bearish_leg,
+            min_bearish_candles=min_bearish_candles,
+            min_lower_close_candles=min_lower_close_candles,
+            disallow_same_candle_peak_low=disallow_same_candle_peak_low,
+            impulse_green_filter_enabled=impulse_green_filter_enabled,
         )
         if not pullback.is_live and pullback.pullback_low_time < confirmation_time
         and pullback.pullback_pct >= entry_threshold
@@ -644,6 +760,11 @@ def pullback_debug_payload(
     min_bars_between = _nonnegative_int_param(params.get("pullback_min_bars_between"), 0)
     swing_confirm_bars = _nonnegative_int_param(params.get("pullback_swing_confirm_bars"), 1)
     allow_peak_extension = _bool(params.get("pullback_allow_peak_extension"), True)
+    require_bearish_leg = _bool(params.get("pullback_require_bearish_leg"), True)
+    min_bearish_candles = _nonnegative_int_param(params.get("pullback_min_bearish_candles"), 1)
+    min_lower_close_candles = _nonnegative_int_param(params.get("pullback_min_lower_close_candles"), 1)
+    disallow_same_candle_peak_low = _bool(params.get("pullback_disallow_same_candle_peak_low"), True)
+    impulse_green_filter_enabled = _bool(params.get("pullback_impulse_green_filter_enabled"), True)
     show_only_live = _bool(params.get("pullback_show_only_live"), False)
     show_labels = _bool(params.get("pullback_show_labels"), True)
     label_decimals = max(0, min(6, _nonnegative_int_param(params.get("pullback_label_decimals"), 2)))
@@ -666,6 +787,11 @@ def pullback_debug_payload(
         live_time=live_time,
         swing_confirm_bars=swing_confirm_bars,
         allow_peak_extension=allow_peak_extension,
+        require_bearish_leg=require_bearish_leg,
+        min_bearish_candles=min_bearish_candles,
+        min_lower_close_candles=min_lower_close_candles,
+        disallow_same_candle_peak_low=disallow_same_candle_peak_low,
+        impulse_green_filter_enabled=impulse_green_filter_enabled,
     )
     if show_only_live:
         pullbacks = [pullback for pullback in pullbacks if pullback.is_live]

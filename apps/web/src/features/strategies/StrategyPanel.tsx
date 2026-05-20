@@ -32,6 +32,8 @@ type NumericParamKey =
   | "pullback_end_confirmation_bars"
   | "pullback_min_bars_between"
   | "pullback_swing_confirm_bars"
+  | "pullback_min_bearish_candles"
+  | "pullback_min_lower_close_candles"
   | "pullback_label_decimals"
   | "pullback_line_width"
   | "pullback_opacity"
@@ -60,6 +62,8 @@ const numericParams: NumericParamConfig[] = [
   { key: "pullback_end_confirmation_bars", label: "Velas confirma", help: "Numero de velas que confirman recuperacion.", min: 1, max: 20, step: "1", integer: true },
   { key: "pullback_min_bars_between", label: "Separacion velas", help: "Distancia minima entre pullbacks.", min: 0, max: 100, step: "1", integer: true },
   { key: "pullback_swing_confirm_bars", label: "Confirmacion maximo", help: "Velas usadas para confirmar que el maximo es real antes de anclar el pullback.", min: 0, max: 10, step: "1", integer: true },
+  { key: "pullback_min_bearish_candles", label: "Min velas bajistas", help: "Exige velas rojas antes de aceptar el pullback.", min: 0, max: 10, step: "1", integer: true },
+  { key: "pullback_min_lower_close_candles", label: "Min lower-close", help: "Exige cierres descendentes desde el maximo.", min: 0, max: 10, step: "1", integer: true },
   { key: "pullback_label_decimals", label: "Decimales etiqueta", help: "Decimales del porcentaje mostrado.", min: 0, max: 6, step: "1", integer: true },
   { key: "pullback_line_width", label: "Ancho linea", help: "Grosor visual.", min: 1, max: 8, step: "1", integer: true },
   { key: "pullback_opacity", label: "Opacidad", help: "Transparencia visual.", min: 0.1, max: 1, step: "0.05", decimals: 2 },
@@ -79,6 +83,9 @@ const booleanParamHelps: Record<string, string> = {
   pullback_show_labels: "Muestra etiqueta PB con porcentaje.",
   pullback_show_only_live: "Muestra solo el pullback activo.",
   pullback_allow_peak_extension: "Si aparece un high mayor dentro del mismo tramo, mueve el inicio del PB a ese maximo.",
+  pullback_require_bearish_leg: "Evita marcar como pullback una vela verde con mucho rango.",
+  pullback_disallow_same_candle_peak_low: "Impide usar high y low de la misma vela como pullback.",
+  pullback_impulse_green_filter_enabled: "Bloquea PB falsos en velas alcistas de impulso.",
   require_zone: "Bot solo opera dentro de zona operativa.",
   one_position_per_symbol: "Limita entradas simultaneas del bot.",
   usd_strength_filter_enabled: "DXY > SMA30 bloquea compras automaticas. Solo afecta al BOT.",
@@ -105,6 +112,11 @@ function defaultTorumParams(symbol: string): Record<string, unknown> {
     pullback_lookback_bars: 12,
     pullback_swing_confirm_bars: 1,
     pullback_allow_peak_extension: true,
+    pullback_require_bearish_leg: true,
+    pullback_min_bearish_candles: 1,
+    pullback_min_lower_close_candles: 1,
+    pullback_disallow_same_candle_peak_low: true,
+    pullback_impulse_green_filter_enabled: true,
     pullback_recovery_pct: 0.10,
     pullback_end_confirmation_bars: 1,
     pullback_min_bars_between: 0,
@@ -367,6 +379,9 @@ export function StrategyPanel({ symbols, timeframes, onChanged }: StrategyPanelP
                 ["pullback_show_labels", "Etiquetas PB", torumParams.pullback_show_labels !== false],
                 ["pullback_show_only_live", "Solo PB vivo", torumParams.pullback_show_only_live === true],
                 ["pullback_allow_peak_extension", "Permitir actualizar maximo", torumParams.pullback_allow_peak_extension !== false],
+                ["pullback_require_bearish_leg", "Requerir tramo bajista", torumParams.pullback_require_bearish_leg !== false],
+                ["pullback_disallow_same_candle_peak_low", "Evitar PB misma vela", torumParams.pullback_disallow_same_candle_peak_low !== false],
+                ["pullback_impulse_green_filter_enabled", "Filtro impulso verde", torumParams.pullback_impulse_green_filter_enabled !== false],
                 ["require_zone", "Requerir zona", torumParams.require_zone !== false],
                 ["one_position_per_symbol", "Una posicion por activo", torumParams.one_position_per_symbol !== false],
                 ["usd_strength_filter_enabled", "Filtro fortaleza USD", torumParams.usd_strength_filter_enabled !== false],
