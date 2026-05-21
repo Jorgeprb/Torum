@@ -186,7 +186,17 @@ def bot_open_positions(db: Session, symbol: str, user_id: int | None = None) -> 
     )
     if user_id is not None:
         stmt = stmt.where(Position.user_id == user_id)
-    return list(db.scalars(stmt))
+    return [position for position in db.scalars(stmt) if _is_live_bot_position(position)]
+
+
+def _is_live_bot_position(position: Position) -> bool:
+    if position.status != "OPEN":
+        return False
+    if position.closed_at is not None or position.close_price is not None:
+        return False
+    if position.mode != "PAPER" and position.mt5_position_ticket is None:
+        return False
+    return True
 
 
 def open_lot_equivalents(positions: Iterable[Position], base_lot: float) -> float:

@@ -16,6 +16,7 @@ from app.risk.snapshot import RiskSnapshotService, clear_risk_snapshot_cache
 from app.strategies.ath import plan_torum_v1_bot_exposure
 from app.symbols.models import SymbolMapping
 from app.symbols.service import get_symbol_by_internal
+from app.users.models import User  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -102,11 +103,11 @@ def _position(db: Session, *, order_id: int | None, volume: float, open_price: f
     db.commit()
 
 
-def _stale_demo_position_without_ticket(db: Session) -> None:
+def _stale_demo_position_without_ticket(db: Session, *, order_id: int | None = None) -> None:
     db.add(
         Position(
             user_id=1,
-            order_id=None,
+            order_id=order_id,
             internal_symbol="XAUUSD",
             broker_symbol="XAUUSD",
             mode="DEMO",
@@ -301,6 +302,28 @@ def test_torum_v1_plan_counts_only_bot_positions_not_manual() -> None:
     )
 
     assert plan.allowed is True
+    assert plan.open_lot_equivalents == 0.0
+
+
+def test_torum_v1_plan_ignores_stale_demo_bot_positions_without_mt5_ticket() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    order = _bot_order(db, volume=0.04)
+    _stale_demo_position_without_ticket(db, order_id=order.id)
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=2,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 2
     assert plan.open_lot_equivalents == 0.0
 
 
