@@ -50,6 +50,59 @@ class PushNotificationService:
         }
         return self._send_to_user(user_id, payload)
 
+    def send_bot_order_executed(
+        self,
+        user_id: int,
+        *,
+        symbol: str,
+        side: str,
+        volume: float,
+        price: float | None,
+        tp: float | None,
+        order_id: int,
+    ) -> tuple[int, int]:
+        normalized_symbol = symbol.upper()
+        price_text = f"{price:.2f}" if price is not None else "--"
+        tp_text = f" TP {tp:.2f}" if tp is not None else ""
+        payload = {
+            "title": f"BOT {side.upper()} {normalized_symbol}",
+            "body": f"{side.upper()} {volume:.2f} en {price_text}.{tp_text}",
+            "url": f"/?symbol={normalized_symbol}",
+            "data": {
+                "type": "bot_order_executed",
+                "symbol": normalized_symbol,
+                "order_id": order_id,
+                "notification_id": f"bot-order-{order_id}",
+            },
+        }
+        return self._send_to_user(user_id, payload)
+
+    def send_take_profit_hit(
+        self,
+        user_id: int,
+        *,
+        symbol: str,
+        volume: float,
+        close_price: float | None,
+        profit: float | None,
+        position_id: int,
+    ) -> tuple[int, int]:
+        normalized_symbol = symbol.upper()
+        close_text = f"{close_price:.2f}" if close_price is not None else "--"
+        profit_text = f" Profit {profit:.2f}" if profit is not None else ""
+        payload = {
+            "title": f"TP TOCADO {normalized_symbol}",
+            "body": f"Cerrada {volume:.2f} en {close_text}.{profit_text}",
+            "url": f"/?symbol={normalized_symbol}",
+            "data": {
+                "type": "take_profit_hit",
+                "symbol": normalized_symbol,
+                "position_id": position_id,
+                "notification_id": f"tp-hit-{position_id}",
+            },
+        }
+        return self._send_to_user(user_id, payload)
+
     def _send_to_user(self, user_id: int, payload: dict[str, Any]) -> tuple[int, int]:
         subscriptions = list_push_subscriptions(self.db, user_id=user_id, enabled_only=True)
         if not subscriptions:

@@ -38,6 +38,7 @@ class TorumV1Strategy:
         "pullback_use_wicks": True,
         "pullback_use_close_confirmation": True,
         "pullback_live_update_enabled": True,
+        "pullback_live_anchor_to_low": True,
         "pullback_show_labels": True,
         "pullback_show_only_live": False,
         "pullback_label_decimals": 2,

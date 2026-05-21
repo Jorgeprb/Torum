@@ -633,6 +633,109 @@ def test_live_pullback_updates_current_segment_low() -> None:
     assert pullbacks[0].is_live is True
 
 
+def test_live_pullback_keeps_minimum_when_price_rebounds() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.95, 99.98),
+        _m5_candle(_madrid(1, 9, 5), 99.98, 100, 99.7, 99.8),
+    ]
+
+    first = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.4,
+        live_time=_madrid(1, 9, 9),
+        live_cache_key="test-live-rebound",
+    )
+    second = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.8,
+        live_time=_madrid(1, 9, 10),
+        live_cache_key="test-live-rebound",
+    )
+
+    assert first[0].pullback_low == 99.4
+    assert second[0].pullback_low == 99.4
+    assert second[0].pullback_low_time == _madrid(1, 9, 9).astimezone(UTC)
+
+
+def test_live_pullback_updates_when_new_live_minimum_arrives() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.95, 99.98),
+        _m5_candle(_madrid(1, 9, 5), 99.98, 100, 99.7, 99.8),
+    ]
+
+    detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.4,
+        live_time=_madrid(1, 9, 9),
+        live_cache_key="test-live-new-low",
+    )
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.2,
+        live_time=_madrid(1, 9, 10),
+        live_cache_key="test-live-new-low",
+    )
+
+    assert pullbacks[0].pullback_low == 99.2
+    assert pullbacks[0].pullback_low_time == _madrid(1, 9, 10).astimezone(UTC)
+
+
+def test_live_pullback_uses_candle_low_when_it_is_lower_than_live_price() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.95, 99.98),
+        _m5_candle(_madrid(1, 9, 5), 99.98, 100, 99.4, 99.8),
+    ]
+
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.8,
+        live_time=_madrid(1, 9, 9),
+    )
+
+    assert pullbacks[0].pullback_low == 99.4
+    assert pullbacks[0].pullback_low_time == _madrid(1, 9, 5).astimezone(UTC)
+
+
+def test_live_pullback_uses_live_price_when_it_is_lower_than_candle_low() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.95, 99.98),
+        _m5_candle(_madrid(1, 9, 5), 99.98, 100, 99.7, 99.8),
+    ]
+
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.4,
+        live_time=_madrid(1, 9, 9),
+    )
+
+    assert pullbacks[0].pullback_low == 99.4
+    assert pullbacks[0].pullback_low_time == _madrid(1, 9, 9).astimezone(UTC)
+
+
+def test_live_pullback_can_start_from_live_low_after_closed_bearish_leg() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.95, 99.98),
+        _m5_candle(_madrid(1, 9, 5), 99.98, 100, 99.9, 99.7),
+    ]
+
+    pullbacks = detect_pullbacks(
+        candles,
+        threshold=0.20,
+        live_price=99.7,
+        live_time=_madrid(1, 9, 9),
+    )
+
+    assert pullbacks[0].pullback_low == 99.7
+    assert pullbacks[0].pullback_low_time == _madrid(1, 9, 9).astimezone(UTC)
+    assert pullbacks[0].is_live is True
+
+
 def test_green_impulse_candle_does_not_create_pullback() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
@@ -1060,6 +1163,55 @@ def test_pullback_low_zone_helper_accepts_open_ended_time2() -> None:
     zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), None, 99.65, 99.75)
 
     assert is_pullback_low_inside_operation_zone(pullback, zone) is True
+
+
+def test_runner_detects_duplicate_torum_setup_signal() -> None:
+    db = _session()
+    user = db.get(User, 1)
+    assert user is not None
+    config = _config(db, "XAUUSD")
+    metadata = {
+        "confirmation_candle_time": int(_madrid(1, 16).timestamp()),
+        "pullback_low_time": int(_madrid(1, 15, 45).timestamp()),
+        "operation_zone_id": "zone-1",
+    }
+    previous = StrategySignal(
+        strategy_config_id=config.id,
+        strategy_key="torum_v1",
+        user_id=user.id,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        signal_type="ENTRY",
+        side="BUY",
+        entry_type="MARKET",
+        confidence=0.72,
+        reason="buy_pullback_confirmed_inside_zone",
+        metadata_json=metadata,
+        status="ORDER_EXECUTED",
+    )
+    current = StrategySignal(
+        strategy_config_id=config.id,
+        strategy_key="torum_v1",
+        user_id=user.id,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        signal_type="ENTRY",
+        side="BUY",
+        entry_type="MARKET",
+        confidence=0.72,
+        reason="buy_pullback_confirmed_inside_zone",
+        metadata_json=metadata,
+        status="GENERATED",
+    )
+    db.add_all([previous, current])
+    db.commit()
+    db.refresh(previous)
+    db.refresh(current)
+
+    duplicate = StrategyRunner(db)._previous_torum_v1_setup_signal(current)
+
+    assert duplicate is not None
+    assert duplicate.id == previous.id
 
 
 def test_support_level_uses_pullback_low_for_desired_multiplier() -> None:

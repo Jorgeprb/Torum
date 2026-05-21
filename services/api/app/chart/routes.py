@@ -134,6 +134,7 @@ def chart_overlays(
                 params,
                 live_price=live_price,
                 live_time=live_time,
+                live_cache_key=f"user:{current_user.id}:{symbol.upper()}:M5:strategy_debug_pullbacks",
             )
     return ChartOverlaysResponse(
         symbol=symbol.upper(),

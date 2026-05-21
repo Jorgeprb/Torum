@@ -211,6 +211,41 @@ def test_order_manager_creates_paper_order_and_position() -> None:
     assert db.query(Position).count() == 1
 
 
+def test_strategy_order_sends_push_when_bot_buys(monkeypatch) -> None:
+    db = _session()
+    user = db.get(User, 1)
+    assert user is not None
+    sent: list[dict[str, object]] = []
+
+    def fake_send(self, user_id: int, **payload):  # type: ignore[no-untyped-def]
+        sent.append({"user_id": user_id, **payload})
+        return 1, 0
+
+    monkeypatch.setattr("app.alerts.push.PushNotificationService.send_bot_order_executed", fake_send)
+
+    response = OrderManager(db).create_strategy_order(
+        ManualOrderRequest(internal_symbol="XAUUSD", side="BUY", volume=0.01),
+        user,
+        strategy_key="example_strategy",
+        strategy_signal_id=99,
+        mode="PAPER",
+        strategy_settings=SimpleNamespace(strategies_enabled=True, strategy_live_enabled=True),
+    )
+
+    assert response.ok is True
+    assert sent == [
+        {
+            "user_id": 1,
+            "symbol": "XAUUSD",
+            "side": "BUY",
+            "volume": 0.01,
+            "price": 2325.2,
+            "tp": pytest.approx(2327.29268),
+            "order_id": response.order_id,
+        }
+    ]
+
+
 def test_position_service_profit_uses_contract_size() -> None:
     db = _session()
     position = Position(
@@ -453,6 +488,70 @@ def test_mt5_position_sync_uses_history_deal_for_closed_position() -> None:
     assert saved.commission == -0.2
     assert saved.closing_deal_ticket == 555
     assert saved.close_payload_json == {"ticket": 555, "position_id": 789}
+
+
+def test_mt5_position_sync_sends_push_when_tp_is_hit(monkeypatch) -> None:
+    db = _session()
+    closed_time = datetime(2026, 4, 27, 12, 30, tzinfo=UTC)
+    sent: list[dict[str, object]] = []
+
+    def fake_send(self, user_id: int, **payload):  # type: ignore[no-untyped-def]
+        sent.append({"user_id": user_id, **payload})
+        return 1, 0
+
+    monkeypatch.setattr("app.alerts.push.PushNotificationService.send_take_profit_hit", fake_send)
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=123456,
+        account_server="Broker-Demo",
+        side="BUY",
+        volume=0.04,
+        open_price=100.0,
+        current_price=100.0,
+        sl=None,
+        tp=101.0,
+        profit=0.0,
+        status="OPEN",
+        mt5_position_ticket=789,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+
+    payload = {
+        "position_id": 789,
+        "ticket": 555,
+        "time_msc": int(closed_time.timestamp() * 1000),
+        "price": 101.0,
+        "profit": 4.0,
+        "raw": {"ticket": 555, "position_id": 789},
+    }
+    PositionService(db).sync_mt5_positions(
+        positions=[],
+        closed_deals=[payload],
+        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+    )
+    PositionService(db).sync_mt5_positions(
+        positions=[],
+        closed_deals=[payload],
+        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+    )
+
+    assert sent == [
+        {
+            "user_id": 1,
+            "symbol": "XAUUSD",
+            "volume": 0.04,
+            "close_price": 101.0,
+            "profit": 4.0,
+            "position_id": position.id,
+        }
+    ]
 
 
 def test_mt5_position_sync_sums_position_deals_for_closed_profit() -> None:

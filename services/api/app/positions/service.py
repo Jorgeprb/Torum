@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.alerts.push import PushNotificationService
 from app.mt5.schemas import MT5AccountPayload
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.positions.models import Position
@@ -60,6 +61,7 @@ class PositionService:
             position.close_price = position.current_price
             self.db.commit()
             self._refresh_risk_snapshot(position.internal_symbol)
+            self._notify_take_profit_hit(position)
             return True, "Paper position closed", position
 
         if position.mt5_position_ticket is None:
@@ -99,6 +101,7 @@ class PositionService:
         position.raw_payload_json = {**(position.raw_payload_json or {}), "close_response": response}
         self.db.commit()
         self._refresh_risk_snapshot(position.internal_symbol)
+        self._notify_take_profit_hit(position)
         return True, "MT5 position closed", position
     def reconcile_missing_mt5_positions(self) -> dict[str, int]:
         """
@@ -341,6 +344,30 @@ class PositionService:
             RiskSnapshotService(self.db).recompute(symbol, source="STRATEGY")
         except Exception:  # noqa: BLE001
             logger.exception("risk_snapshot_recompute_failed symbol=%s", symbol)
+
+    def _notify_take_profit_hit(self, position: Position) -> None:
+        if position.user_id is None or not _is_take_profit_hit(position):
+            return
+        payload = position.raw_payload_json or {}
+        if payload.get("take_profit_push_sent_at"):
+            return
+        try:
+            sent, _failed = PushNotificationService(self.db).send_take_profit_hit(
+                position.user_id,
+                symbol=position.internal_symbol,
+                volume=float(position.volume),
+                close_price=position.close_price,
+                profit=position.profit,
+                position_id=position.id,
+            )
+            if sent > 0:
+                position.raw_payload_json = {
+                    **payload,
+                    "take_profit_push_sent_at": datetime.now(UTC).isoformat(),
+                }
+                self.db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("take_profit_push_failed position_id=%s", position.id)
     
     def _is_really_open_position(self, position: Position) -> bool:
         if position.status != "OPEN":
@@ -377,6 +404,7 @@ class PositionService:
             stmt = stmt.where(or_(Position.account_server == account_server, Position.account_server.is_(None)))
 
         count = 0
+        closed_positions: list[Position] = []
         for position in self.db.scalars(stmt):
             if position.mt5_position_ticket is None:
                 continue
@@ -384,7 +412,10 @@ class PositionService:
             if close_deal is None:
                 continue
             _apply_close_deal(position, close_deal)
+            closed_positions.append(position)
             count += 1
+        for position in closed_positions:
+            self._notify_take_profit_hit(position)
         return count
     
     def _close_missing_mt5_positions(
@@ -404,6 +435,7 @@ class PositionService:
         if account_server:
             stmt = stmt.where(or_(Position.account_server == account_server, Position.account_server.is_(None)))
         count = 0
+        closed_positions: list[Position] = []
         for position in self.db.scalars(stmt):
             if position.mt5_position_ticket in seen_tickets:
                 continue
@@ -424,7 +456,10 @@ class PositionService:
 
             position.status = "CLOSED"
             position.closed_at = position.closed_at or datetime.now(UTC)
+            closed_positions.append(position)
             count += 1
+        for position in closed_positions:
+            self._notify_take_profit_hit(position)
         return count
 
 
@@ -445,6 +480,15 @@ def _calculate_position_profit(
 ) -> float:
     direction = 1 if side == "BUY" else -1
     return (current_price - open_price) * volume * contract_size * direction
+
+
+def _is_take_profit_hit(position: Position) -> bool:
+    if position.tp is None or position.close_price is None:
+        return False
+    tolerance = max(abs(position.tp) * 0.00002, 0.02)
+    if position.side == "BUY":
+        return position.close_price >= position.tp - tolerance
+    return position.close_price <= position.tp + tolerance
 
 
 def _int_or_none(value: object) -> int | None:

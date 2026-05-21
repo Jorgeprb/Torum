@@ -11,6 +11,7 @@ from app.candles.models import Candle
 from app.orders.models import Order
 from app.positions.models import Position
 from app.strategies.ath_models import SymbolAthLevel
+from app.strategies.models import StrategySignal
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.trading.lot_sizing import calculate_lot_size
@@ -20,6 +21,8 @@ ATH_RISK_LIMIT_RATIO = 0.50
 ATH_ADVERSE_MOVE_RATIO = 0.30
 ATH_AUTO_SOURCE = "candles"
 ATH_MANUAL_SOURCE = "manual"
+TORUM_V1_PENDING_ORDER_STATUSES = ("CREATED", "VALIDATING", "SENT")
+TORUM_V1_RESERVED_SIGNAL_STATUSES = ("RISK_APPROVED", "SENT_TO_ORDER_MANAGER")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +194,110 @@ def open_lot_equivalents(positions: Iterable[Position], base_lot: float) -> floa
     return sum(max(0.0, float(position.volume)) / safe_base for position in positions)
 
 
+def bot_pending_lot_equivalents(db: Session, symbol: str, user_id: int | None, base_lot: float, exclude_order_id: int | None = None) -> float:
+    safe_base = base_lot if base_lot > 0 else 0.01
+    stmt = select(Order).where(
+        Order.internal_symbol == symbol.upper(),
+        Order.source == "STRATEGY",
+        Order.strategy_key == "torum_v1",
+        Order.status.in_(TORUM_V1_PENDING_ORDER_STATUSES),
+    )
+    if user_id is not None:
+        stmt = stmt.where(Order.user_id == user_id)
+    if exclude_order_id is not None:
+        stmt = stmt.where(Order.id != exclude_order_id)
+    return sum(max(0.0, float(order.volume)) / safe_base for order in db.scalars(stmt))
+
+
+def bot_reserved_signal_lot_equivalents(db: Session, symbol: str, user_id: int | None, base_lot: float, exclude_signal_id: int | None = None) -> float:
+    safe_base = base_lot if base_lot > 0 else 0.01
+    stmt = select(StrategySignal).where(
+        StrategySignal.strategy_key == "torum_v1",
+        StrategySignal.internal_symbol == symbol.upper(),
+        StrategySignal.signal_type == "ENTRY",
+        StrategySignal.side == "BUY",
+        StrategySignal.status.in_(TORUM_V1_RESERVED_SIGNAL_STATUSES),
+    )
+    if user_id is not None:
+        stmt = stmt.where(StrategySignal.user_id == user_id)
+    if exclude_signal_id is not None:
+        stmt = stmt.where(StrategySignal.id != exclude_signal_id)
+
+    total = 0.0
+    for signal in db.scalars(stmt):
+        metadata = signal.metadata_json or {}
+        volume = _float_or_none(metadata.get("accepted_volume")) or _float_or_none(signal.suggested_volume)
+        if volume is not None:
+            total += max(0.0, volume) / safe_base
+            continue
+        multiplier = _float_or_none(metadata.get("accepted_multiplier")) or _float_or_none(metadata.get("desired_multiplier")) or 1.0
+        total += max(0.0, multiplier)
+    return total
+
+
+def bot_reserved_potential_loss(
+    db: Session,
+    symbol: str,
+    user_id: int | None,
+    *,
+    stress_price: float,
+    contract_size: float,
+    fallback_price: float | None,
+    exclude_order_id: int | None = None,
+    exclude_signal_id: int | None = None,
+) -> float:
+    from app.risk.snapshot import candidate_loss
+
+    total = 0.0
+    order_stmt = select(Order).where(
+        Order.internal_symbol == symbol.upper(),
+        Order.source == "STRATEGY",
+        Order.strategy_key == "torum_v1",
+        Order.status.in_(TORUM_V1_PENDING_ORDER_STATUSES),
+    )
+    if user_id is not None:
+        order_stmt = order_stmt.where(Order.user_id == user_id)
+    if exclude_order_id is not None:
+        order_stmt = order_stmt.where(Order.id != exclude_order_id)
+    for order in db.scalars(order_stmt):
+        price = order.executed_price or order.requested_price or fallback_price
+        if price is None:
+            continue
+        total += candidate_loss(
+            side=order.side,
+            volume=float(order.volume),
+            price=float(price),
+            stress_price=stress_price,
+            contract_size=contract_size,
+        )
+
+    signal_stmt = select(StrategySignal).where(
+        StrategySignal.strategy_key == "torum_v1",
+        StrategySignal.internal_symbol == symbol.upper(),
+        StrategySignal.signal_type == "ENTRY",
+        StrategySignal.side == "BUY",
+        StrategySignal.status.in_(TORUM_V1_RESERVED_SIGNAL_STATUSES),
+    )
+    if user_id is not None:
+        signal_stmt = signal_stmt.where(StrategySignal.user_id == user_id)
+    if exclude_signal_id is not None:
+        signal_stmt = signal_stmt.where(StrategySignal.id != exclude_signal_id)
+    for signal in db.scalars(signal_stmt):
+        metadata = signal.metadata_json or {}
+        volume = _float_or_none(metadata.get("accepted_volume")) or _float_or_none(signal.suggested_volume)
+        price = fallback_price or _float_or_none(metadata.get("current_price"))
+        if volume is None or price is None:
+            continue
+        total += candidate_loss(
+            side=signal.side,
+            volume=volume,
+            price=price,
+            stress_price=stress_price,
+            contract_size=contract_size,
+        )
+    return round(total, 2)
+
+
 def plan_torum_v1_bot_exposure(
     db: Session,
     *,
@@ -201,6 +308,8 @@ def plan_torum_v1_bot_exposure(
     balance: float | None,
     trading_settings: object,
     symbol_mapping: SymbolMapping | None,
+    exclude_order_id: int | None = None,
+    exclude_signal_id: int | None = None,
 ) -> BotExposurePlan:
     normalized_symbol = symbol.upper()
     base_lot = _base_lot(balance, trading_settings)
@@ -212,6 +321,9 @@ def plan_torum_v1_bot_exposure(
 
     open_positions = bot_open_positions(db, normalized_symbol, user_id)
     open_equiv = open_lot_equivalents(open_positions, base_lot)
+    pending_equiv = bot_pending_lot_equivalents(db, normalized_symbol, user_id, base_lot, exclude_order_id=exclude_order_id)
+    reserved_equiv = bot_reserved_signal_lot_equivalents(db, normalized_symbol, user_id, base_lot, exclude_signal_id=exclude_signal_id)
+    used_equiv = open_equiv + pending_equiv + reserved_equiv
     max_multiplier = min(max(1, int(desired_multiplier)), 3)
 
     if balance is None or balance <= 0:
@@ -225,10 +337,21 @@ def plan_torum_v1_bot_exposure(
     if snapshot.dirty or not snapshot.valid:
         snapshot = RiskSnapshotService(db).recompute(normalized_symbol, source="STRATEGY")
     if not snapshot.valid or snapshot.current_loss is None or snapshot.stress_price is None:
-        return _blocked("missing_risk_snapshot", ath, zone, max_equivalents, open_equiv)
+        return _blocked("missing_risk_snapshot", ath, zone, max_equivalents, used_equiv)
     risk_limit = snapshot.risk_limit if snapshot.risk_limit is not None else balance * ATH_RISK_LIMIT_RATIO
+    reserved_loss = bot_reserved_potential_loss(
+        db,
+        normalized_symbol,
+        user_id,
+        stress_price=snapshot.stress_price,
+        contract_size=snapshot.contract_size,
+        fallback_price=current_price,
+        exclude_order_id=exclude_order_id,
+        exclude_signal_id=exclude_signal_id,
+    )
+    current_loss = round((snapshot.current_loss or 0.0) + reserved_loss, 2)
     for multiplier in range(max_multiplier, 0, -1):
-        if open_equiv + multiplier > max_equivalents + 1e-9:
+        if used_equiv + multiplier > max_equivalents + 1e-9:
             continue
         volume = round(base_lot * multiplier, 8)
         added_loss = candidate_loss(
@@ -238,7 +361,7 @@ def plan_torum_v1_bot_exposure(
             stress_price=snapshot.stress_price,
             contract_size=snapshot.contract_size,
         )
-        potential_loss = round(snapshot.current_loss + added_loss, 2)
+        potential_loss = round(current_loss + added_loss, 2)
         projected_balance = balance - potential_loss
         if potential_loss <= risk_limit:
             return BotExposurePlan(
@@ -249,7 +372,7 @@ def plan_torum_v1_bot_exposure(
                 ath_price=ath,
                 ath_zone=zone.key if zone is not None else None,
                 max_lot_equivalents=max_equivalents,
-                open_lot_equivalents=open_equiv,
+                open_lot_equivalents=used_equiv,
                 potential_loss=potential_loss,
                 projected_balance=projected_balance,
             )
@@ -262,7 +385,7 @@ def plan_torum_v1_bot_exposure(
         ath_price=ath,
         ath_zone=zone.key if zone is not None else None,
         max_lot_equivalents=max_equivalents,
-        open_lot_equivalents=open_equiv,
+        open_lot_equivalents=used_equiv,
         potential_loss=None,
         projected_balance=None,
     )
@@ -356,6 +479,13 @@ def latest_executable_price(tick: Tick | None, side: str = "BUY") -> float | Non
     if side.upper() == "BUY":
         return tick.ask or tick.last or tick.bid
     return tick.bid or tick.last or tick.ask
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _base_lot(balance: float | None, trading_settings: object) -> float:

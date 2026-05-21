@@ -112,6 +112,8 @@ class RiskManager:
         price_stale_after_seconds: int,
         user_id: int | None = None,
         strategy_key: str | None = None,
+        exclude_order_id: int | None = None,
+        exclude_signal_id: int | None = None,
     ) -> RiskDecision:
         decision = self.evaluate(
             order=order,
@@ -151,6 +153,8 @@ class RiskManager:
                 balance=balance,
                 trading_settings=trading_settings,
                 symbol_mapping=symbol_mapping,
+                exclude_order_id=exclude_order_id,
+                exclude_signal_id=exclude_signal_id,
             )
             if not plan.allowed and plan.reason == "ath_red_zone":
                 reasons.append(f"BOT bloqueado por zona ATH roja en {order.internal_symbol}")

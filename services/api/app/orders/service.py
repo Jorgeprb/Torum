@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+from app.alerts.push import PushNotificationService
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -136,6 +137,8 @@ class OrderManager:
                 price_stale_after_seconds=app_settings.price_stale_after_seconds,
                 user_id=user.id,
                 strategy_key=strategy_key,
+                exclude_order_id=order.id,
+                exclude_signal_id=strategy_signal_id,
             )
         else:
             risk_decision = risk_manager.evaluate(
@@ -224,6 +227,7 @@ class OrderManager:
         self.db.commit()
         self.db.refresh(order)
         self._refresh_risk_snapshot(order.internal_symbol)
+        self._notify_strategy_order_executed(order)
         return ManualOrderResponse(
             ok=True,
             order_id=order.id,
@@ -358,6 +362,7 @@ class OrderManager:
         self.db.add(position)
         self.db.commit()
         self._refresh_risk_snapshot(order.internal_symbol)
+        self._notify_strategy_order_executed(order)
         return ManualOrderResponse(
             ok=True,
             order_id=order.id,
@@ -382,6 +387,22 @@ class OrderManager:
             RiskSnapshotService(self.db).recompute(symbol, source="STRATEGY")
         except Exception:  # noqa: BLE001
             logger.exception("risk_snapshot_recompute_failed symbol=%s", symbol)
+
+    def _notify_strategy_order_executed(self, order: Order) -> None:
+        if order.source != "STRATEGY" or order.user_id is None:
+            return
+        try:
+            PushNotificationService(self.db).send_bot_order_executed(
+                order.user_id,
+                symbol=order.internal_symbol,
+                side=order.side,
+                volume=float(order.volume),
+                price=order.executed_price or order.requested_price,
+                tp=order.tp,
+                order_id=order.id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("bot_order_push_failed order_id=%s", order.id)
 
 
 def _float_or_none(value: Any) -> float | None:

@@ -150,6 +150,28 @@ def _bot_order(db: Session, *, volume: float = 0.01) -> Order:
     return order
 
 
+def _pending_bot_order(db: Session, *, volume: float, requested_price: float, status: str = "SENT") -> Order:
+    order = Order(
+        user_id=1,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=1,
+        account_server="test",
+        side="BUY",
+        order_type="MARKET",
+        volume=volume,
+        requested_price=requested_price,
+        status=status,
+        source="STRATEGY",
+        strategy_key="torum_v1",
+    )
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+    return order
+
+
 def _trading_settings() -> SimpleNamespace:
     return SimpleNamespace(
         lot_per_equity_enabled=True,
@@ -280,3 +302,90 @@ def test_torum_v1_plan_counts_only_bot_positions_not_manual() -> None:
 
     assert plan.allowed is True
     assert plan.open_lot_equivalents == 0.0
+
+
+def test_torum_v1_plan_counts_pending_bot_orders_for_capacity() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    _pending_bot_order(db, volume=0.08, requested_price=3900.0)
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=2,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 1
+    assert plan.open_lot_equivalents == 2.0
+    assert plan.potential_loss == 4800.0
+
+
+def test_torum_v1_plan_excludes_current_pending_order_from_capacity() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    order = _pending_bot_order(db, volume=0.08, requested_price=3900.0)
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=2,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+        exclude_order_id=order.id,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 2
+    assert plan.open_lot_equivalents == 0.0
+    assert plan.potential_loss == 3200.0
+
+
+def test_torum_v1_plan_blocks_when_pending_orders_use_all_equivalents() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    _pending_bot_order(db, volume=0.12, requested_price=3900.0)
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=1,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is False
+    assert plan.reason == "risk_or_ath_capacity_exceeded"
+    assert plan.open_lot_equivalents == 3.0
+
+
+def test_torum_v1_plan_blocks_when_pending_order_risk_exceeds_limit() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    _pending_bot_order(db, volume=0.08, requested_price=4000.0)
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=1,
+        current_price=4000.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is False
+    assert plan.reason == "risk_or_ath_capacity_exceeded"
+    assert plan.open_lot_equivalents == 2.0

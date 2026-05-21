@@ -46,6 +46,7 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "pullback_use_wicks": True,
     "pullback_use_close_confirmation": True,
     "pullback_live_update_enabled": True,
+    "pullback_live_anchor_to_low": True,
     "pullback_show_labels": True,
     "pullback_show_only_live": False,
     "pullback_label_decimals": 2,
@@ -81,6 +82,8 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
         },
     },
 }
+
+_LIVE_PULLBACK_LOW_CACHE: dict[str, "TorumV1Pullback"] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +177,8 @@ def detect_pullbacks(
     live_update_enabled: bool = True,
     live_price: float | None = None,
     live_time: datetime | None = None,
+    live_anchor_to_low: bool = True,
+    live_cache_key: str | None = None,
     swing_confirm_bars: int = 1,
     allow_peak_extension: bool = True,
     require_bearish_leg: bool = True,
@@ -289,6 +294,8 @@ def detect_pullbacks(
             last_candle=candles[-1],
             live_price=live_price,
             live_time=live_time,
+            live_anchor_to_low=live_anchor_to_low,
+            live_cache_key=live_cache_key,
             threshold=safe_threshold,
             use_wicks=use_wicks,
             require_bearish_leg=require_bearish_leg,
@@ -469,6 +476,8 @@ def _apply_live_pullback_update(
     last_candle: object,
     live_price: float | None,
     live_time: datetime | None,
+    live_anchor_to_low: bool,
+    live_cache_key: str | None,
     threshold: float,
     use_wicks: bool,
     require_bearish_leg: bool,
@@ -480,12 +489,27 @@ def _apply_live_pullback_update(
     if live_price is None:
         return active
 
-    del last_candle, use_wicks, impulse_green_filter_enabled
-    live_low = float(live_price)
-    low_time = _as_utc(live_time or datetime.now(UTC))
+    del impulse_green_filter_enabled
+    live_low, low_time = _live_low_candidate(
+        last_candle=last_candle,
+        live_price=live_price,
+        live_time=live_time,
+        use_wicks=use_wicks,
+        anchor_to_low=live_anchor_to_low,
+    )
+
+    effective_cache_key = live_cache_key if live_anchor_to_low else None
+    cached = _cached_live_pullback(effective_cache_key, peak)
+    if cached is not None and cached.pullback_pct >= threshold and (active is None or cached.pullback_low < active.pullback_low):
+        active = cached
 
     if active is not None:
-        return _updated_pullback_low(active, low_time, live_low) if live_low < active.pullback_low else active
+        if live_low < active.pullback_low:
+            updated = _updated_pullback_low(active, low_time, live_low)
+            _store_live_pullback(effective_cache_key, updated)
+            return updated
+        _store_live_pullback(effective_cache_key, active)
+        return active
 
     swing_high = float(peak.high)
     if swing_high <= 0 or live_low >= swing_high:
@@ -508,13 +532,54 @@ def _apply_live_pullback_update(
     if pullback_pct < threshold:
         return None
 
-    return TorumV1Pullback(
+    pullback = TorumV1Pullback(
         swing_high_time=_as_utc(peak.time),
         swing_high=swing_high,
         pullback_low_time=low_time,
         pullback_low=live_low,
         pullback_pct=pullback_pct,
     )
+    _store_live_pullback(effective_cache_key, pullback)
+    return pullback
+
+
+def _cached_live_pullback(cache_key: str | None, peak: object) -> TorumV1Pullback | None:
+    if not cache_key:
+        return None
+    cached = _LIVE_PULLBACK_LOW_CACHE.get(cache_key)
+    if cached is None:
+        return None
+    if cached.swing_high_time == _as_utc(peak.time) and abs(cached.swing_high - float(peak.high)) < 0.0000001:
+        return cached
+    _LIVE_PULLBACK_LOW_CACHE.pop(cache_key, None)
+    return None
+
+
+def _store_live_pullback(cache_key: str | None, pullback: TorumV1Pullback) -> None:
+    if not cache_key:
+        return
+    _LIVE_PULLBACK_LOW_CACHE[cache_key] = replace(pullback, is_live=False)
+
+
+def _live_low_candidate(
+    *,
+    last_candle: object,
+    live_price: float,
+    live_time: datetime | None,
+    use_wicks: bool,
+    anchor_to_low: bool,
+) -> tuple[float, datetime]:
+    live = float(live_price)
+    live_timestamp = _as_utc(live_time or datetime.now(UTC))
+    if not anchor_to_low:
+        return live, live_timestamp
+    if not use_wicks:
+        return live, live_timestamp
+
+    candle_low = float(last_candle.low)
+    if candle_low <= live:
+        return candle_low, _as_utc(last_candle.time)
+    return live, live_timestamp
 
 
 def is_bullish_confirmation(candle: object) -> bool:
@@ -661,6 +726,7 @@ def should_buy_torum_v1(
             use_wicks=_bool(params.get("pullback_use_wicks"), True),
             use_close_confirmation=_bool(params.get("pullback_use_close_confirmation"), True),
             live_update_enabled=False,
+            live_anchor_to_low=_bool(params.get("pullback_live_anchor_to_low"), True),
             swing_confirm_bars=swing_confirm_bars,
             allow_peak_extension=allow_peak_extension,
             require_bearish_leg=require_bearish_leg,
@@ -748,6 +814,7 @@ def pullback_debug_payload(
     *,
     live_price: float | None = None,
     live_time: datetime | None = None,
+    live_cache_key: str | None = None,
 ) -> list[dict[str, Any]]:
     if not _bool(params.get("pullback_enabled"), True):
         return []
@@ -785,6 +852,8 @@ def pullback_debug_payload(
         live_update_enabled=_bool(params.get("pullback_live_update_enabled"), True),
         live_price=live_price,
         live_time=live_time,
+        live_anchor_to_low=_bool(params.get("pullback_live_anchor_to_low"), True),
+        live_cache_key=live_cache_key,
         swing_confirm_bars=swing_confirm_bars,
         allow_peak_extension=allow_peak_extension,
         require_bearish_leg=require_bearish_leg,
