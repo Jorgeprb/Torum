@@ -29,6 +29,7 @@ interface BuyOnlyOrderPanelProps {
   mt5Connected: boolean;
   mt5Status: MT5Status | null;
   onOrderCompleted: (response: ManualOrderResponse) => void;
+  onOrderStarted?: (message: string) => void;
   symbol: string;
   tradable: boolean;
 }
@@ -60,6 +61,7 @@ export function BuyOnlyOrderPanel({
   mt5Connected,
   mt5Status,
   onOrderCompleted,
+  onOrderStarted,
   symbol,
   tradable
 }: BuyOnlyOrderPanelProps) {
@@ -145,6 +147,7 @@ export function BuyOnlyOrderPanel({
     setSubmitting(true);
     setError(null);
     setSubmitNotice("Enviando orden a MT5...");
+    onOrderStarted?.("Enviando orden a MT5...");
     setModalOpen(false);
     try {
       const response = await submitManualOrder({

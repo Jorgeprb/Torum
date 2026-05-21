@@ -20,30 +20,41 @@ class OrderExecutor:
     def __init__(self, settings: BridgeSettings, mt5_client: MT5Client) -> None:
         self.settings = settings
         self.mt5_client = mt5_client
+        self._selected_symbols: set[str] = set()
+        self._symbol_info_cache: dict[str, Any] = {}
+        self._filling_modes_cache: dict[str, list[int]] = {}
 
     def execute_market_order(self, payload: MarketOrderRequest) -> BridgeOrderResponse:
         started = perf_counter()
+        validate_started = perf_counter()
         validation_error = self._validate_execution_allowed(payload.mode)
         if validation_error is not None:
             return validation_error
+        validate_ms = (perf_counter() - validate_started) * 1000
 
         mt5 = self.mt5_client.mt5
         assert mt5 is not None
 
         if payload.order_type != "MARKET":
             return BridgeOrderResponse(ok=False, comment="Only MARKET orders are supported in Phase 4")
-        if not self.mt5_client.select_symbol(payload.broker_symbol):
+        select_started = perf_counter()
+        if not self._select_symbol_cached(payload.broker_symbol):
             return BridgeOrderResponse(ok=False, comment=f"Symbol not available: {payload.broker_symbol}")
+        select_ms = (perf_counter() - select_started) * 1000
+        symbol_info_started = perf_counter()
         symbol_info = self._get_symbol_info(payload.broker_symbol)
         if symbol_info is None:
             return BridgeOrderResponse(ok=False, comment=f"MT5 symbol_info unavailable for {payload.broker_symbol}")
+        symbol_info_ms = (perf_counter() - symbol_info_started) * 1000
         symbol_error = self._validate_symbol_can_trade(symbol_info, payload.broker_symbol)
         if symbol_error is not None:
             return symbol_error
 
+        tick_started = perf_counter()
         tick = self.mt5_client.get_latest_tick(payload.broker_symbol)
         if tick is None:
             return BridgeOrderResponse(ok=False, comment=f"No current tick for {payload.broker_symbol}")
+        tick_ms = (perf_counter() - tick_started) * 1000
 
         price = _tick_price_for_side(tick, payload.side)
         if price is None or price <= 0:
@@ -71,6 +82,7 @@ class OrderExecutor:
             "type_time": mt5.ORDER_TIME_GTC,
         }
 
+        since_time = datetime.now(UTC)
         logger.info(
             "MT5 market order prepared: symbol=%s side=%s requested_volume=%s normalized_volume=%s price=%s sl=%s tp=%s deviation=%s",
             payload.broker_symbol,
@@ -82,13 +94,41 @@ class OrderExecutor:
             tp,
             payload.deviation_points,
         )
+        send_started = perf_counter()
         response = self._send_with_filling_fallback(
             base_request,
             volume,
             price,
-            self._filling_modes_for_symbol(symbol_info),
+            self._filling_modes_for_symbol(symbol_info, payload.broker_symbol),
         )
-        logger.info("order_send_ms symbol=%s ms=%.2f", payload.broker_symbol, (perf_counter() - started) * 1000)
+        order_send_ms = (perf_counter() - send_started) * 1000
+        if response.ok and not response.position:
+            resolved = self.resolve_position_ticket_after_market_order(
+                symbol=payload.broker_symbol,
+                side=payload.side,
+                volume=volume,
+                magic=payload.magic_number,
+                deal=response.deal,
+                order=response.order,
+                since_time=since_time,
+            )
+            if resolved is not None:
+                response.position = resolved
+                response.raw = {
+                    **response.raw,
+                    "resolved_position": resolved,
+                    "position_resolved_by": "positions_get_recent",
+                }
+        logger.info(
+            "order_timing_ms symbol=%s validate=%.2f select=%.2f symbol_info=%.2f tick=%.2f order_send=%.2f total=%.2f",
+            payload.broker_symbol,
+            validate_ms,
+            select_ms,
+            symbol_info_ms,
+            tick_ms,
+            order_send_ms,
+            (perf_counter() - started) * 1000,
+        )
         return response
 
     def close_position(self, ticket: int, payload: ClosePositionRequest) -> BridgeOrderResponse:
@@ -100,7 +140,7 @@ class OrderExecutor:
         mt5 = self.mt5_client.mt5
         assert mt5 is not None
 
-        if not self.mt5_client.select_symbol(payload.broker_symbol):
+        if not self._select_symbol_cached(payload.broker_symbol):
             return BridgeOrderResponse(ok=False, comment=f"Symbol not available: {payload.broker_symbol}")
         symbol_info = self._get_symbol_info(payload.broker_symbol)
         if symbol_info is None:
@@ -134,7 +174,7 @@ class OrderExecutor:
             "comment": self._comment("close"),
             "type_time": mt5.ORDER_TIME_GTC,
         }
-        response = self._send_with_filling_fallback(request, volume, price, self._filling_modes_for_symbol(symbol_info))
+        response = self._send_with_filling_fallback(request, volume, price, self._filling_modes_for_symbol(symbol_info, payload.broker_symbol))
         logger.info("close_send_ms symbol=%s ticket=%s ms=%.2f", payload.broker_symbol, ticket, (perf_counter() - started) * 1000)
         if response.ok and payload.fetch_close_deal:
             lookup_started = perf_counter()
@@ -178,7 +218,7 @@ class OrderExecutor:
         mt5 = self.mt5_client.mt5
         assert mt5 is not None
 
-        if not self.mt5_client.select_symbol(payload.broker_symbol):
+        if not self._select_symbol_cached(payload.broker_symbol):
             return BridgeOrderResponse(ok=False, comment=f"Symbol not available: {payload.broker_symbol}")
         symbol_info = self._get_symbol_info(payload.broker_symbol)
         if symbol_info is None:
@@ -213,7 +253,7 @@ class OrderExecutor:
         mt5 = self.mt5_client.mt5
         if mt5 is None or not hasattr(mt5, "order_calc_profit"):
             return ProfitPreviewResponse(ok=False, comment="MT5 order_calc_profit unavailable")
-        if not self.mt5_client.select_symbol(payload.broker_symbol):
+        if not self._select_symbol_cached(payload.broker_symbol):
             return ProfitPreviewResponse(ok=False, comment=f"Symbol not available: {payload.broker_symbol}")
         order_type = mt5.ORDER_TYPE_BUY if payload.side == "BUY" else mt5.ORDER_TYPE_SELL
         try:
@@ -281,10 +321,23 @@ class OrderExecutor:
         return None
 
     def _get_symbol_info(self, broker_symbol: str) -> Any | None:
+        if broker_symbol in self._symbol_info_cache:
+            return self._symbol_info_cache[broker_symbol]
         mt5 = self.mt5_client.mt5
         if mt5 is None or not hasattr(mt5, "symbol_info"):
             return None
-        return mt5.symbol_info(broker_symbol)
+        symbol_info = mt5.symbol_info(broker_symbol)
+        if symbol_info is not None:
+            self._symbol_info_cache[broker_symbol] = symbol_info
+        return symbol_info
+
+    def _select_symbol_cached(self, broker_symbol: str) -> bool:
+        if broker_symbol in self._selected_symbols:
+            return True
+        selected = self.mt5_client.select_symbol(broker_symbol)
+        if selected:
+            self._selected_symbols.add(broker_symbol)
+        return selected
 
     def _validate_symbol_can_trade(self, symbol_info: Any, broker_symbol: str) -> BridgeOrderResponse | None:
         mt5 = self.mt5_client.mt5
@@ -366,7 +419,9 @@ class OrderExecutor:
             logger.info("MT5 order_send retcode=%s comment=%s", response.retcode, response.comment)
         return response
 
-    def _filling_modes_for_symbol(self, symbol_info: Any) -> list[int]:
+    def _filling_modes_for_symbol(self, symbol_info: Any, broker_symbol: str | None = None) -> list[int]:
+        if broker_symbol and broker_symbol in self._filling_modes_cache:
+            return self._filling_modes_cache[broker_symbol]
         mt5 = self.mt5_client.mt5
         assert mt5 is not None
         preferred = [
@@ -385,7 +440,63 @@ class OrderExecutor:
                 continue
             if parsed not in modes:
                 modes.append(parsed)
+        if broker_symbol:
+            self._filling_modes_cache[broker_symbol] = modes
         return modes
+
+    def resolve_position_ticket_after_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        volume: float,
+        magic: int | None,
+        deal: int | None,
+        order: int | None,
+        since_time: datetime,
+    ) -> int | None:
+        mt5 = self.mt5_client.mt5
+        if mt5 is None or not hasattr(mt5, "positions_get"):
+            return None
+        try:
+            positions = mt5.positions_get(symbol=symbol)
+        except TypeError:
+            positions = mt5.positions_get()
+        except Exception as exc:  # pragma: no cover - defensive around vendor API
+            logger.warning("positions_get_after_order_failed symbol=%s error=%s", symbol, exc)
+            return None
+        if not positions:
+            logger.warning("position_ticket_resolve_empty symbol=%s order=%s deal=%s", symbol, order, deal)
+            return None
+
+        expected_type = _position_type_for_side(mt5, side)
+        since_timestamp = int((since_time - timedelta(seconds=30)).timestamp())
+        strict_candidates: list[dict[str, Any]] = []
+        fallback_candidates: list[dict[str, Any]] = []
+        for position in positions:
+            payload = _position_to_payload(position)
+            if str(payload.get("symbol") or "") != symbol:
+                continue
+            if magic is not None and payload.get("magic") is not None and _int_or_none(payload.get("magic")) != magic:
+                continue
+            if expected_type is not None and payload.get("type") is not None and _int_or_none(payload.get("type")) != expected_type:
+                continue
+            position_volume = _float_or_none(payload.get("volume"))
+            if position_volume is not None and abs(position_volume - float(volume)) > max(0.000001, float(volume) * 0.001):
+                continue
+            fallback_candidates.append(payload)
+            opened_at = _int_or_none(payload.get("time"))
+            if opened_at is None or opened_at >= since_timestamp:
+                strict_candidates.append(payload)
+
+        candidates = strict_candidates or fallback_candidates
+        if not candidates:
+            logger.warning("position_ticket_resolve_no_match symbol=%s order=%s deal=%s", symbol, order, deal)
+            return None
+        ordered = sorted(candidates, key=_position_sort_key)
+        ticket = _int_or_none(ordered[-1].get("ticket") or ordered[-1].get("identifier"))
+        logger.info("position_ticket_resolved symbol=%s order=%s deal=%s position=%s", symbol, order, deal, ticket)
+        return ticket
 
     def _normalize_volume(self, requested_volume: float, symbol_info: Any) -> float:
         min_volume = _float_or_none(getattr(symbol_info, "volume_min", None)) or 0.0
@@ -454,6 +565,28 @@ def _tick_price_for_side(tick: Any, side: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return price if price > 0 else None
+
+
+def _position_type_for_side(mt5: Any, side: str) -> int | None:
+    attr = "POSITION_TYPE_BUY" if side == "BUY" else "POSITION_TYPE_SELL"
+    value = getattr(mt5, attr, None)
+    if value is None:
+        value = 0 if side == "BUY" else 1
+    return _int_or_none(value)
+
+
+def _position_to_payload(position: Any) -> dict[str, Any]:
+    if hasattr(position, "_asdict"):
+        return position._asdict()
+    return {name: getattr(position, name) for name in dir(position) if not name.startswith("_")}
+
+
+def _position_sort_key(position: dict[str, Any]) -> tuple[int, int]:
+    time_msc = _int_or_none(position.get("time_msc"))
+    if time_msc is None:
+        time_msc = (_int_or_none(position.get("time")) or 0) * 1000
+    ticket = _int_or_none(position.get("ticket") or position.get("identifier")) or 0
+    return time_msc, ticket
 
 
 def _result_to_response(

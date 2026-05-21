@@ -2226,6 +2226,8 @@ useEffect(() => {
       setSelectedPositionId(response.position.id);
       if (response.tp_status === "PENDING") {
         setTradeMessage("Orden ejecutada. TP pendiente de confirmar.");
+      } else if (response.tp_status === "FAILED") {
+        setTradeMessage("Orden ejecutada. TP no confirmado.");
       }
       window.setTimeout(() => void refreshTradingData(), 700);
       return;
@@ -3078,6 +3080,7 @@ useEffect(() => {
         mt5Connected={mt5Status?.connected_to_mt5 ?? false}
         mt5Status={mt5Status}
         onOrderCompleted={handleOrderCompleted}
+        onOrderStarted={setTradeMessage}
         symbol={selectedSymbol}
         tradable={symbolTradable}
       />
@@ -3254,6 +3257,7 @@ useEffect(() => {
           mt5Connected={mt5Status?.connected_to_mt5 ?? false}
           mt5Status={mt5Status}
           onOrderCompleted={handleOrderCompleted}
+          onOrderStarted={setTradeMessage}
           symbol={selectedSymbol}
           tradable={symbolTradable}
         />

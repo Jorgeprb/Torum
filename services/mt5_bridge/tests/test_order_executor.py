@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import UTC, datetime
 
 from bridge.account_state import AccountState
 from bridge.config import BridgeSettings
@@ -16,10 +17,13 @@ class FakeMT5:
     ORDER_FILLING_FOK = 2
     ORDER_FILLING_RETURN = 3
     SYMBOL_TRADE_MODE_DISABLED = 0
+    POSITION_TYPE_BUY = 0
+    POSITION_TYPE_SELL = 1
 
     def __init__(self) -> None:
         self.sent_requests: list[dict[str, object]] = []
         self.next_result: SimpleNamespace | None = None
+        self.positions: list[SimpleNamespace] = []
 
     def symbol_info(self, broker_symbol: str) -> SimpleNamespace:
         return SimpleNamespace(
@@ -37,6 +41,8 @@ class FakeMT5:
         self.sent_requests.append(request)
         if self.next_result is None and getattr(self, "force_none", False):
             return None
+        if self.next_result is not None:
+            return self.next_result
         return SimpleNamespace(
             retcode=10009,
             comment="done",
@@ -49,6 +55,11 @@ class FakeMT5:
 
     def last_error(self) -> tuple[int, str]:
         return (1, "fake mt5 error")
+
+    def positions_get(self, symbol: str | None = None) -> list[SimpleNamespace]:
+        if symbol is None:
+            return self.positions
+        return [position for position in self.positions if getattr(position, "symbol", None) == symbol]
 
 
 class FakeMT5Client:
@@ -137,6 +148,36 @@ def test_order_executor_builds_buy_market_request_with_ask_price() -> None:
     assert request["magic"] == 260426
     assert request["volume"] == 0.01
     assert len(str(request["comment"])) <= 20
+
+
+def test_order_executor_resolves_missing_position_ticket_from_recent_position() -> None:
+    client = FakeMT5Client()
+    client.mt5.next_result = SimpleNamespace(
+        retcode=10009,
+        comment="done",
+        order=123,
+        deal=456,
+        position=0,
+        price=2325.2,
+        volume=0.01,
+    )
+    client.mt5.positions = [
+        SimpleNamespace(
+            ticket=999,
+            identifier=999,
+            symbol="XAUUSD",
+            magic=260426,
+            volume=0.01,
+            type=client.mt5.POSITION_TYPE_BUY,
+            time=int(datetime.now(UTC).timestamp()),
+        )
+    ]
+
+    response = OrderExecutor(_settings(enabled=True), client).execute_market_order(_order("BUY"))
+
+    assert response.ok is True
+    assert response.position == 999
+    assert response.raw["resolved_position"] == 999
 
 
 def test_order_executor_logs_last_error_when_order_send_returns_none() -> None:

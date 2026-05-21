@@ -317,13 +317,29 @@ class OrderManager:
         order.executed_price = _float_or_none(response.get("price"))
         order.mt5_order_ticket = _int_or_none(response.get("order"))
         order.mt5_deal_ticket = _int_or_none(response.get("deal"))
-        order.mt5_position_ticket = _int_or_none(response.get("position"))
+        order.mt5_position_ticket = _int_or_none(
+            response.get("position")
+            or response.get("mt5_position_ticket")
+            or (response.get("raw") or {}).get("resolved_position")
+        )
         final_tp = order.tp
-        if order.executed_price and payload.tp_percent and order.mt5_position_ticket:
+        if order.executed_price and payload.tp_percent:
             final_tp = _take_profit_from_executed(order.side, order.executed_price, payload.tp_percent)
         order.tp = final_tp
-        tp_status = "PENDING" if final_tp and order.mt5_position_ticket else "NONE"
-        order.response_payload_json = {**response, "tp_final": final_tp, "tp_status": tp_status}
+        tp_status = "NONE"
+        if final_tp:
+            if order.mt5_position_ticket:
+                tp_status = "PENDING"
+            else:
+                tp_status = "FAILED"
+                if "missing_mt5_position_ticket_for_tp" not in warnings:
+                    warnings = [*warnings, "missing_mt5_position_ticket_for_tp"]
+        order.response_payload_json = {
+            **response,
+            "tp_final": final_tp,
+            "tp_status": tp_status,
+            "tp_update_error": None if tp_status != "FAILED" else "missing_mt5_position_ticket_for_tp",
+        }
         position = Position(
             user_id=order.user_id,
             order_id=order.id,
@@ -373,6 +389,10 @@ class OrderManager:
             final_tp=final_tp,
             tp_status=tp_status,  # type: ignore[arg-type]
             mt5_position_ticket=order.mt5_position_ticket,
+            meta={
+                "api_order_total_ms": round((perf_counter() - order_started) * 1000, 2),
+                "tp_status": tp_status,
+            },
         )
 
     def _side_price(self, side: str, tick: Tick | None) -> float | None:
@@ -471,8 +491,14 @@ def _post_open_tasks(order_id: int, position_id: int, final_tp: float | None, tp
             except MT5BridgeClientError as exc:
                 payload = {**payload, "tp_status": "FAILED", "tp_update_error": str(exc)}
             logger.info("tp_background_ms position_id=%s ms=%.2f", position_id, (perf_counter() - tp_started) * 1000)
-        elif final_tp:
+        elif final_tp and position.mode == "PAPER":
             payload = {**payload, "tp_status": "UPDATED"}
+        elif final_tp:
+            payload = {
+                **payload,
+                "tp_status": payload.get("tp_status") or "FAILED",
+                "tp_update_error": payload.get("tp_update_error") or "missing_mt5_position_ticket_for_tp",
+            }
         else:
             payload = {**payload, "tp_status": "NONE"}
 
