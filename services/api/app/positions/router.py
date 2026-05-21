@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
@@ -34,13 +34,17 @@ def reconcile_mt5_positions(
 @router.post("/{position_id}/close", response_model=PositionRead)
 def close_position(
     position_id: int,
+    background_tasks: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
     _current_user: Annotated[User, Depends(get_current_user)],
     payload: PositionCloseRequest | None = None,
 ) -> PositionRead:
     if payload and payload.client_confirmation and payload.client_confirmation.get("confirmed") is False:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Close confirmation is required")
-    ok, message, position = PositionService(db).close_position(position_id)
+    ok, message, position = PositionService(db, background_tasks=background_tasks).close_position(
+        position_id,
+        fetch_close_deal=bool(payload.fetch_close_deal) if payload else False,
+    )
     if position is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
     if not ok:

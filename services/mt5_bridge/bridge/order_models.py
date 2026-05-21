@@ -41,6 +41,7 @@ class ClosePositionRequest(BaseModel):
     volume: float = Field(gt=0)
     mode: TradingMode
     magic_number: int | None = None
+    fetch_close_deal: bool = False
 
 
 class ModifyPositionTpRequest(BaseModel):

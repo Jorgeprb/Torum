@@ -75,6 +75,7 @@ export function BuyOnlyOrderPanel({
   const [riskAccepted, setRiskAccepted] = useState(false);
   const [liveText, setLiveText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [submitNotice, setSubmitNotice] = useState<string | null>(null);
   const riskSnapshotRequestRef = useRef(0);
 
   const tpPercent = settings?.default_take_profit_percent ?? 0.09;
@@ -143,6 +144,8 @@ export function BuyOnlyOrderPanel({
     }
     setSubmitting(true);
     setError(null);
+    setSubmitNotice("Enviando orden a MT5...");
+    setModalOpen(false);
     try {
       const response = await submitManualOrder({
         internal_symbol: symbol,
@@ -159,13 +162,14 @@ export function BuyOnlyOrderPanel({
           no_stop_loss_acknowledged: true
         }
       });
-      setModalOpen(false);
       setLiveText("");
       setRiskAccepted(false);
+      setSubmitNotice(response.ok ? "Orden ejecutada" : response.message);
       onOrderCompleted(response);
       void recomputeRiskSnapshot(symbol).catch(() => undefined);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo enviar la compra");
+      setSubmitNotice(null);
     } finally {
       setSubmitting(false);
     }
@@ -262,6 +266,7 @@ export function BuyOnlyOrderPanel({
       {liveDataBlocked ? <div className="compact-warning">{marketStaleReason}</div> : null}
       {lotInputInvalid ? <div className="compact-warning">Lotaje no valido</div> : null}
       {!lotInputInvalid && lotOutOfRange ? <div className="compact-warning">Lotaje fuera de rango</div> : null}
+      {submitNotice ? <div className="compact-warning">{submitNotice}</div> : null}
       {error ? <div className="compact-error">{error}</div> : null}
 
       {modalOpen ? (

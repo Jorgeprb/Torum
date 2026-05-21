@@ -87,6 +87,18 @@ class MT5BridgeClient:
             logger.warning("MT5 bridge close position failed: %s", exc)
             raise MT5BridgeClientError(str(exc)) from exc
 
+    def get_close_deal(self, ticket: int, deal: int | None = None) -> dict[str, Any]:
+        if not self.is_configured():
+            raise MT5BridgeClientError("MT5 bridge base URL is not configured")
+        params = {"deal": str(deal)} if deal is not None else None
+        try:
+            response = requests.get(f"{self.base_url}/positions/{ticket}/close-deal", params=params, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            logger.warning("MT5 bridge close deal lookup failed: %s", exc)
+            raise MT5BridgeClientError(str(exc)) from exc
+
     def modify_position_tp(self, ticket: int, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.is_configured():
             raise MT5BridgeClientError("MT5 bridge base URL is not configured")

@@ -3,6 +3,7 @@ import math
 import re
 import unicodedata
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any
 
 from bridge.account_state import AccountState
@@ -21,6 +22,7 @@ class OrderExecutor:
         self.mt5_client = mt5_client
 
     def execute_market_order(self, payload: MarketOrderRequest) -> BridgeOrderResponse:
+        started = perf_counter()
         validation_error = self._validate_execution_allowed(payload.mode)
         if validation_error is not None:
             return validation_error
@@ -80,14 +82,17 @@ class OrderExecutor:
             tp,
             payload.deviation_points,
         )
-        return self._send_with_filling_fallback(
+        response = self._send_with_filling_fallback(
             base_request,
             volume,
             price,
             self._filling_modes_for_symbol(symbol_info),
         )
+        logger.info("order_send_ms symbol=%s ms=%.2f", payload.broker_symbol, (perf_counter() - started) * 1000)
+        return response
 
     def close_position(self, ticket: int, payload: ClosePositionRequest) -> BridgeOrderResponse:
+        started = perf_counter()
         validation_error = self._validate_execution_allowed(payload.mode)
         if validation_error is not None:
             return validation_error
@@ -130,7 +135,9 @@ class OrderExecutor:
             "type_time": mt5.ORDER_TIME_GTC,
         }
         response = self._send_with_filling_fallback(request, volume, price, self._filling_modes_for_symbol(symbol_info))
-        if response.ok:
+        logger.info("close_send_ms symbol=%s ticket=%s ms=%.2f", payload.broker_symbol, ticket, (perf_counter() - started) * 1000)
+        if response.ok and payload.fetch_close_deal:
+            lookup_started = perf_counter()
             close_deal = _load_recent_close_deal(mt5, ticket, response.deal)
             if close_deal is not None:
                 response.close_deal = close_deal
@@ -145,7 +152,23 @@ class OrderExecutor:
                     close_deal.get("commission"),
                     close_deal.get("fee"),
                 )
+            logger.info("close_deal_lookup_ms ticket=%s ms=%.2f", ticket, (perf_counter() - lookup_started) * 1000)
         return response
+
+    def close_deal(self, ticket: int, deal_ticket: int | None = None) -> dict[str, Any]:
+        started = perf_counter()
+        try:
+            self.mt5_client.initialize()
+        except MT5ClientError as exc:
+            return {"ok": False, "comment": str(exc), "close_deal": None}
+        mt5 = self.mt5_client.mt5
+        if mt5 is None:
+            return {"ok": False, "comment": "MT5 unavailable", "close_deal": None}
+        close_deal = _load_recent_close_deal(mt5, ticket, deal_ticket)
+        logger.info("close_deal_lookup_ms ticket=%s ms=%.2f", ticket, (perf_counter() - started) * 1000)
+        if close_deal is None:
+            return {"ok": False, "comment": "close_deal_not_found", "close_deal": None}
+        return {"ok": True, "comment": "close_deal_found", "close_deal": close_deal}
 
     def modify_position_tp(self, ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
         validation_error = self._validate_execution_allowed(payload.mode)

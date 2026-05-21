@@ -66,6 +66,18 @@ export interface ManualOrderResponse {
   message: string;
   warnings: string[];
   reasons: string[];
+  position: PositionRead | null;
+  order: (OrderRead & {
+    mt5_position_ticket?: number | null;
+    source?: string;
+    strategy_key?: string | null;
+    strategy_signal_id?: number | null;
+  }) | null;
+  executed_price: number | null;
+  final_tp: number | null;
+  tp_status: "NONE" | "PENDING" | "UPDATED" | "FAILED";
+  mt5_position_ticket: number | null;
+  meta: Record<string, unknown>;
 }
 
 export interface RiskPreviewResponse {
@@ -249,7 +261,7 @@ export function getPositions(params: { status?: "OPEN" | "CLOSED"; symbol?: stri
 export function closePosition(id: number): Promise<PositionRead> {
   return request<PositionRead>(`/api/positions/${id}/close`, {
     method: "POST",
-    body: JSON.stringify({ client_confirmation: { confirmed: true } })
+    body: JSON.stringify({ client_confirmation: { confirmed: true }, fetch_close_deal: false })
   });
 }
 

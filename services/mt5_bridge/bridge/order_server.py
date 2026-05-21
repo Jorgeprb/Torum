@@ -105,6 +105,10 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
     def close_position(ticket: int, payload: ClosePositionRequest) -> BridgeOrderResponse:
         return executor.close_position(ticket, payload)
 
+    @app.get("/positions/{ticket}/close-deal")
+    def close_deal(ticket: int, deal: int | None = Query(default=None)) -> dict[str, object]:
+        return executor.close_deal(ticket, deal)
+
     @app.patch("/positions/{ticket}/tp", response_model=BridgeOrderResponse)
     def modify_position_tp(ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
         return executor.modify_position_tp(ticket, payload)

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -38,6 +38,69 @@ class ManualOrderRequest(BaseModel):
         return self
 
 
+class ManualOrderPositionRead(BaseModel):
+    id: int
+    user_id: int | None
+    order_id: int | None
+    internal_symbol: str
+    broker_symbol: str
+    mode: TradingMode
+    account_login: int | None
+    account_server: str | None
+    side: OrderSide
+    volume: float
+    open_price: float
+    current_price: float | None
+    close_price: float | None = None
+    sl: float | None
+    tp: float | None
+    profit: float | None
+    swap: float | None = None
+    commission: float | None = None
+    status: PositionStatus
+    mt5_position_ticket: int | None
+    closing_deal_ticket: int | None = None
+    magic_number: int | None
+    opened_at: datetime
+    closed_at: datetime | None
+    updated_at: datetime
+    tp_percent: float | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class ManualOrderOrderRead(BaseModel):
+    id: int
+    user_id: int | None
+    internal_symbol: str
+    broker_symbol: str
+    mode: TradingMode
+    account_login: int | None
+    account_server: str | None
+    side: OrderSide
+    order_type: OrderType
+    volume: float
+    requested_price: float | None
+    executed_price: float | None
+    sl: float | None
+    tp: float | None
+    status: OrderStatus
+    rejection_reason: str | None
+    mt5_order_ticket: int | None
+    mt5_deal_ticket: int | None
+    mt5_position_ticket: int | None
+    magic_number: int | None
+    comment: str | None
+    source: str
+    strategy_key: str | None = None
+    strategy_signal_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    executed_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
 class ManualOrderResponse(BaseModel):
     ok: bool
     order_id: int
@@ -46,6 +109,13 @@ class ManualOrderResponse(BaseModel):
     message: str
     warnings: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
+    position: ManualOrderPositionRead | None = None
+    order: ManualOrderOrderRead | None = None
+    executed_price: float | None = None
+    final_tp: float | None = None
+    tp_status: Literal["NONE", "PENDING", "UPDATED", "FAILED"] = "NONE"
+    mt5_position_ticket: int | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class RiskPreviewRequest(BaseModel):

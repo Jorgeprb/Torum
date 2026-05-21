@@ -7,6 +7,7 @@ from app.trading.schemas import OrderSide, PositionStatus, TradingMode
 
 class PositionCloseRequest(BaseModel):
     client_confirmation: dict[str, object] | None = None
+    fetch_close_deal: bool = False
 
 
 class PositionTpUpdate(BaseModel):

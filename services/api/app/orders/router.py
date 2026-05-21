@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
@@ -17,10 +17,11 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 @router.post("/manual", response_model=ManualOrderResponse, status_code=status.HTTP_201_CREATED)
 def create_manual_order(
     payload: ManualOrderRequest,
+    background_tasks: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ManualOrderResponse:
-    return OrderManager(db).create_manual_order(payload, current_user)
+    return OrderManager(db, background_tasks=background_tasks).create_manual_order(payload, current_user)
 
 
 @router.get("", response_model=list[OrderRead])

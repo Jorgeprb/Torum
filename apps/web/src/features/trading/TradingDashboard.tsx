@@ -1197,6 +1197,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [selectedPositionId, setSelectedPositionId] = useState<number | null>(null);
   const [closePositionId, setClosePositionId] = useState<number | null>(null);
   const [closingPosition, setClosingPosition] = useState(false);
+  const [pendingClosingPositionIds, setPendingClosingPositionIds] = useState<Set<number>>(() => new Set());
   const [noTradeZones, setNoTradeZones] = useState<NoTradeZone[]>([]);
   const [indicatorLines, setIndicatorLines] = useState<IndicatorLineOutput[]>([]);
   const [strategyDebugPullbacks, setStrategyDebugPullbacks] = useState<StrategyPullbackDebug[]>([]);
@@ -1229,6 +1230,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [historyTab, setHistoryTab] = useState<"OPEN" | "CLOSED">("OPEN");
   const [expandedHistoryRows, setExpandedHistoryRows] = useState<Set<string>>(() => new Set());
   const previousSymbolRef = useRef(selectedSymbol);
+  const pendingClosingPositionIdsRef = useRef<Set<number>>(new Set());
   const latestTickBySymbolRef = useRef<Map<string, Tick>>(new Map());
   const tickTimestampsRef = useRef<number[]>([]);
   const socketManagerRef = useRef<MarketSocketManager | null>(null);
@@ -1239,6 +1241,17 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const pullbackOverlayRefreshAtRef = useRef(0);
   const [ticksPerSecond, setTicksPerSecond] = useState(0);
   const activeMobileView = controlledActiveView ?? internalActiveView;
+
+  function setPendingClosing(positionId: number, pending: boolean) {
+    const next = new Set(pendingClosingPositionIdsRef.current);
+    if (pending) {
+      next.add(positionId);
+    } else {
+      next.delete(positionId);
+    }
+    pendingClosingPositionIdsRef.current = next;
+    setPendingClosingPositionIds(next);
+  }
 
   function setActiveMobileView(view: MobileView) {
     setInternalActiveView(view);
@@ -1448,6 +1461,7 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
   () => (closePositionCandidate ? positionValuation(closePositionCandidate, symbolMappings, latestBid, latestAsk) : null),
   [closePositionCandidate, latestAsk, latestBid, symbolMappings]
 );
+ const closeActionBusy = closingPosition || pendingClosingPositionIds.size > 0;
   function currentMarketKey(symbol = selectedSymbol, timeframe = selectedTimeframe) {
   return `${symbol}:${timeframe}`;
   }
@@ -1940,8 +1954,9 @@ useEffect(() => {
       getTradeHistory()
     ]);
 
+    const pendingClosing = pendingClosingPositionIdsRef.current;
     setOrders(ordersResponse);
-    setPositions(openPositionsResponse.filter(isReallyOpenPosition));
+    setPositions(openPositionsResponse.filter(isReallyOpenPosition).filter((position) => !pendingClosing.has(position.id)));
     setTradeHistory(historyResponse);
   } catch {
     // Auth refresh errors are already surfaced by order submission; keep market chart usable.
@@ -2200,6 +2215,21 @@ useEffect(() => {
 
   function handleOrderCompleted(response: ManualOrderResponse) {
     setTradeMessage(response.ok ? response.message : response.reasons.join("; ") || response.message);
+    if (response.order) {
+      setOrders((current) => [response.order as OrderRead, ...current.filter((order) => order.id !== response.order?.id)].slice(0, 50));
+    }
+    if (response.ok && response.position && isReallyOpenPosition(response.position)) {
+      setPositions((current) => {
+        const next = [response.position as PositionRead, ...current.filter((position) => position.id !== response.position?.id)];
+        return next.filter((position) => !pendingClosingPositionIdsRef.current.has(position.id));
+      });
+      setSelectedPositionId(response.position.id);
+      if (response.tp_status === "PENDING") {
+        setTradeMessage("Orden ejecutada. TP pendiente de confirmar.");
+      }
+      window.setTimeout(() => void refreshTradingData(), 700);
+      return;
+    }
     void refreshTradingData();
   }
 
@@ -2231,19 +2261,54 @@ useEffect(() => {
       return;
     }
 
-    setTradeMessage(null);
+    const previousPosition = position;
+    const previousTradeHistory = tradeHistory;
+    setTradeMessage("Cerrando posicion en MT5...");
+    setClosePositionId(null);
+    setSelectedPositionId((current) => (current === position.id ? null : current));
+    setPendingClosing(position.id, true);
+    setPositions((current) => current.filter((item) => item.id !== position.id));
+    setTradeHistory((current) => current.filter((item) => item.position_id !== position.id));
     setClosingPosition(true);
 
     try {
-      await closePosition(position.id);
+      const closed = await closePosition(position.id);
       setTradeMessage(successMessage);
-      setSelectedPositionId(null);
-      setClosePositionId(null);
+      if (closed.status === "CLOSED") {
+        setTradeHistory((current) => {
+          const nextItem: TradeHistoryItem = {
+            id: closed.id,
+            position_id: closed.id,
+            order_id: closed.order_id,
+            opened_at: closed.opened_at,
+            closed_at: closed.closed_at,
+            internal_symbol: closed.internal_symbol,
+            broker_symbol: closed.broker_symbol,
+            side: closed.side,
+            volume: closed.volume,
+            open_price: closed.open_price,
+            close_price: closed.close_price,
+            tp: closed.tp,
+            profit: closed.profit,
+            swap: closed.swap,
+            commission: closed.commission,
+            mode: closed.mode,
+            mt5_position_ticket: closed.mt5_position_ticket,
+            closing_deal_ticket: closed.closing_deal_ticket,
+            status: closed.status
+          };
+          return [nextItem, ...current.filter((item) => item.position_id !== closed.id)].slice(0, 300);
+        });
+      }
       void recomputeRiskSnapshot(position.internal_symbol).catch(() => undefined);
-      void refreshTradingData();
+      window.setTimeout(() => void refreshTradingData(), 700);
     } catch (requestError) {
+      setPositions((current) => [previousPosition, ...current.filter((item) => item.id !== previousPosition.id)]);
+      setTradeHistory(previousTradeHistory);
       setTradeMessage(requestError instanceof Error ? requestError.message : "No se pudo cerrar la posicion");
+      void refreshTradingData();
     } finally {
+      setPendingClosing(position.id, false);
       setClosingPosition(false);
     }
   }
@@ -2792,11 +2857,11 @@ useEffect(() => {
             </button>
             <button
               className={profit >= 0 ? "position-close-button position-close-button--profit" : "position-close-button position-close-button--loss"}
-              disabled={closingPosition}
+              disabled={closeActionBusy}
               type="button"
               onClick={() => void confirmClosePosition()}
             >
-              {closingPosition ? "Cerrando" : "Confirmar cierre"}
+              {closeActionBusy ? "Cerrando" : "Confirmar cierre"}
             </button>
           </div>
         </div>

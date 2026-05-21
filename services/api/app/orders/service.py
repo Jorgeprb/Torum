@@ -1,12 +1,16 @@
 import logging
 from datetime import UTC, datetime
+from threading import Thread
+from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
 
 from app.alerts.push import PushNotificationService
+from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.db.session import SessionLocal
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.mt5.status_store import mt5_status_store
 from app.orders.models import Order
@@ -17,16 +21,22 @@ from app.settings.trading_service import get_global_trading_settings
 from app.symbols.service import get_symbol_by_internal
 from app.ticks.models import Tick
 from app.trading.lot_sizing import calculate_buy_take_profit
-from app.trading.schemas import ManualOrderRequest, ManualOrderResponse
+from app.trading.schemas import ManualOrderOrderRead, ManualOrderPositionRead, ManualOrderRequest, ManualOrderResponse
 from app.users.models import User
 
 logger = logging.getLogger(__name__)
 
 
 class OrderManager:
-    def __init__(self, db: Session, mt5_client: MT5BridgeClient | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        mt5_client: MT5BridgeClient | None = None,
+        background_tasks: BackgroundTasks | None = None,
+    ) -> None:
         self.db = db
         self.mt5_client = mt5_client or MT5BridgeClient()
+        self.background_tasks = background_tasks
 
     def create_manual_order(self, payload: ManualOrderRequest, user: User) -> ManualOrderResponse:
         return self._create_order(payload=payload, user=user, source="MANUAL")
@@ -77,7 +87,6 @@ class OrderManager:
         payload.tp_percent = tp_percent
         if payload.side == "BUY" and effective_tp is None and requested_price is not None:
             effective_tp = calculate_buy_take_profit(requested_price, tp_percent)
-            payload.tp = effective_tp
         logger.info(
             "Order prepared: source=%s symbol=%s side=%s requested_price=%s preliminary_tp=%s tp_percent=%s",
             source,
@@ -226,8 +235,10 @@ class OrderManager:
         self.db.add(position)
         self.db.commit()
         self.db.refresh(order)
-        self._refresh_risk_snapshot(order.internal_symbol)
-        self._notify_strategy_order_executed(order)
+        self.db.refresh(position)
+        if self.background_tasks is None:
+            self._notify_strategy_order_executed(order)
+        self._schedule_post_open_tasks(order.id, position.id, final_tp=position.tp, tp_percent=payload.tp_percent)
         return ManualOrderResponse(
             ok=True,
             order_id=order.id,
@@ -236,6 +247,12 @@ class OrderManager:
             message="Paper order executed",
             warnings=warnings,
             reasons=[],
+            position=ManualOrderPositionRead.model_validate(position),
+            order=ManualOrderOrderRead.model_validate(order),
+            executed_price=execution_price,
+            final_tp=position.tp,
+            tp_status="UPDATED" if position.tp else "NONE",
+            mt5_position_ticket=None,
         )
 
     def _execute_mt5(
@@ -254,13 +271,14 @@ class OrderManager:
             "order_type": order.order_type,
             "volume": order.volume,
             "sl": order.sl,
-            "tp": order.tp,
+            "tp": None,
             "deviation_points": deviation_points,
             "magic_number": magic_number,
             "comment": order.comment,
         }
         order.status = "SENT"
         self.db.commit()
+        order_started = perf_counter()
         try:
             response = self.mt5_client.execute_market_order(bridge_payload)
         except MT5BridgeClientError as exc:
@@ -301,43 +319,11 @@ class OrderManager:
         order.mt5_deal_ticket = _int_or_none(response.get("deal"))
         order.mt5_position_ticket = _int_or_none(response.get("position"))
         final_tp = order.tp
-        tp_modify_response: dict[str, Any] | None = None
         if order.executed_price and payload.tp_percent and order.mt5_position_ticket:
             final_tp = _take_profit_from_executed(order.side, order.executed_price, payload.tp_percent)
-            if final_tp and (order.tp is None or abs(final_tp - order.tp) > 0.0000001):
-                logger.info(
-                    "MT5 TP final adjustment: symbol=%s ticket=%s executed_price=%s preliminary_tp=%s final_tp=%s tp_percent=%s",
-                    order.internal_symbol,
-                    order.mt5_position_ticket,
-                    order.executed_price,
-                    order.tp,
-                    final_tp,
-                    payload.tp_percent,
-                )
-                try:
-                    tp_modify_response = self.mt5_client.modify_position_tp(
-                        order.mt5_position_ticket,
-                        {
-                            "internal_symbol": order.internal_symbol,
-                            "broker_symbol": order.broker_symbol,
-                            "side": order.side,
-                            "mode": order.mode,
-                            "tp": final_tp,
-                            "sl": order.sl or 0,
-                            "magic_number": order.magic_number,
-                            "comment": "tp-final",
-                        },
-                    )
-                    if tp_modify_response.get("ok"):
-                        final_tp = _float_or_none(tp_modify_response.get("price")) or final_tp
-                    else:
-                        warnings = [*warnings, str(tp_modify_response.get("comment") or "MT5 TP final rejected")]
-                except MT5BridgeClientError as exc:
-                    warnings = [*warnings, f"MT5 TP final failed: {exc}"]
-                    tp_modify_response = {"ok": False, "error": str(exc)}
         order.tp = final_tp
-        if tp_modify_response is not None:
-            order.response_payload_json = {**response, "tp_final": final_tp, "tp_modify_response": tp_modify_response}
+        tp_status = "PENDING" if final_tp and order.mt5_position_ticket else "NONE"
+        order.response_payload_json = {**response, "tp_final": final_tp, "tp_status": tp_status}
         position = Position(
             user_id=order.user_id,
             order_id=order.id,
@@ -361,8 +347,18 @@ class OrderManager:
         )
         self.db.add(position)
         self.db.commit()
-        self._refresh_risk_snapshot(order.internal_symbol)
-        self._notify_strategy_order_executed(order)
+        self.db.refresh(order)
+        self.db.refresh(position)
+        logger.info(
+            "api_order_total_ms symbol=%s source=%s order_id=%s ms=%.2f",
+            order.internal_symbol,
+            order.source,
+            order.id,
+            (perf_counter() - order_started) * 1000,
+        )
+        if self.background_tasks is None:
+            self._notify_strategy_order_executed(order)
+        self._schedule_post_open_tasks(order.id, position.id, final_tp=final_tp, tp_percent=payload.tp_percent)
         return ManualOrderResponse(
             ok=True,
             order_id=order.id,
@@ -371,6 +367,12 @@ class OrderManager:
             message="MT5 order executed",
             warnings=warnings,
             reasons=[],
+            position=ManualOrderPositionRead.model_validate(position),
+            order=ManualOrderOrderRead.model_validate(order),
+            executed_price=order.executed_price,
+            final_tp=final_tp,
+            tp_status=tp_status,  # type: ignore[arg-type]
+            mt5_position_ticket=order.mt5_position_ticket,
         )
 
     def _side_price(self, side: str, tick: Tick | None) -> float | None:
@@ -388,11 +390,24 @@ class OrderManager:
         except Exception:  # noqa: BLE001
             logger.exception("risk_snapshot_recompute_failed symbol=%s", symbol)
 
+    def _schedule_post_open_tasks(
+        self,
+        order_id: int,
+        position_id: int,
+        *,
+        final_tp: float | None,
+        tp_percent: float | None,
+    ) -> None:
+        _enqueue_background_task(self.background_tasks, _post_open_tasks, order_id, position_id, final_tp, tp_percent)
+
     def _notify_strategy_order_executed(self, order: Order) -> None:
         if order.source != "STRATEGY" or order.user_id is None:
             return
+        payload = order.response_payload_json or {}
+        if payload.get("bot_order_push_sent_at"):
+            return
         try:
-            PushNotificationService(self.db).send_bot_order_executed(
+            sent, _failed = PushNotificationService(self.db).send_bot_order_executed(
                 order.user_id,
                 symbol=order.internal_symbol,
                 side=order.side,
@@ -401,8 +416,101 @@ class OrderManager:
                 tp=order.tp,
                 order_id=order.id,
             )
+            if sent > 0:
+                order.response_payload_json = {**payload, "bot_order_push_sent_at": datetime.now(UTC).isoformat()}
+                self.db.commit()
         except Exception:  # noqa: BLE001
             logger.exception("bot_order_push_failed order_id=%s", order.id)
+
+
+def _enqueue_background_task(background_tasks: BackgroundTasks | None, func: Any, *args: Any) -> None:
+    if background_tasks is not None:
+        background_tasks.add_task(func, *args)
+        return
+    Thread(target=func, args=args, daemon=True).start()
+
+
+def _post_open_tasks(order_id: int, position_id: int, final_tp: float | None, tp_percent: float | None) -> None:
+    started = perf_counter()
+    db = SessionLocal()
+    try:
+        order = db.get(Order, order_id)
+        position = db.get(Position, position_id)
+        if order is None or position is None:
+            return
+
+        payload = position.raw_payload_json or {}
+        if final_tp and position.mode != "PAPER" and position.mt5_position_ticket:
+            tp_started = perf_counter()
+            try:
+                response = MT5BridgeClient().modify_position_tp(
+                    position.mt5_position_ticket,
+                    {
+                        "internal_symbol": position.internal_symbol,
+                        "broker_symbol": position.broker_symbol,
+                        "side": position.side,
+                        "mode": position.mode,
+                        "tp": final_tp,
+                        "sl": position.sl or 0,
+                        "magic_number": position.magic_number,
+                        "comment": "tp-final",
+                    },
+                )
+                if response.get("ok"):
+                    confirmed_tp = _float_or_none(response.get("price")) or final_tp
+                    position.tp = confirmed_tp
+                    order.tp = confirmed_tp
+                    payload = {**payload, "tp_status": "UPDATED", "tp_modify_response": response}
+                else:
+                    payload = {
+                        **payload,
+                        "tp_status": "FAILED",
+                        "tp_update_error": str(response.get("comment") or "MT5 TP final rejected"),
+                        "tp_modify_response": response,
+                    }
+            except MT5BridgeClientError as exc:
+                payload = {**payload, "tp_status": "FAILED", "tp_update_error": str(exc)}
+            logger.info("tp_background_ms position_id=%s ms=%.2f", position_id, (perf_counter() - tp_started) * 1000)
+        elif final_tp:
+            payload = {**payload, "tp_status": "UPDATED"}
+        else:
+            payload = {**payload, "tp_status": "NONE"}
+
+        if tp_percent:
+            payload = {**payload, "tp_percent": tp_percent}
+        position.raw_payload_json = payload
+        order.response_payload_json = {**(order.response_payload_json or {}), **payload}
+        db.commit()
+
+        try:
+            RiskSnapshotService(db).mark_dirty(position.internal_symbol)
+            RiskSnapshotService(db).recompute(position.internal_symbol)
+            RiskSnapshotService(db).recompute(position.internal_symbol, source="STRATEGY")
+        except Exception:  # noqa: BLE001
+            logger.exception("risk_snapshot_recompute_failed symbol=%s", position.internal_symbol)
+
+        if order.source == "STRATEGY" and order.user_id is not None and not (order.response_payload_json or {}).get("bot_order_push_sent_at"):
+            try:
+                sent, _failed = PushNotificationService(db).send_bot_order_executed(
+                    order.user_id,
+                    symbol=order.internal_symbol,
+                    side=order.side,
+                    volume=float(order.volume),
+                    price=order.executed_price or order.requested_price,
+                    tp=order.tp,
+                    order_id=order.id,
+                )
+                if sent > 0:
+                    order.response_payload_json = {
+                        **(order.response_payload_json or {}),
+                        "bot_order_push_sent_at": datetime.now(UTC).isoformat(),
+                    }
+            except Exception:  # noqa: BLE001
+                logger.exception("bot_order_push_failed order_id=%s", order.id)
+        db.commit()
+        logger.info("post_open_tasks_ms order_id=%s position_id=%s ms=%.2f", order_id, position_id, (perf_counter() - started) * 1000)
+    finally:
+        db.close()
 
 
 def _float_or_none(value: Any) -> float | None:

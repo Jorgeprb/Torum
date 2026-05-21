@@ -1,11 +1,15 @@
 import logging
 from datetime import UTC, datetime
+from threading import Thread
+from time import perf_counter
 from typing import Any
 
+from fastapi import BackgroundTasks
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.alerts.push import PushNotificationService
+from app.db.session import SessionLocal
 from app.mt5.schemas import MT5AccountPayload
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.positions.models import Position
@@ -19,9 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 class PositionService:
-    def __init__(self, db: Session, mt5_client: MT5BridgeClient | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        mt5_client: MT5BridgeClient | None = None,
+        background_tasks: BackgroundTasks | None = None,
+    ) -> None:
         self.db = db
         self.mt5_client = mt5_client or MT5BridgeClient()
+        self.background_tasks = background_tasks
 
     def list_with_prices(self, status: str | None = None, limit: int = 100, symbol: str | None = None) -> list[Position]:
         positions = list_positions(self.db, status=status, limit=limit, symbol=symbol)
@@ -47,7 +57,7 @@ class PositionService:
         self.db.commit()
         return safe_positions
 
-    def close_position(self, position_id: int) -> tuple[bool, str, Position | None]:
+    def close_position(self, position_id: int, *, fetch_close_deal: bool = False) -> tuple[bool, str, Position | None]:
         position = get_position(self.db, position_id)
         if position is None:
             return False, "Position not found", None
@@ -60,8 +70,8 @@ class PositionService:
             position.closed_at = datetime.now(UTC)
             position.close_price = position.current_price
             self.db.commit()
-            self._refresh_risk_snapshot(position.internal_symbol)
             self._notify_take_profit_hit(position)
+            self._schedule_post_close_tasks(position.id, None, None)
             return True, "Paper position closed", position
 
         if position.mt5_position_ticket is None:
@@ -77,6 +87,7 @@ class PositionService:
                     "volume": position.volume,
                     "mode": position.mode,
                     "magic_number": position.magic_number,
+                    "fetch_close_deal": fetch_close_deal,
                 },
             )
         except MT5BridgeClientError as exc:
@@ -98,10 +109,21 @@ class PositionService:
             position.current_price = position.close_price or position.current_price
             position.closing_deal_ticket = _int_or_none(response.get("deal"))
             position.close_payload_json = response
-        position.raw_payload_json = {**(position.raw_payload_json or {}), "close_response": response}
+        position.raw_payload_json = {
+            **(position.raw_payload_json or {}),
+            "close_response": response,
+            "close_enrichment_status": "UPDATED" if isinstance(close_deal, dict) else "PENDING",
+        }
         self.db.commit()
-        self._refresh_risk_snapshot(position.internal_symbol)
         self._notify_take_profit_hit(position)
+        if not isinstance(close_deal, dict):
+            self._schedule_post_close_tasks(
+                position.id,
+                position.mt5_position_ticket,
+                position.closing_deal_ticket,
+            )
+        else:
+            self._schedule_post_close_tasks(position.id, None, None)
         return True, "MT5 position closed", position
     def reconcile_missing_mt5_positions(self) -> dict[str, int]:
         """
@@ -345,6 +367,9 @@ class PositionService:
         except Exception:  # noqa: BLE001
             logger.exception("risk_snapshot_recompute_failed symbol=%s", symbol)
 
+    def _schedule_post_close_tasks(self, position_id: int, ticket: int | None, deal: int | None) -> None:
+        _enqueue_background_task(self.background_tasks, _post_close_tasks, position_id, ticket, deal)
+
     def _notify_take_profit_hit(self, position: Position) -> None:
         if position.user_id is None or not _is_take_profit_hit(position):
             return
@@ -461,6 +486,62 @@ class PositionService:
         for position in closed_positions:
             self._notify_take_profit_hit(position)
         return count
+
+
+def _enqueue_background_task(background_tasks: BackgroundTasks | None, func: Any, *args: Any) -> None:
+    if background_tasks is not None:
+        background_tasks.add_task(func, *args)
+        return
+    Thread(target=func, args=args, daemon=True).start()
+
+
+def _post_close_tasks(position_id: int, ticket: int | None, deal_ticket: int | None) -> None:
+    started = perf_counter()
+    db = SessionLocal()
+    try:
+        position = db.get(Position, position_id)
+        if position is None:
+            return
+
+        if ticket is not None:
+            enrich_started = perf_counter()
+            try:
+                response = MT5BridgeClient().get_close_deal(ticket, deal_ticket)
+                close_deal = response.get("close_deal") if isinstance(response, dict) else None
+                if isinstance(close_deal, dict):
+                    _apply_close_deal(position, close_deal)
+                    position.status = "CLOSED"
+                    position.raw_payload_json = {
+                        **(position.raw_payload_json or {}),
+                        "close_enrichment_status": "UPDATED",
+                    }
+                else:
+                    position.raw_payload_json = {
+                        **(position.raw_payload_json or {}),
+                        "close_enrichment_status": "FAILED",
+                        "close_enrichment_error": str(response.get("comment") if isinstance(response, dict) else "close_deal_missing"),
+                    }
+            except MT5BridgeClientError as exc:
+                position.raw_payload_json = {
+                    **(position.raw_payload_json or {}),
+                    "close_enrichment_status": "FAILED",
+                    "close_enrichment_error": str(exc),
+                }
+            logger.info("close_enrich_ms position_id=%s ms=%.2f", position_id, (perf_counter() - enrich_started) * 1000)
+
+        db.commit()
+        try:
+            RiskSnapshotService(db).mark_dirty(position.internal_symbol)
+            RiskSnapshotService(db).recompute(position.internal_symbol)
+            RiskSnapshotService(db).recompute(position.internal_symbol, source="STRATEGY")
+        except Exception:  # noqa: BLE001
+            logger.exception("risk_snapshot_recompute_failed symbol=%s", position.internal_symbol)
+
+        PositionService(db)._notify_take_profit_hit(position)
+        db.commit()
+        logger.info("post_close_tasks_ms position_id=%s ms=%.2f", position_id, (perf_counter() - started) * 1000)
+    finally:
+        db.close()
 
 
 def _float_or_none(value: object) -> float | None:
