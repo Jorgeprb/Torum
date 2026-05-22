@@ -3,7 +3,7 @@ import type { Time } from "lightweight-charts";
 import { AlertTriangle, ArrowDownUp, Bell, CalendarDays, Database, Menu, Minus, MousePointer, Pause, Play, RadioTower, RefreshCw, SeparatorVertical, ShieldAlert, Square, TrendingUp, Type, X } from "lucide-react";
 
 import { StatusPill } from "../../components/ui/StatusPill";
-import { MarketChart, type TradeLine, type TradeMarker } from "../chart/MarketChart";
+import { MarketChart, type TradeExecutionMarker, type TradeLine, type TradeMarker } from "../chart/MarketChart";
 import { DrawingPanel } from "../drawings/DrawingPanel";
 import { DrawingToolbar } from "../drawings/DrawingToolbar";
 import { IndicatorsPanel } from "../indicators/IndicatorsPanel";
@@ -19,6 +19,11 @@ import { MobileTopBar } from "../mobile/MobileTopBar";
 import { TradingSettingsPage } from "../settings/TradingSettingsPage";
 import { BuyOnlyOrderPanel } from "./BuyOnlyOrderPanel";
 import { OrdersPositionsPanel } from "./OrdersPositionsPanel";
+import {
+  type TradeExecutionMarkerSettings,
+  readTradeExecutionMarkerSettings,
+  tradeExecutionMarkersChangedEvent
+} from "./tradeExecutionMarkerSettings";
 import {
   type Candle,
   type MarketMessage,
@@ -622,9 +627,67 @@ function positionCloseTime(position: PositionRead | TradeHistoryItem): Time | nu
   return Math.floor(new Date(position.closed_at).getTime() / 1000) as Time;
 }
 
+function buildTradeExecutionMarkers(
+  positions: PositionRead[],
+  history: TradeHistoryItem[],
+  symbol: string,
+  timeframe: Timeframe,
+  settings: TradeExecutionMarkerSettings
+): TradeExecutionMarker[] {
+  if (!settings.show_trade_execution_markers) {
+    return [];
+  }
+
+  if (settings.trade_execution_markers_only_m5 && timeframe !== "M5") {
+    return [];
+  }
+
+  const markersByPosition = new Map<number, TradeExecutionMarker>();
+
+  for (const item of history) {
+    if (item.internal_symbol !== symbol || !Number.isFinite(item.open_price)) {
+      continue;
+    }
+
+    const entryTime = positionOpenTime(item);
+    const exitTime = positionCloseTime(item);
+    markersByPosition.set(item.position_id, {
+      id: `trade-execution-${item.position_id}`,
+      positionId: item.position_id,
+      entryTime,
+      entryPrice: item.open_price,
+      exitTime,
+      exitPrice: item.close_price,
+      side: item.side
+    });
+  }
+
+  for (const position of positions) {
+    if (position.internal_symbol !== symbol || markersByPosition.has(position.id) || !Number.isFinite(position.open_price)) {
+      continue;
+    }
+
+    markersByPosition.set(position.id, {
+      id: `trade-execution-${position.id}`,
+      positionId: position.id,
+      entryTime: positionOpenTime(position),
+      entryPrice: position.open_price,
+      exitTime: positionCloseTime(position),
+      exitPrice: position.close_price,
+      side: position.side
+    });
+  }
+
+  return [...markersByPosition.values()]
+    .filter((marker) => Number.isFinite(marker.entryPrice))
+    .sort((left, right) => Number(left.entryTime) - Number(right.entryTime))
+    .slice(-300);
+}
+
 interface PositionValuation {
   closePrice: number | null;
   profit: number;
+  estimated: boolean;
 }
 
 function contractSizeFor(symbolMappings: SymbolMapping[], symbol: string): number {
@@ -649,7 +712,20 @@ function calculatePriceDistanceProfit(position: PositionRead, closePrice: number
   return (closePrice - position.open_price) * position.volume * contractSize * direction;
 }
 
-function calculatePositionProfit(position: PositionRead, closePrice: number | null, contractSize: number): number {
+function hasLiveClosePrice(position: PositionRead, bidPrice: number | null, askPrice: number | null, liveTickFresh: boolean): boolean {
+  return liveTickFresh && (position.side === "BUY" ? bidPrice !== null : askPrice !== null);
+}
+
+function calculatePositionProfit(
+  position: PositionRead,
+  closePrice: number | null,
+  contractSize: number,
+  useLiveEstimate = false
+): number {
+  if (useLiveEstimate) {
+    return calculatePriceDistanceProfit(position, closePrice, contractSize);
+  }
+
   if (position.mt5_position_ticket && typeof position.profit === "number" && Number.isFinite(position.profit)) {
     return position.profit;
   }
@@ -661,11 +737,13 @@ function positionValuation(
   position: PositionRead,
   symbolMappings: SymbolMapping[],
   bidPrice: number | null,
-  askPrice: number | null
+  askPrice: number | null,
+  liveTickFresh = false
 ): PositionValuation {
   const closePrice = positionClosePrice(position, bidPrice, askPrice);
-  const profit = calculatePositionProfit(position, closePrice, contractSizeFor(symbolMappings, position.internal_symbol));
-  return { closePrice, profit };
+  const estimated = position.mode !== "PAPER" && hasLiveClosePrice(position, bidPrice, askPrice, liveTickFresh);
+  const profit = calculatePositionProfit(position, closePrice, contractSizeFor(symbolMappings, position.internal_symbol), estimated);
+  return { closePrice, profit, estimated };
 }
 
 function tradeLinesForSymbol(
@@ -674,6 +752,7 @@ function tradeLinesForSymbol(
   symbolMappings: SymbolMapping[],
   bidPrice: number | null,
   askPrice: number | null,
+  liveTickFresh: boolean,
   accountCurrency: string,
   selectedPositionId: number | null
 ): TradeLine[] {
@@ -682,22 +761,17 @@ function tradeLinesForSymbol(
     .filter(isReallyOpenPosition)
     .flatMap((position) => {
       const contractSize = contractSizeFor(symbolMappings, position.internal_symbol);
-      const valuation = positionValuation(position, symbolMappings, bidPrice, askPrice);
+      const valuation = positionValuation(position, symbolMappings, bidPrice, askPrice, liveTickFresh);
       const selected = selectedPositionId === position.id;
-
-      // PAPER se calcula en Torum.
-      // DEMO/LIVE usan el profit real sincronizado desde MT5.
-      const entryProfit =
-        position.mode === "PAPER"
-          ? valuation.profit
-          : position.profit ?? 0;
+      const entryProfit = valuation.profit;
+      const profitPrefix = valuation.estimated ? "≈" : "";
 
       const lines: TradeLine[] = [
         {
           id: `entry-${position.id}`,
           positionId: position.id,
           price: position.open_price,
-          label: `${position.side} ${position.volume.toFixed(2)}, ${entryProfit.toFixed(2)} ${accountCurrency}`,
+          label: `${position.side} ${position.volume.toFixed(2)}, ${profitPrefix}${entryProfit.toFixed(2)} ${accountCurrency}`,
           tone: "entry",
           side: position.side,
           volume: position.volume,
@@ -776,6 +850,8 @@ interface SplitMarketChartProps {
   onSelectPosition: (positionId: number) => void;
   onUpdatePositionTp: (positionId: number, tp: number, closePrice?: number | null) => void | Promise<void>;
   positions: PositionRead[];
+  tradeHistory: TradeHistoryItem[];
+  tradeExecutionMarkerSettings: TradeExecutionMarkerSettings;
   selectedPositionId: number | null;
   symbolMappings: SymbolMapping[];
   symbolLabels: Record<string, string>;
@@ -800,6 +876,8 @@ function SplitMarketChart({
   onSelectPosition,
   onUpdatePositionTp,
   positions,
+  tradeHistory,
+  tradeExecutionMarkerSettings,
   selectedPositionId,
   symbolMappings,
   symbolLabels,
@@ -831,9 +909,14 @@ function SplitMarketChart({
   const visibleSplitLatestTick = latestTick?.internal_symbol === symbol ? latestTick : null;
   const latestBid = visibleSplitLatestTick?.bid ?? null;
   const latestAsk = visibleSplitLatestTick?.ask ?? null;
+  const splitLiveTickFresh = visibleSplitLatestTick ? Date.now() - visibleSplitLatestTick.time_msc <= 45000 : false;
   const tradeLines = useMemo(
-    () => tradeLinesForSymbol(positions, symbol, symbolMappings, latestBid, latestAsk, accountCurrency, selectedPositionId),
-    [accountCurrency, latestAsk, latestBid, positions, selectedPositionId, symbol, symbolMappings]
+    () => tradeLinesForSymbol(positions, symbol, symbolMappings, latestBid, latestAsk, splitLiveTickFresh, accountCurrency, selectedPositionId),
+    [accountCurrency, latestAsk, latestBid, positions, selectedPositionId, splitLiveTickFresh, symbol, symbolMappings]
+  );
+  const tradeExecutionMarkers = useMemo(
+    () => buildTradeExecutionMarkers(positions, tradeHistory, symbol, timeframe, tradeExecutionMarkerSettings),
+    [positions, tradeExecutionMarkerSettings, tradeHistory, symbol, timeframe]
   );
 
   useEffect(() => {
@@ -1162,6 +1245,7 @@ function SplitMarketChart({
           symbol={symbol}
           timeframe={timeframe}
           tradeLines={tradeLines}
+          tradeExecutionMarkers={tradeExecutionMarkers}
         />
       </div>
     </div>
@@ -1187,10 +1271,13 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [latestTick, setLatestTick] = useState<Tick | null>(null);
   const [backendLatestTick, setBackendLatestTick] = useState<LatestTickDiagnostic | null>(null);
   const [tradingSettings, setTradingSettings] = useState<TradingSettings | null>(null);
+  const [tradeExecutionMarkerSettings, setTradeExecutionMarkerSettings] = useState<TradeExecutionMarkerSettings>(() => readTradeExecutionMarkerSettings());
   const [torumV1Status, setTorumV1Status] = useState<TorumV1Status | null>(null);
   const [loadingCandles, setLoadingCandles] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
+  const [appVisible, setAppVisible] = useState(() => (typeof document === "undefined" ? true : document.visibilityState !== "hidden"));
+  const [resumeGraceUntil, setResumeGraceUntil] = useState(0);
   const [orders, setOrders] = useState<OrderRead[]>([]);
   const [positions, setPositions] = useState<PositionRead[]>([]);
   const [tradeHistory, setTradeHistory] = useState<TradeHistoryItem[]>([]);
@@ -1235,6 +1322,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const tickTimestampsRef = useRef<number[]>([]);
   const socketManagerRef = useRef<MarketSocketManager | null>(null);
   const resumeReconnectAtRef = useRef(0);
+  const resumeTimerRef = useRef<number | null>(null);
   const marketGenerationRef = useRef(0);
   const candleAbortRef = useRef<AbortController | null>(null);
   const activeMarketKeyRef = useRef(`${selectedSymbol}:${selectedTimeframe}`);
@@ -1251,6 +1339,27 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
     }
     pendingClosingPositionIdsRef.current = next;
     setPendingClosingPositionIds(next);
+  }
+
+  function patchOpenPositionsWithTick(tick: Tick) {
+    setPositions((current) =>
+      current.map((position) => {
+        if (position.internal_symbol !== tick.internal_symbol || !isReallyOpenPosition(position)) {
+          return position;
+        }
+
+        const closePrice =
+          position.side === "BUY"
+            ? tick.bid ?? tick.last ?? tick.ask ?? null
+            : tick.ask ?? tick.last ?? tick.bid ?? null;
+
+        if (closePrice === null || !Number.isFinite(closePrice) || position.current_price === closePrice) {
+          return position;
+        }
+
+        return { ...position, current_price: closePrice };
+      })
+    );
   }
 
   function setActiveMobileView(view: MobileView) {
@@ -1389,6 +1498,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const latestAsk = visibleLatestTick?.ask ?? null;
   const lastPrice = latestBid ?? undefined;
   const frontendTickAgeMs = visibleLatestTick ? Math.max(0, Date.now() - visibleLatestTick.time_msc) : null;
+  const liveTickFresh = frontendTickAgeMs !== null && frontendTickAgeMs <= 45000;
   const mt5LastTickTime = mt5Status?.last_tick_time_by_symbol[selectedSymbol] ?? null;
   const mt5LastTickAgeMs = mt5LastTickTime ? Math.max(0, Date.now() - Date.parse(mt5LastTickTime)) : null;
   const backendTickAgeMs = backendLatestTick?.age_ms ?? null;
@@ -1398,33 +1508,46 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
     Boolean(mt5Status?.connected_to_mt5 && mt5Status.connected_to_backend) && mt5StatusAgeMs !== null && mt5StatusAgeMs <= 45000;
   const tickOldOrMissing = effectiveTickAgeMs === null || effectiveTickAgeMs > 30000;
   const selectedAnalysisOnly = Boolean(selectedMapping?.analysis_only) || isAnalysisOnlySymbol(selectedSymbol);
+  const resumeGraceActive = appVisible && resumeGraceUntil > 0 && Date.now() < resumeGraceUntil;
   const marketClosedWarning =
-    !selectedAnalysisOnly && socketStatus === "connected" && mt5HeartbeatHealthy && tickOldOrMissing && sourceLabelForStatus(mt5Status, mockStatus, streamSource) === "MT5";
-  const marketDataStale = selectedAnalysisOnly ? false : socketStatus === "stale" || socketStatus === "reconnecting" || socketStatus === "disconnected" || tickOldOrMissing;
+    appVisible &&
+    !resumeGraceActive &&
+    !selectedAnalysisOnly &&
+    socketStatus === "connected" &&
+    mt5HeartbeatHealthy &&
+    tickOldOrMissing &&
+    sourceLabelForStatus(mt5Status, mockStatus, streamSource) === "MT5";
+  const staleSignals = socketStatus === "stale" || socketStatus === "reconnecting" || socketStatus === "disconnected" || tickOldOrMissing;
+  const marketDataStale = selectedAnalysisOnly ? false : appVisible && !resumeGraceActive && staleSignals;
   const marketConnectionHealthy = selectedAnalysisOnly ? true : socketStatus === "connected" && !marketDataStale;
   const staleTradingReason = marketClosedWarning ? "Mercado cerrado" : "Datos desconectados o desactualizados. Reconectando...";
   const sourceLabel = mt5Status?.connected_to_mt5 ? "MT5" : mockStatus?.running ? "MOCK" : streamSource;
+  const connectionStatusForUi: MarketSocketStatus =
+    resumeGraceActive && (socketStatus === "reconnecting" || socketStatus === "stale" || socketStatus === "disconnected")
+      ? "connected"
+      : socketStatus;
+  const streamConnectedForUi = streamConnected || resumeGraceActive;
   const streamStatusLabel =
     selectedAnalysisOnly
       ? "Solo analisis"
       : marketClosedWarning
-      ? "Mercado cerrado"
-      : socketStatus === "connected"
+        ? "Mercado cerrado"
+        : connectionStatusForUi === "connected"
       ? "Stream conectado"
-      : socketStatus === "reconnecting"
+      : connectionStatusForUi === "reconnecting"
         ? "Reconectando"
-        : socketStatus === "stale"
+        : connectionStatusForUi === "stale"
           ? "Datos stale"
-          : socketStatus === "connecting"
+          : connectionStatusForUi === "connecting"
             ? "Conectando"
             : "Stream desconectado";
   const streamStatusTone = selectedAnalysisOnly
     ? "neutral"
     : marketClosedWarning
     ? "warning"
-    : socketStatus === "connected"
+    : connectionStatusForUi === "connected"
       ? "success"
-      : socketStatus === "reconnecting" || socketStatus === "stale" || socketStatus === "connecting"
+      : connectionStatusForUi === "reconnecting" || connectionStatusForUi === "stale" || connectionStatusForUi === "connecting"
         ? "warning"
         : "danger";
   const accountMode = mt5Status?.account_trade_mode ?? "UNKNOWN";
@@ -1440,8 +1563,13 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
 
 
   const tradeLines = useMemo(
-  () => tradeLinesForSymbol(positions, selectedSymbol, symbolMappings, latestBid, latestAsk, accountCurrency, selectedPositionId),
-  [accountCurrency, latestAsk, latestBid, positions, selectedPositionId, selectedSymbol, symbolMappings]
+  () => tradeLinesForSymbol(positions, selectedSymbol, symbolMappings, latestBid, latestAsk, liveTickFresh, accountCurrency, selectedPositionId),
+  [accountCurrency, latestAsk, latestBid, liveTickFresh, positions, selectedPositionId, selectedSymbol, symbolMappings]
+);
+
+const tradeExecutionMarkers = useMemo(
+  () => buildTradeExecutionMarkers(positions, tradeHistory, selectedSymbol, selectedTimeframe, tradeExecutionMarkerSettings),
+  [positions, tradeExecutionMarkerSettings, tradeHistory, selectedSymbol, selectedTimeframe]
 );
 
 
@@ -1450,16 +1578,16 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
   [positions, selectedPositionId]
 );
  const selectedPositionValuation = useMemo(
-  () => (selectedPosition ? positionValuation(selectedPosition, symbolMappings, latestBid, latestAsk) : null),
-  [latestAsk, latestBid, selectedPosition, symbolMappings]
+  () => (selectedPosition ? positionValuation(selectedPosition, symbolMappings, latestBid, latestAsk, liveTickFresh) : null),
+  [latestAsk, latestBid, liveTickFresh, selectedPosition, symbolMappings]
 );
  const closePositionCandidate = useMemo(
   () => positions.find((position) => position.id === closePositionId && isReallyOpenPosition(position)) ?? null,
   [closePositionId, positions]
 );
  const closePositionValuation = useMemo(
-  () => (closePositionCandidate ? positionValuation(closePositionCandidate, symbolMappings, latestBid, latestAsk) : null),
-  [closePositionCandidate, latestAsk, latestBid, symbolMappings]
+  () => (closePositionCandidate ? positionValuation(closePositionCandidate, symbolMappings, latestBid, latestAsk, liveTickFresh) : null),
+  [closePositionCandidate, latestAsk, latestBid, liveTickFresh, symbolMappings]
 );
  const closeActionBusy = closingPosition || pendingClosingPositionIds.size > 0;
   function currentMarketKey(symbol = selectedSymbol, timeframe = selectedTimeframe) {
@@ -1496,6 +1624,15 @@ const tradeMarkers = useMemo<TradeMarker[]>(() => [], []);
       setClosePositionId(null);
     }
   }, [closePositionId, positions]);
+
+  useEffect(() => {
+    function handleTradeExecutionMarkerSettingsChanged() {
+      setTradeExecutionMarkerSettings(readTradeExecutionMarkerSettings());
+    }
+
+    window.addEventListener(tradeExecutionMarkersChangedEvent, handleTradeExecutionMarkerSettingsChanged);
+    return () => window.removeEventListener(tradeExecutionMarkersChangedEvent, handleTradeExecutionMarkerSettingsChanged);
+  }, []);
 
   useEffect(() => {
     if (selectedPositionId === null) {
@@ -1706,17 +1843,31 @@ useEffect(() => {
   useEffect(() => {
     function resumeAndResync() {
       if (document.visibilityState === "hidden") {
+        setAppVisible(false);
         return;
       }
 
       const now = Date.now();
-      if (now - resumeReconnectAtRef.current < 1000) {
+      setAppVisible(true);
+      const nextGraceUntil = now + 2500;
+      setResumeGraceUntil(nextGraceUntil);
+      window.setTimeout(() => {
+        setResumeGraceUntil((current) => (current === nextGraceUntil ? 0 : current));
+      }, 2600);
+      if (now - resumeReconnectAtRef.current < 400) {
         return;
       }
 
       resumeReconnectAtRef.current = now;
-      socketManagerRef.current?.reconnectNow("foreground");
-      void resyncAfterReconnect();
+      if (resumeTimerRef.current !== null) {
+        window.clearTimeout(resumeTimerRef.current);
+      }
+      resumeTimerRef.current = window.setTimeout(() => {
+        resumeTimerRef.current = null;
+        socketManagerRef.current?.resume(selectedSymbol, selectedTimeframe);
+        socketManagerRef.current?.ensureFresh("resume");
+        void resyncAfterReconnect();
+      }, 350);
     }
 
     function handleOffline() {
@@ -1736,6 +1887,10 @@ useEffect(() => {
       window.removeEventListener("online", resumeAndResync);
       window.removeEventListener("pageshow", resumeAndResync);
       window.removeEventListener("offline", handleOffline);
+      if (resumeTimerRef.current !== null) {
+        window.clearTimeout(resumeTimerRef.current);
+        resumeTimerRef.current = null;
+      }
     };
   }, [selectedSymbol, selectedTimeframe]);
 
@@ -1801,6 +1956,7 @@ useEffect(() => {
       }
       return nextTick;
     });
+    patchOpenPositionsWithTick(nextTick);
     if (showPullbackOverlays) {
       const livePrice = message.bid ?? message.last ?? message.ask ?? null;
       setStrategyDebugPullbacks((current) => updateLivePullbackDebug(current, livePrice, messageTimeMsc));
@@ -1855,6 +2011,7 @@ useEffect(() => {
         if (tick && tick.internal_symbol === symbol) {
           latestTickBySymbolRef.current.set(symbol, tick);
           setLatestTick(tick);
+          patchOpenPositionsWithTick(tick);
         } else if (!latestTickBySymbolRef.current.has(symbol)) {
           setLatestTick(null);
         }
@@ -2005,6 +2162,7 @@ useEffect(() => {
 
       return tick;
     });
+    patchOpenPositionsWithTick(tick);
   } catch {
     if (generation === marketGenerationRef.current && symbol === selectedSymbol) {
       setBackendLatestTick(null);
@@ -2321,7 +2479,8 @@ useEffect(() => {
       position,
       symbolMappings,
       useLiveSelectedPrices ? latestBid : null,
-      useLiveSelectedPrices ? latestAsk : null
+      useLiveSelectedPrices ? latestAsk : null,
+      useLiveSelectedPrices ? liveTickFresh : false
     );
     const closePrice =
       typeof draggedChartClosePrice === "number" && Number.isFinite(draggedChartClosePrice)
@@ -2572,8 +2731,8 @@ useEffect(() => {
                 const isExpanded = expandedHistoryRows.has(rowId);
                 const liveBid = item.internal_symbol === selectedSymbol ? latestBid : null;
                 const liveAsk = item.internal_symbol === selectedSymbol ? latestAsk : null;
-                const valuation = positionValuation(item, symbolMappings, liveBid, liveAsk);
-                const profit =item.mode === "PAPER"? valuation.profit: item.profit ?? 0;
+                const valuation = positionValuation(item, symbolMappings, liveBid, liveAsk, item.internal_symbol === selectedSymbol ? liveTickFresh : false);
+                const profit = valuation.estimated || item.mode === "PAPER" ? valuation.profit : item.profit ?? 0;
                 const isProfit = profit >= 0;
                 return (
                   <article className={isExpanded ? "trade-history-row trade-history-row--open trade-history-row--expanded" : "trade-history-row trade-history-row--open"} key={rowId}>
@@ -2587,7 +2746,7 @@ useEffect(() => {
                       <div>
                         <time>{formatHistoryDate(item.opened_at)}</time>
                         <strong className={isProfit ? "history-money history-money--positive" : "history-money history-money--negative"}>
-                          {profit.toFixed(2)}
+                          {valuation.estimated ? "≈" : ""}{profit.toFixed(2)}
                         </strong>
                       </div>
                     </button>
@@ -2940,8 +3099,8 @@ useEffect(() => {
         chartSplitCount={chartSplitCount}
         chartSplitOrientation={chartSplitOrientation}
         chartSymbols={chartSymbols}
-        connected={streamConnected}
-        connectionStatus={socketStatus}
+        connected={streamConnectedForUi}
+        connectionStatus={connectionStatusForUi}
         drawingTool={drawingTool}
         drawingMenuOpen={drawingMenuOpen}
         marketClosed={marketClosedWarning}
@@ -3160,6 +3319,7 @@ useEffect(() => {
             timeframe={selectedTimeframe}
             tradeLines={tradeLines}
             tradeMarkers={tradeMarkers}
+            tradeExecutionMarkers={tradeExecutionMarkers}
             dollarStrengthBadge={<DollarStrengthBadge />}
           />
           {selectedAnalysisOnly ? <div className="analysis-only-pill">DXY sintetico - Solo analisis</div> : null}
@@ -3190,6 +3350,8 @@ useEffect(() => {
               onSymbolChange={(symbol) => updateSecondaryChart(index, { symbol })}
               onUpdatePositionTp={handleModifyPositionTp}
               positions={positions}
+              tradeHistory={tradeHistory}
+              tradeExecutionMarkerSettings={tradeExecutionMarkerSettings}
               selectedPositionId={selectedPositionId}
               autoExtendToFutureNews={autoExtendToFutureNews}
               showAskLine={tradingSettings?.show_ask_line ?? true}

@@ -21,12 +21,13 @@ import type {
   PriceAlertOverlay,
   PriceAlertVisualStyle,
   AthPriceZoneOverlay,
+  TradeExecutionMarkerOverlay,
   PullbackDebugOverlay,
   TradeLineOverlay,
   TradeMarkerOverlay,
   ZoneOverlay
 } from "./chartTypes";
-export type { TradeLine, TradeMarker } from "./chartTypes";
+export type { TradeExecutionMarker, TradeLine, TradeMarker } from "./chartTypes";
 
 import {
   chartBrokerTimeZone,
@@ -84,7 +85,7 @@ import { PullbackDebugOverlayLayer } from "./overlays/PullbackDebugOverlayLayer"
 import { TradeLinesOverlay } from "./overlays/TradeLinesOverlay";
 import { PriceAlertsOverlay } from "./overlays/PriceAlertsOverlay";
 import { ChartActionButtons } from "./overlays/ChartActionButtons";
-import { DrawingStyleEditor } from "./overlays/DrawingStyleEditor";
+import { DrawingStyleEditor, type TorumZoneVisualStyle } from "./overlays/DrawingStyleEditor";
 import { AthPriceZonesOverlay } from "./overlays/AthPriceZonesOverlay";
 
 // ── Alert style persistence ──────────────────────────────────────────────────
@@ -93,6 +94,12 @@ const DEFAULT_ALERT_VISUAL_STYLE: PriceAlertVisualStyle = {
   lineStyle: "dashed"
 };
 const ALERT_STYLE_STORAGE_KEY = "torum.priceAlertStyles.v1";
+const DEFAULT_TORUM_ZONE_VISUAL_STYLE: TorumZoneVisualStyle = {
+  backLayer: false,
+  color: "#2f8cff",
+  opacity: 0.18
+};
+const TORUM_ZONE_VISUAL_STORAGE_KEY = "torum.torumV1ZoneVisualStyle.v1";
 
 function normalizeAlertVisualStyle(value: unknown): PriceAlertVisualStyle {
   if (!value || typeof value !== "object") return DEFAULT_ALERT_VISUAL_STYLE;
@@ -118,6 +125,37 @@ function loadAlertVisualStyles(): Record<string, PriceAlertVisualStyle> {
 function saveAlertVisualStyles(styles: Record<string, PriceAlertVisualStyle>) {
   try {
     if (typeof window !== "undefined") window.localStorage.setItem(ALERT_STYLE_STORAGE_KEY, JSON.stringify(styles));
+  } catch { /* ok */ }
+}
+
+function normalizeTorumZoneVisualStyle(value: unknown): TorumZoneVisualStyle {
+  if (!value || typeof value !== "object") return DEFAULT_TORUM_ZONE_VISUAL_STYLE;
+  const source = value as Record<string, unknown>;
+  const opacity = Number(source.opacity);
+  return {
+    backLayer: source.backLayer === true,
+    color: typeof source.color === "string" && /^#[0-9a-fA-F]{6}$/.test(source.color)
+      ? source.color
+      : DEFAULT_TORUM_ZONE_VISUAL_STYLE.color,
+    opacity: Number.isFinite(opacity)
+      ? Math.max(0, Math.min(1, opacity))
+      : DEFAULT_TORUM_ZONE_VISUAL_STYLE.opacity
+  };
+}
+
+function loadTorumZoneVisualStyle(): TorumZoneVisualStyle {
+  try {
+    if (typeof window === "undefined") return DEFAULT_TORUM_ZONE_VISUAL_STYLE;
+    const raw = window.localStorage.getItem(TORUM_ZONE_VISUAL_STORAGE_KEY);
+    return normalizeTorumZoneVisualStyle(raw ? JSON.parse(raw) : null);
+  } catch {
+    return DEFAULT_TORUM_ZONE_VISUAL_STYLE;
+  }
+}
+
+function saveTorumZoneVisualStyle(style: TorumZoneVisualStyle) {
+  try {
+    if (typeof window !== "undefined") window.localStorage.setItem(TORUM_ZONE_VISUAL_STORAGE_KEY, JSON.stringify(style));
   } catch { /* ok */ }
 }
 
@@ -207,6 +245,7 @@ export function MarketChart({
   onSelectDrawing,
   tradeLines = [],
   tradeMarkers = [],
+  tradeExecutionMarkers = [],
   onSelectPosition,
   onUpdatePositionTp,
   alertToolActive = false,
@@ -268,6 +307,7 @@ export function MarketChart({
   const [overlays, setOverlays] = useState<ZoneOverlay[]>([]);
   const [tradeLineOverlays, setTradeLineOverlays] = useState<TradeLineOverlay[]>([]);
   const [tradeMarkerOverlays, setTradeMarkerOverlays] = useState<TradeMarkerOverlay[]>([]);
+  const [tradeExecutionMarkerOverlays, setTradeExecutionMarkerOverlays] = useState<TradeExecutionMarkerOverlay[]>([]);
   const [priceAlertOverlays, setPriceAlertOverlays] = useState<PriceAlertOverlay[]>([]);
   const [pullbackDebugOverlays, setPullbackDebugOverlays] = useState<PullbackDebugOverlay[]>([]);
   const [athZoneOverlays, setAthZoneOverlays] = useState<AthPriceZoneOverlay[]>([]);
@@ -278,6 +318,7 @@ export function MarketChart({
   const [draggingTpLineId, setDraggingTpLineId] = useState<string | null>(null);
   const [draftTradeLinePrices, setDraftTradeLinePrices] = useState<Record<string, number>>({});
   const [drawingShapes, setDrawingShapes] = useState<DrawingShape[]>([]);
+  const [torumZoneVisualStyle, setTorumZoneVisualStyle] = useState<TorumZoneVisualStyle>(() => loadTorumZoneVisualStyle());
   const [draggingDrawingId, setDraggingDrawingId] = useState<string | null>(null);
   const [styleEditorTarget, setStyleEditorTarget] = useState<{ kind: "drawing" | "alert"; id: string } | null>(null);
   const [pendingPoint, setPendingPoint] = useState<DrawingPoint | null>(null);
@@ -292,6 +333,14 @@ export function MarketChart({
   const measureLongPressTriggeredRef = useRef(false);
   const measureCrosshairRef = useRef<{ x: number; y: number } | null>(null);
   const measureDragStartRef = useRef<{ pointerX: number; pointerY: number; crosshairX: number; crosshairY: number } | null>(null);
+
+  const updateTorumZoneVisualStyle = useCallback((patch: Partial<TorumZoneVisualStyle>) => {
+    setTorumZoneVisualStyle(current => {
+      const next = normalizeTorumZoneVisualStyle({ ...current, ...patch });
+      saveTorumZoneVisualStyle(next);
+      return next;
+    });
+  }, []);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function syncPriceScaleWidth(container: HTMLDivElement): number {
@@ -685,6 +734,7 @@ export function MarketChart({
     if (!chart || !series || !container) {
       setOverlays([]); setDrawingShapes([]); setTradeLineOverlays([]);
       setTradeMarkerOverlays([]); setPriceAlertOverlays([]); setPullbackDebugOverlays([]);
+      setTradeExecutionMarkerOverlays([]);
       return;
     }
     syncPriceScaleWidth(container);
@@ -715,11 +765,11 @@ export function MarketChart({
     // drawing shapes
     const shapes = drawings.map((drawing): DrawingShape | null => {
       const operationZone = isTorumV1OperationZone(drawing);
-      const color = operationZone ? "#2f8cff" : styleValue(drawing.style, "color", "#f5c542");
+      const color = operationZone ? torumZoneVisualStyle.color : styleValue(drawing.style, "color", "#f5c542");
       const lineWidth = numericStyleValue(drawing.style, "lineWidth", 2);
       const ls = operationZone ? "dashed" : lineStyleValue(drawing.style);
       const glow = clampedNumericStyleValue(drawing.style, "glow", 0, 0, 18);
-      const opacity = operationZone ? 0.18 : clampedNumericStyleValue(drawing.style, "opacity", drawing.drawing_type === "manual_zone" ? 0.16 : 0.13, 0, 1);
+      const opacity = operationZone ? torumZoneVisualStyle.opacity : clampedNumericStyleValue(drawing.style, "opacity", drawing.drawing_type === "manual_zone" ? 0.16 : 0.13, 0, 1);
       const bgColor = drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone" ? hexToRgba(color, opacity) : styleValue(drawing.style, "backgroundColor", "rgba(245,197,66,0.15)");
       const textColor = styleValue(drawing.style, "textColor", "#edf2ef");
       const fontSize = clampedNumericStyleValue(drawing.style, "fontSize", 14, 8, 48);
@@ -814,6 +864,29 @@ export function MarketChart({
 
     setTradeMarkerOverlays([]);
 
+    setTradeExecutionMarkerOverlays(
+      tradeExecutionMarkers.map((marker): TradeExecutionMarkerOverlay | null => {
+        if (!Number.isFinite(marker.entryPrice)) return null;
+        const entryTime = timeToNumber(marker.entryTime);
+        const entryX = timeToChartX(chart, sortedCandles, entryTime, Number.NaN);
+        const entryY = series.priceToCoordinate(marker.entryPrice);
+        if (Number.isNaN(entryX) || entryY === null) return null;
+
+        const overlay: TradeExecutionMarkerOverlay = { ...marker, entryX, entryY: Number(entryY) };
+        if (marker.exitTime !== null && marker.exitTime !== undefined && typeof marker.exitPrice === "number" && Number.isFinite(marker.exitPrice)) {
+          const exitTime = timeToNumber(marker.exitTime);
+          const nextExitX = timeToChartX(chart, sortedCandles, exitTime, Number.NaN);
+          const nextExitY = series.priceToCoordinate(marker.exitPrice);
+          if (!Number.isNaN(nextExitX) && nextExitY !== null) {
+            overlay.exitX = nextExitX;
+            overlay.exitY = Number(nextExitY);
+          }
+        }
+
+        return overlay;
+      }).filter((marker): marker is TradeExecutionMarkerOverlay => marker !== null)
+    );
+
     setPriceAlertOverlays(
       priceAlerts.filter(a => a.status === "ACTIVE")
         .map(alert => {
@@ -859,7 +932,7 @@ export function MarketChart({
     } else {
       setPendingCoordinate(null);
     }
-  }, [athZones, candles, drawings, draftAlertPrices, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, pullbackDebugVisible, showFutureNewsZones, strategyDebugPullbacks, timeframe, tradeLines, tradeMarkers]);
+  }, [athZones, candles, drawings, draftAlertPrices, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, pullbackDebugVisible, showFutureNewsZones, strategyDebugPullbacks, timeframe, torumZoneVisualStyle, tradeExecutionMarkers, tradeLines, tradeMarkers]);
 
   function scheduleOverlayRecalculate() {
     if (overlayRecalculateFrameRef.current !== null) return;
@@ -873,7 +946,7 @@ export function MarketChart({
     if (!containerRef.current) return;
     const chart = createChart(containerRef.current, {
       autoSize: true,
-      layout: { background: { color: "#000000" }, textColor: "#f2f4f5" },
+      layout: { background: { color: "transparent" }, textColor: "#f2f4f5" },
       localization: { locale: "es-ES", timeFormatter: formatChartCrosshairTime },
       grid: { vertLines: { color: "#24303a", style: LineStyle.Dashed }, horzLines: { color: "#24303a", style: LineStyle.Dashed } },
       rightPriceScale: { borderColor: "#3a434a", scaleMargins: { top: 0.18, bottom: 0.18 } },
@@ -1015,14 +1088,14 @@ export function MarketChart({
         syncBidAskPriceLines();
       }
       lineSeriesRef.current.forEach(ls => ls.setData([]));
-      setOverlays([]); setDrawingShapes([]); setTradeLineOverlays([]); setPriceAlertOverlays([]); setTradeMarkerOverlays([]); setPullbackDebugOverlays([]);
+      setOverlays([]); setDrawingShapes([]); setTradeLineOverlays([]); setPriceAlertOverlays([]); setTradeMarkerOverlays([]); setPullbackDebugOverlays([]); setTradeExecutionMarkerOverlays([]);
       setAthZoneOverlays([]);
       priceScaleManuallyAdjustedRef.current = false; resetPriceScale(chart, series);
     }
     if (!dataMatchesMarket) {
-      clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return;
+      clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; setTradeExecutionMarkerOverlays([]); window.setTimeout(recalculateOverlays, 0); return;
     }
-    if (sc.length === 0) { clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; window.setTimeout(recalculateOverlays, 0); return; }
+    if (sc.length === 0) { clearMainSeriesData(); series.setMarkers([]); hasFullDataRef.current = false; setTradeExecutionMarkerOverlays([]); window.setTimeout(recalculateOverlays, 0); return; }
     if (shouldReset || !hasFullDataRef.current) {
       setMainSeriesData(sc);series.setMarkers([]);hasFullDataRef.current = true;
       loadedResetKeyRef.current = nextKey;
@@ -1095,7 +1168,7 @@ export function MarketChart({
     if (!prependedHistory && !centeredByRequest && autoFollowEnabled) scrollToLatestRealCandle(chart, sc.length, timeframe, getPreferredVisibleBars(sc.length));
     if (priceScaleManuallyAdjustedRef.current) disablePriceAutoScale(chart, series);
     window.setTimeout(recalculateOverlays, 0);
-  }, [autoFollowEnabled, candles, centerRequestKey, loadingCandles, onAutoFollowChange, recalculateOverlays, resetKey, symbol, timeframe, tradeMarkers]);
+  }, [autoFollowEnabled, candles, centerRequestKey, loadingCandles, onAutoFollowChange, recalculateOverlays, resetKey, symbol, timeframe, tradeExecutionMarkers, tradeMarkers]);
 
   useEffect(() => {
     const chart = chartRef.current; const fp = futurePaddingSeriesRef.current;
@@ -1645,6 +1718,13 @@ export function MarketChart({
     }
   }
 
+  const torumBackLayerShapes = torumZoneVisualStyle.backLayer
+    ? drawingShapes.filter((shape) => isTorumV1OperationZone(shape.drawing))
+    : [];
+  const frontDrawingShapes = torumZoneVisualStyle.backLayer
+    ? drawingShapes.filter((shape) => !isTorumV1OperationZone(shape.drawing))
+    : drawingShapes;
+
   const measurePaneWidth = containerRef.current ? chartPaneWidth(containerRef.current) : 0;
   const measurePaneHeight = containerRef.current?.clientHeight ?? 0;
   const measureDelta = measureStart && measureCursor
@@ -1671,13 +1751,23 @@ export function MarketChart({
     >
       <AthPriceZonesOverlay overlays={athZoneOverlays} />
       <NewsZoneOverlay overlays={overlays} />
+      {torumBackLayerShapes.length > 0 ? (
+        <DrawingLayer
+          className="drawing-layer--torum-back"
+          interactive={false}
+          onSelect={(id) => onSelectDrawing?.(id)}
+          pendingPoint={null}
+          selectedDrawingId={effectiveSelectedDrawingId}
+          shapes={torumBackLayerShapes}
+        />
+      ) : null}
       <PullbackDebugOverlayLayer overlays={pullbackDebugOverlays} />
       <DrawingLayer
         interactive={false}
         onSelect={(id) => onSelectDrawing?.(id)}
         pendingPoint={pendingCoordinate}
         selectedDrawingId={effectiveSelectedDrawingId}
-        shapes={drawingShapes}
+        shapes={frontDrawingShapes}
       />
       <DrawingHtmlLayer
         shapes={drawingShapes}
@@ -1705,12 +1795,15 @@ export function MarketChart({
         priceAlerts={priceAlerts}
         alertVisualStyles={alertVisualStyles}
         defaultAlertStyle={DEFAULT_ALERT_VISUAL_STYLE}
+        torumZoneVisualStyle={torumZoneVisualStyle}
         onClose={() => setStyleEditorTarget(null)}
         onUpdateDrawingStyle={updateDrawingStyle}
         onUpdateDrawingMetadata={updateDrawingMetadata}
+        onUpdateTorumZoneVisualStyle={updateTorumZoneVisualStyle}
         onUpdateAlertStyle={updateAlertStyle}
       />
       <TradeLinesOverlay
+        tradeExecutionMarkerOverlays={tradeExecutionMarkerOverlays}
         tradeLineOverlays={tradeLineOverlays}
         tradeMarkerOverlays={tradeMarkerOverlays}
         onSelectPosition={onSelectPosition}

@@ -59,11 +59,39 @@ export class MarketSocketManager {
     if (this.closedByUser) {
       return;
     }
+    if (!isDocumentVisible()) {
+      return;
+    }
     const lastActivityAt = Math.max(this.lastMessageAt, this.lastPongAt);
     const stale = Date.now() - lastActivityAt > this.staleAfterMs;
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN || stale) {
       this.reconnect(reason);
     }
+  }
+
+  resume(symbol: string, timeframe: Timeframe) {
+    this.closedByUser = false;
+    const marketChanged = this.symbol !== symbol || this.timeframe !== timeframe;
+    this.symbol = symbol;
+    this.timeframe = timeframe;
+
+    if (marketChanged || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      this.reconnectAttempts = 0;
+      this.openSocket("reconnecting");
+      return;
+    }
+
+    const resumeStartedAt = Date.now();
+    this.sendPing("resume");
+    window.setTimeout(() => {
+      if (this.closedByUser || !isDocumentVisible()) {
+        return;
+      }
+      const lastActivityAt = Math.max(this.lastMessageAt, this.lastPongAt);
+      if (lastActivityAt < resumeStartedAt) {
+        this.reconnect("resume-timeout");
+      }
+    }, 1500);
   }
 
   reconnectNow(_reason = "manual") {
@@ -110,8 +138,10 @@ export class MarketSocketManager {
     socket.onopen = () => {
       this.reconnectAttempts = 0;
       this.lastMessageAt = Date.now();
+      this.lastPongAt = this.lastMessageAt;
       this.setStatus("connected");
       this.startHeartbeat();
+      this.sendPing("open");
       this.options.onReconnect?.();
     };
 
@@ -175,10 +205,13 @@ export class MarketSocketManager {
         this.reconnect("heartbeat-not-open");
         return;
       }
-      this.socket.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+      this.sendPing("heartbeat");
     }, this.heartbeatMs);
 
     this.staleTimer = window.setInterval(() => {
+      if (!isDocumentVisible()) {
+        return;
+      }
       const lastActivityAt = Math.max(this.lastMessageAt, this.lastPongAt);
       if (Date.now() - lastActivityAt > this.staleAfterMs) {
         this.setStatus("stale");
@@ -202,6 +235,17 @@ export class MarketSocketManager {
     }
   }
 
+  private sendPing(reason: string) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      this.socket.send(JSON.stringify({ type: "ping", ts: Date.now(), reason }));
+    } catch {
+      this.reconnect("ping-failed");
+    }
+  }
+
   private setStatus(status: MarketSocketStatus) {
     if (this.status === status) {
       return;
@@ -209,4 +253,8 @@ export class MarketSocketManager {
     this.status = status;
     this.options.onStatusChange(status);
   }
+}
+
+function isDocumentVisible() {
+  return typeof document === "undefined" || document.visibilityState !== "hidden";
 }

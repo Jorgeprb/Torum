@@ -490,6 +490,71 @@ def test_mt5_position_sync_uses_history_deal_for_closed_position() -> None:
     assert saved.close_payload_json == {"ticket": 555, "position_id": 789}
 
 
+def test_mt5_position_sync_links_pending_order_and_repairs_missing_tp() -> None:
+    db = _session()
+    user = db.get(User, 1)
+    assert user is not None
+    order = Order(
+        user_id=user.id,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        side="BUY",
+        order_type="MARKET",
+        volume=0.06,
+        requested_price=4515.8,
+        tp=4519.89,
+        status="SENT",
+        magic_number=260426,
+        source="STRATEGY",
+        strategy_key="torum_v1",
+    )
+    db.add(order)
+    db.commit()
+
+    class FakeMT5Client:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, object]] = []
+
+        def modify_position_tp(self, ticket: int, payload: dict[str, object]) -> dict[str, object]:
+            self.payloads.append({"ticket": ticket, **payload})
+            return {"ok": True, "price": payload["tp"], "comment": "updated"}
+
+    fake_mt5 = FakeMT5Client()
+
+    result = PositionService(db, mt5_client=fake_mt5).sync_mt5_positions(
+        positions=[
+            {
+                "ticket": 152093533257,
+                "identifier": 152093533257,
+                "symbol": "XAUUSD",
+                "type": 0,
+                "magic": 260426,
+                "volume": 0.06,
+                "price_open": 4515.83,
+                "price_current": 4515.9,
+                "tp": 0.0,
+                "profit": 0.0,
+                "time": int(datetime.now(UTC).timestamp()),
+                "comment": "Torum Strategy t",
+            }
+        ],
+        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+    )
+
+    saved_position = db.query(Position).filter(Position.mt5_position_ticket == 152093533257).one()
+    saved_order = db.get(Order, order.id)
+    assert result["created"] == 1
+    assert saved_position.order_id == order.id
+    assert saved_position.tp == pytest.approx(4519.89)
+    assert saved_position.raw_payload_json["tp_status"] == "UPDATED"
+    assert saved_order.status == "EXECUTED"
+    assert saved_order.mt5_position_ticket == 152093533257
+    assert saved_order.response_payload_json["tp_status"] == "UPDATED"
+    assert fake_mt5.payloads[0]["ticket"] == 152093533257
+    assert fake_mt5.payloads[0]["tp"] == pytest.approx(4519.89)
+
+
 def test_mt5_position_sync_sends_push_when_tp_is_hit(monkeypatch) -> None:
     db = _session()
     closed_time = datetime(2026, 4, 27, 12, 30, tzinfo=UTC)

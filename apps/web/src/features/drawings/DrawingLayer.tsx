@@ -3,6 +3,7 @@ import { useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import type { DrawingCoordinate, DrawingDragAction, DrawingShape } from "./drawingTypes";
 
 interface DrawingLayerProps {
+  className?: string;
   interactive?: boolean;
   shapes: DrawingShape[];
   pendingPoint: DrawingCoordinate | null;
@@ -92,7 +93,7 @@ function glowStyle(shape: DrawingShape, selected: boolean): CSSProperties | unde
   return { filter: `drop-shadow(0 0 ${glow}px ${shape.color})` };
 }
 
-export function DrawingLayer({ interactive = true, shapes, pendingPoint, selectedDrawingId, onSelect, onDragStart, onDragEnd }: DrawingLayerProps) {
+export function DrawingLayer({ className, interactive = true, shapes, pendingPoint, selectedDrawingId, onSelect, onDragStart, onDragEnd }: DrawingLayerProps) {
   const suppressNextClearRef = useRef(false);
   const [dragState, setDragState] = useState<DragState | null>(null);
 
@@ -204,8 +205,14 @@ export function DrawingLayer({ interactive = true, shapes, pendingPoint, selecte
       : shape
   );
 
+  const layerClassName = [
+    "drawing-layer",
+    interactive ? null : "drawing-layer--passive",
+    className
+  ].filter(Boolean).join(" ");
+
   return (
-    <svg className={interactive ? "drawing-layer" : "drawing-layer drawing-layer--passive"} onClick={interactive ? clearSelection : undefined}>
+    <svg className={layerClassName} onClick={interactive ? clearSelection : undefined}>
       {renderedShapes.map((shape) => {
         const selected = selectedDrawingId === shape.id;
         const className = selected ? "drawing-shape drawing-shape--selected" : "drawing-shape";

@@ -1,8 +1,9 @@
 import type { PointerEvent } from "react";
 
-import type { TradeLineOverlay, TradeMarkerOverlay } from "../chartTypes";
+import type { TradeExecutionMarkerOverlay, TradeLineOverlay, TradeMarkerOverlay } from "../chartTypes";
 
 interface TradeLinesOverlayProps {
+  tradeExecutionMarkerOverlays: TradeExecutionMarkerOverlay[];
   tradeLineOverlays: TradeLineOverlay[];
   tradeMarkerOverlays: TradeMarkerOverlay[];
   onSelectPosition?: (positionId: number) => void;
@@ -10,6 +11,7 @@ interface TradeLinesOverlayProps {
 }
 
 export function TradeLinesOverlay({
+  tradeExecutionMarkerOverlays,
   tradeLineOverlays,
   tradeMarkerOverlays,
   onSelectPosition,
@@ -17,6 +19,36 @@ export function TradeLinesOverlay({
 }: TradeLinesOverlayProps) {
   return (
     <div className="trade-line-layer">
+      <svg className="trade-execution-links" height="100%" preserveAspectRatio="none" width="100%">
+        {tradeExecutionMarkerOverlays.map((marker) =>
+          marker.exitX !== undefined && marker.exitY !== undefined ? (
+            <line
+              className="trade-execution-link"
+              key={`link-${marker.id}`}
+              x1={marker.entryX}
+              x2={marker.exitX}
+              y1={marker.entryY}
+              y2={marker.exitY}
+            />
+          ) : null
+        )}
+      </svg>
+      {tradeExecutionMarkerOverlays.map((marker) => (
+        <div
+          className="trade-execution-arrow trade-execution-arrow--buy"
+          key={`entry-${marker.id}`}
+          style={{ left: marker.entryX, top: marker.entryY }}
+        />
+      ))}
+      {tradeExecutionMarkerOverlays.map((marker) =>
+        marker.exitX !== undefined && marker.exitY !== undefined ? (
+          <div
+            className="trade-execution-arrow trade-execution-arrow--close"
+            key={`exit-${marker.id}`}
+            style={{ left: marker.exitX, top: marker.exitY }}
+          />
+        ) : null
+      )}
       {tradeMarkerOverlays.map((marker) => (
         <div
           className={

@@ -47,6 +47,7 @@ export interface MarketChartProps {
   pullbackDebugVisible?: boolean;
   onPullbackDebugToggle?: (visible: boolean) => void;
   dollarStrengthBadge?: ReactNode;
+  tradeExecutionMarkers?: TradeExecutionMarker[];
 }
 
 export interface ZoneOverlay {
@@ -81,6 +82,16 @@ export interface TradeMarker {
   label: string;
 }
 
+export interface TradeExecutionMarker {
+  id: string;
+  positionId?: number;
+  entryTime: Time;
+  entryPrice: number;
+  exitTime?: Time | null;
+  exitPrice?: number | null;
+  side: "BUY" | "SELL";
+}
+
 export type ChartLineStyle = "solid" | "dashed";
 
 export interface PriceAlertVisualStyle {
@@ -95,6 +106,13 @@ export interface TradeLineOverlay extends TradeLine {
 export interface TradeMarkerOverlay extends TradeMarker {
   x: number;
   y: number;
+}
+
+export interface TradeExecutionMarkerOverlay extends TradeExecutionMarker {
+  entryX: number;
+  entryY: number;
+  exitX?: number;
+  exitY?: number;
 }
 
 export interface PriceAlertOverlay {

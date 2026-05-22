@@ -1,5 +1,5 @@
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Thread
 from time import perf_counter
 from typing import Any
@@ -12,12 +12,15 @@ from app.alerts.push import PushNotificationService
 from app.db.session import SessionLocal
 from app.mt5.schemas import MT5AccountPayload
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
+from app.orders.models import Order
 from app.positions.models import Position
 from app.positions.repository import get_position, list_positions
 from app.risk.snapshot import RiskSnapshotService
+from app.settings.trading_service import get_global_trading_settings
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.ticks.service import latest_tick_order_by
+from app.trading.lot_sizing import calculate_buy_take_profit
 
 logger = logging.getLogger(__name__)
 
@@ -249,10 +252,34 @@ class PositionService:
             open_price = _float_or_none(raw.get("price_open") or raw.get("open_price")) or 0.0
             opened_at = _datetime_from_mt5_seconds(raw.get("time")) or datetime.now(UTC)
             position = self.db.scalar(select(Position).where(Position.mt5_position_ticket == ticket).limit(1))
+            matched_order = self._match_order_for_synced_mt5_position(
+                internal_symbol=internal_symbol,
+                broker_symbol=broker_symbol,
+                side=side,
+                volume=_float_or_none(raw.get("volume")) or 0.0,
+                magic_number=_int_or_none(raw.get("magic")),
+                opened_at=opened_at,
+            )
+            if position is None and matched_order is not None:
+                position = self.db.scalar(
+                    select(Position)
+                    .where(Position.order_id == matched_order.id, Position.status == "OPEN")
+                    .order_by(Position.id.desc())
+                    .limit(1)
+                )
+                if position is not None:
+                    position.mt5_position_ticket = ticket
+            raw_tp = _float_or_none(raw.get("tp"))
+            intended_tp = self._intended_synced_position_tp(
+                raw=raw,
+                order=matched_order,
+                side=side,
+                open_price=open_price,
+            )
             if position is None:
                 position = Position(
-                    user_id=None,
-                    order_id=None,
+                    user_id=matched_order.user_id if matched_order else None,
+                    order_id=matched_order.id if matched_order else None,
                     internal_symbol=internal_symbol,
                     broker_symbol=broker_symbol,
                     mode=mode,
@@ -263,7 +290,7 @@ class PositionService:
                     open_price=open_price,
                     current_price=_float_or_none(raw.get("price_current")) or open_price,
                     sl=_float_or_none(raw.get("sl")),
-                    tp=_float_or_none(raw.get("tp")),
+                    tp=intended_tp if intended_tp is not None else raw_tp,
                     profit=_float_or_none(raw.get("profit")),
                     status="OPEN",
                     mt5_position_ticket=ticket,
@@ -274,6 +301,9 @@ class PositionService:
                 self.db.add(position)
                 created += 1
             else:
+                if position.order_id is None and matched_order is not None:
+                    position.order_id = matched_order.id
+                    position.user_id = matched_order.user_id
                 position.internal_symbol = internal_symbol
                 position.broker_symbol = broker_symbol
                 position.mode = mode
@@ -283,7 +313,7 @@ class PositionService:
                 position.volume = _float_or_none(raw.get("volume")) or position.volume
                 position.current_price = _float_or_none(raw.get("price_current")) or position.current_price
                 position.sl = _float_or_none(raw.get("sl"))
-                position.tp = _float_or_none(raw.get("tp"))
+                position.tp = intended_tp if intended_tp is not None else raw_tp
                 position.profit = _float_or_none(raw.get("profit"))
 
                 # Si MT5 devuelve esta posición en positions_get(), entonces está abierta de verdad.
@@ -301,6 +331,9 @@ class PositionService:
                 }
 
                 updated += 1
+            if matched_order is not None:
+                self._mark_synced_order_executed(matched_order, position, raw, open_price, opened_at, intended_tp)
+            self._repair_synced_position_tp(position, matched_order, raw, intended_tp)
 
         updated += self._refresh_closed_mt5_position_deals(
             close_deals_by_position,
@@ -323,6 +356,162 @@ class PositionService:
             "received": len(positions),
             "deals_received": len(closed_deals or []),
         }
+
+    def _match_order_for_synced_mt5_position(
+        self,
+        *,
+        internal_symbol: str,
+        broker_symbol: str,
+        side: str,
+        volume: float,
+        magic_number: int | None,
+        opened_at: datetime,
+    ) -> Order | None:
+        del opened_at
+        candidates = self.db.scalars(
+            select(Order)
+            .where(
+                Order.internal_symbol == internal_symbol,
+                Order.broker_symbol == broker_symbol,
+                Order.side == side,
+                Order.mt5_position_ticket.is_(None),
+                Order.status.in_(["CREATED", "VALIDATING", "SENT", "EXECUTED"]),
+                Order.created_at >= datetime.now(UTC) - timedelta(hours=8),
+            )
+            .order_by(Order.id.desc())
+            .limit(20)
+        ).all()
+        for order in candidates:
+            if magic_number is not None and order.magic_number is not None and order.magic_number != magic_number:
+                continue
+            if abs(float(order.volume) - float(volume)) > max(0.000001, float(volume) * 0.001):
+                continue
+            return order
+        return None
+
+    def _intended_synced_position_tp(
+        self,
+        *,
+        raw: dict[str, Any],
+        order: Order | None,
+        side: str,
+        open_price: float,
+    ) -> float | None:
+        raw_tp = _float_or_none(raw.get("tp"))
+        if raw_tp is not None and raw_tp > 0:
+            return raw_tp
+        if order is not None and order.tp is not None and order.tp > 0:
+            return order.tp
+        comment = str(raw.get("comment") or "").lower()
+        if "strategy" not in comment or open_price <= 0:
+            return raw_tp
+        settings = get_global_trading_settings(self.db)
+        tp_percent = _float_or_none(getattr(settings, "default_take_profit_percent", None)) or 0.09
+        if side == "BUY":
+            return calculate_buy_take_profit(open_price, tp_percent)
+        return round(open_price * (1 - tp_percent / 100), 8)
+
+    def _mark_synced_order_executed(
+        self,
+        order: Order,
+        position: Position,
+        raw: dict[str, Any],
+        open_price: float,
+        opened_at: datetime,
+        intended_tp: float | None,
+    ) -> None:
+        order.status = "EXECUTED"
+        order.executed_at = order.executed_at or opened_at
+        order.executed_price = order.executed_price or open_price
+        order.mt5_position_ticket = position.mt5_position_ticket
+        if intended_tp is not None and intended_tp > 0:
+            order.tp = intended_tp
+        order.response_payload_json = {
+            **(order.response_payload_json or {}),
+            "mt5_open_position": raw,
+            "position_resolved_by": "positions_sync",
+            "tp_final": intended_tp,
+            "tp_status": "PENDING" if intended_tp else (order.response_payload_json or {}).get("tp_status", "NONE"),
+        }
+
+    def _repair_synced_position_tp(
+        self,
+        position: Position,
+        order: Order | None,
+        raw: dict[str, Any],
+        intended_tp: float | None,
+    ) -> None:
+        raw_tp = _float_or_none(raw.get("tp"))
+        if intended_tp is None or intended_tp <= 0 or (raw_tp is not None and raw_tp > 0):
+            return
+        if position.mt5_position_ticket is None or position.mode == "PAPER":
+            return
+        try:
+            response = self.mt5_client.modify_position_tp(
+                position.mt5_position_ticket,
+                {
+                    "internal_symbol": position.internal_symbol,
+                    "broker_symbol": position.broker_symbol,
+                    "side": position.side,
+                    "mode": position.mode,
+                    "tp": intended_tp,
+                    "sl": position.sl or 0,
+                    "magic_number": position.magic_number,
+                    "comment": "tp-sync-repair",
+                },
+            )
+        except MT5BridgeClientError as exc:
+            position.raw_payload_json = {
+                **(position.raw_payload_json or raw),
+                "tp_status": "FAILED",
+                "tp_update_error": str(exc),
+                "tp_repair_source": "positions_sync",
+            }
+            if order is not None:
+                order.response_payload_json = {
+                    **(order.response_payload_json or {}),
+                    "tp_status": "FAILED",
+                    "tp_update_error": str(exc),
+                }
+            logger.warning("mt5_tp_sync_repair_failed position_id=%s ticket=%s error=%s", position.id, position.mt5_position_ticket, exc)
+            return
+
+        if response.get("ok"):
+            confirmed_tp = _float_or_none(response.get("price")) or intended_tp
+            position.tp = confirmed_tp
+            position.raw_payload_json = {
+                **(position.raw_payload_json or raw),
+                "tp_status": "UPDATED",
+                "tp_repair_source": "positions_sync",
+                "tp_modify_response": response,
+            }
+            if order is not None:
+                order.tp = confirmed_tp
+                order.response_payload_json = {
+                    **(order.response_payload_json or {}),
+                    "tp_status": "UPDATED",
+                    "tp_repair_source": "positions_sync",
+                    "tp_modify_response": response,
+                }
+            logger.info("mt5_tp_sync_repaired position_id=%s ticket=%s tp=%s", position.id, position.mt5_position_ticket, confirmed_tp)
+            return
+
+        error = str(response.get("comment") or "MT5 TP sync repair rejected")
+        position.raw_payload_json = {
+            **(position.raw_payload_json or raw),
+            "tp_status": "FAILED",
+            "tp_update_error": error,
+            "tp_repair_source": "positions_sync",
+            "tp_modify_response": response,
+        }
+        if order is not None:
+            order.response_payload_json = {
+                **(order.response_payload_json or {}),
+                "tp_status": "FAILED",
+                "tp_update_error": error,
+                "tp_modify_response": response,
+            }
+        logger.warning("mt5_tp_sync_repair_rejected position_id=%s ticket=%s error=%s", position.id, position.mt5_position_ticket, error)
 
     def _update_position_price(self, position: Position) -> None:
         latest_tick = self.db.scalar(

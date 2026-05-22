@@ -26,6 +26,10 @@ import {
   getStrategySettings,
   patchStrategyConfig
 } from "../../services/strategies";
+import {
+  readTradeExecutionMarkerSettings,
+  saveTradeExecutionMarkerSetting
+} from "../trading/tradeExecutionMarkerSettings";
 
 const spyModeStorageKey = "torum.spyMode";
 const showFutureNewsZonesStorageKey = "torum.showFutureNewsZones";
@@ -153,6 +157,7 @@ export function TradingSettingsPage({ onChanged }: TradingSettingsPageProps = {}
   const [spyModeEnabled, setSpyModeEnabled] = useState(readSpyModePreference);
   const [showFutureNewsZones, setShowFutureNewsZones] = useState(() => readDefaultTruePreference(showFutureNewsZonesStorageKey));
   const [autoExtendToFutureNews, setAutoExtendToFutureNews] = useState(() => readDefaultTruePreference(autoExtendToFutureNewsStorageKey));
+  const [tradeExecutionMarkerSettings, setTradeExecutionMarkerSettings] = useState(readTradeExecutionMarkerSettings);
   const [showPullbackDebug, setShowPullbackDebug] = useState(false);
   const [athLevels, setAthLevels] = useState<AthLevel[]>([]);
   const [savingAthSymbol, setSavingAthSymbol] = useState<string | null>(null);
@@ -201,6 +206,13 @@ export function TradingSettingsPage({ onChanged }: TradingSettingsPageProps = {}
     } catch {
       setMessage("No se pudo guardar visual de noticias");
     }
+  }
+
+  function updateTradeExecutionMarkerSetting<K extends keyof typeof tradeExecutionMarkerSettings>(
+    key: K,
+    value: (typeof tradeExecutionMarkerSettings)[K]
+  ) {
+    setTradeExecutionMarkerSettings(saveTradeExecutionMarkerSetting(key, value));
   }
 
   function updateChartTimeMode(mode: ChartTimeMode) {
@@ -555,6 +567,22 @@ export function TradingSettingsPage({ onChanged }: TradingSettingsPageProps = {}
           <label className="toggle-line">
             <input checked={showPullbackDebug} type="checkbox" onChange={(event) => void updatePullbackDebug(event.target.checked)} />
             Mostrar pullbacks M5
+          </label>
+          <label className="toggle-line">
+            <input
+              checked={tradeExecutionMarkerSettings.show_trade_execution_markers}
+              type="checkbox"
+              onChange={(event) => updateTradeExecutionMarkerSetting("show_trade_execution_markers", event.target.checked)}
+            />
+            Marcadores operaciones
+          </label>
+          <label className="toggle-line">
+            <input
+              checked={tradeExecutionMarkerSettings.trade_execution_markers_only_m5}
+              type="checkbox"
+              onChange={(event) => updateTradeExecutionMarkerSetting("trade_execution_markers_only_m5", event.target.checked)}
+            />
+            Marcadores solo M5
           </label>
         </div>
       </section>

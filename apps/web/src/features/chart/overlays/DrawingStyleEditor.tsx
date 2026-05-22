@@ -9,15 +9,23 @@ import {
   lineStyleValue
 } from "../chartStyle";
 
+export interface TorumZoneVisualStyle {
+  backLayer: boolean;
+  color: string;
+  opacity: number;
+}
+
 interface DrawingStyleEditorProps {
   styleEditorTarget: { kind: "drawing" | "alert"; id: string } | null;
   drawings: ChartDrawingRead[];
   priceAlerts: PriceAlertRead[];
   alertVisualStyles: Record<string, PriceAlertVisualStyle>;
   defaultAlertStyle: PriceAlertVisualStyle;
+  torumZoneVisualStyle: TorumZoneVisualStyle;
   onClose: () => void;
   onUpdateDrawingStyle: (drawing: ChartDrawingRead, patch: Record<string, unknown>) => void;
   onUpdateDrawingMetadata: (drawing: ChartDrawingRead, patch: Record<string, unknown>) => void;
+  onUpdateTorumZoneVisualStyle: (patch: Partial<TorumZoneVisualStyle>) => void;
   onUpdateAlertStyle: (alertId: string, patch: Partial<PriceAlertVisualStyle>) => void;
 }
 
@@ -26,15 +34,23 @@ function stopBubble(event: React.PointerEvent) {
   event.nativeEvent.stopImmediatePropagation?.();
 }
 
+function isTorumV1OperationZone(drawing: ChartDrawingRead): boolean {
+  const metadata = drawing.metadata ?? {};
+  const payload = drawing.payload ?? {};
+  return metadata.torum_v1_zone_enabled === true || payload.torum_v1_zone_enabled === true;
+}
+
 export function DrawingStyleEditor({
   styleEditorTarget,
   drawings,
   priceAlerts,
   alertVisualStyles,
   defaultAlertStyle,
+  torumZoneVisualStyle,
   onClose,
   onUpdateDrawingStyle,
   onUpdateDrawingMetadata,
+  onUpdateTorumZoneVisualStyle,
   onUpdateAlertStyle
 }: DrawingStyleEditorProps) {
   if (!styleEditorTarget) {
@@ -56,6 +72,7 @@ export function DrawingStyleEditor({
       drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone";
     const isText = drawing.drawing_type === "text";
     const isHorizontalLine = drawing.drawing_type === "horizontal_line";
+    const isTorumZone = isBox && isTorumV1OperationZone(drawing);
 
     const color = colorInputValue(
       styleValue(drawing.style, "color", isText ? "#edf2ef" : "#f5c542"),
@@ -202,7 +219,39 @@ export function DrawingStyleEditor({
           </div>
         ) : null}
 
-        {isBox ? (
+        {isBox && isTorumZone ? (
+          <div className="chart-style-popover__group">
+            <div className="chart-style-popover__hint">
+              Estilo global para todas las zonas Torum.
+            </div>
+            <label>
+              Color zona Torum
+              <input
+                type="color"
+                value={colorInputValue(torumZoneVisualStyle.color, "#2f8cff")}
+                onChange={(e) => onUpdateTorumZoneVisualStyle({ color: e.target.value })}
+              />
+            </label>
+            <label>
+              Opacidad zona Torum
+              <input
+                min="0" max="1" step="0.01" type="range" value={torumZoneVisualStyle.opacity}
+                onChange={(e) => onUpdateTorumZoneVisualStyle({ opacity: Number(e.target.value) })}
+              />
+              <span>{Math.round(torumZoneVisualStyle.opacity * 100)}%</span>
+            </label>
+            <label className="toggle-line">
+              <input
+                checked={torumZoneVisualStyle.backLayer}
+                type="checkbox"
+                onChange={(e) => onUpdateTorumZoneVisualStyle({ backLayer: e.target.checked })}
+              />
+              Fondo
+            </label>
+          </div>
+        ) : null}
+
+        {isBox && !isTorumZone ? (
           <>
             <label>
               Color
