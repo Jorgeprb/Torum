@@ -627,6 +627,80 @@ function positionCloseTime(position: PositionRead | TradeHistoryItem): Time | nu
   return Math.floor(new Date(position.closed_at).getTime() / 1000) as Time;
 }
 
+interface TradeExecutionSource {
+  closePrice: number | null;
+  closedAt: string | null;
+  internalSymbol: string;
+  mode: string;
+  mt5PositionTicket: number | null;
+  openPrice: number;
+  openedAt: string;
+  positionId: number;
+  side: "BUY" | "SELL";
+  status: "OPEN" | "CLOSED";
+  volume: number;
+}
+
+function tradeExecutionSourceKey(source: TradeExecutionSource): string {
+  if (source.mt5PositionTicket) {
+    return `mt5:${source.mt5PositionTicket}`;
+  }
+
+  const openedMs = Date.parse(source.openedAt);
+  const openedKey = Number.isFinite(openedMs) ? Math.floor(openedMs / 1000) : source.openedAt;
+  const priceKey = Number.isFinite(source.openPrice) ? source.openPrice.toFixed(5) : "unknown-price";
+  const volumeKey = Number.isFinite(source.volume) ? source.volume.toFixed(4) : "unknown-volume";
+  return `trade:${source.internalSymbol}:${source.side}:${openedKey}:${priceKey}:${volumeKey}`;
+}
+
+function tradeExecutionSourceScore(source: TradeExecutionSource): number {
+  let score = source.status === "CLOSED" ? 10 : 1;
+  if (source.closedAt && source.closePrice !== null && source.closePrice !== undefined) score += 5;
+  if (source.mt5PositionTicket) score += 1;
+  if (source.mode !== "PAPER") score += 1;
+  return score;
+}
+
+function tradeHistoryExecutionSource(item: TradeHistoryItem): TradeExecutionSource {
+  return {
+    closePrice: item.close_price,
+    closedAt: item.closed_at,
+    internalSymbol: item.internal_symbol,
+    mode: item.mode,
+    mt5PositionTicket: item.mt5_position_ticket,
+    openPrice: item.open_price,
+    openedAt: item.opened_at,
+    positionId: item.position_id,
+    side: item.side,
+    status: item.status,
+    volume: item.volume
+  };
+}
+
+function positionExecutionSource(position: PositionRead): TradeExecutionSource {
+  return {
+    closePrice: position.close_price,
+    closedAt: position.closed_at,
+    internalSymbol: position.internal_symbol,
+    mode: position.mode,
+    mt5PositionTicket: position.mt5_position_ticket,
+    openPrice: position.open_price,
+    openedAt: position.opened_at,
+    positionId: position.id,
+    side: position.side,
+    status: position.status,
+    volume: position.volume
+  };
+}
+
+function upsertTradeExecutionSource(sources: Map<string, TradeExecutionSource>, source: TradeExecutionSource) {
+  const key = tradeExecutionSourceKey(source);
+  const current = sources.get(key);
+  if (!current || tradeExecutionSourceScore(source) >= tradeExecutionSourceScore(current)) {
+    sources.set(key, source);
+  }
+}
+
 function buildTradeExecutionMarkers(
   positions: PositionRead[],
   history: TradeHistoryItem[],
@@ -642,44 +716,37 @@ function buildTradeExecutionMarkers(
     return [];
   }
 
-  const markersByPosition = new Map<number, TradeExecutionMarker>();
+  const sources = new Map<string, TradeExecutionSource>();
 
   for (const item of history) {
     if (item.internal_symbol !== symbol || !Number.isFinite(item.open_price)) {
       continue;
     }
-
-    const entryTime = positionOpenTime(item);
-    const exitTime = positionCloseTime(item);
-    markersByPosition.set(item.position_id, {
-      id: `trade-execution-${item.position_id}`,
-      positionId: item.position_id,
-      entryTime,
-      entryPrice: item.open_price,
-      exitTime,
-      exitPrice: item.close_price,
-      side: item.side
-    });
+    upsertTradeExecutionSource(sources, tradeHistoryExecutionSource(item));
   }
 
   for (const position of positions) {
-    if (position.internal_symbol !== symbol || markersByPosition.has(position.id) || !Number.isFinite(position.open_price)) {
+    if (position.internal_symbol !== symbol || !Number.isFinite(position.open_price)) {
       continue;
     }
-
-    markersByPosition.set(position.id, {
-      id: `trade-execution-${position.id}`,
-      positionId: position.id,
-      entryTime: positionOpenTime(position),
-      entryPrice: position.open_price,
-      exitTime: positionCloseTime(position),
-      exitPrice: position.close_price,
-      side: position.side
-    });
+    upsertTradeExecutionSource(sources, positionExecutionSource(position));
   }
 
-  return [...markersByPosition.values()]
-    .filter((marker) => Number.isFinite(marker.entryPrice))
+  return [...sources.values()]
+    .filter((source) => Number.isFinite(source.openPrice))
+    .map((source) => {
+      const entryTime = Math.floor(new Date(source.openedAt).getTime() / 1000) as Time;
+      const exitTime = source.closedAt ? Math.floor(new Date(source.closedAt).getTime() / 1000) as Time : null;
+      return {
+        id: `${source.positionId}:trade-line`,
+        positionId: source.positionId,
+        entryTime,
+        entryPrice: source.openPrice,
+        exitTime,
+        exitPrice: source.closePrice,
+        side: source.side
+      } satisfies TradeExecutionMarker;
+    })
     .sort((left, right) => Number(left.entryTime) - Number(right.entryTime))
     .slice(-300);
 }
@@ -777,6 +844,7 @@ function tradeLinesForSymbol(
           volume: position.volume,
           openPrice: position.open_price,
           profit: entryProfit,
+          profitEstimated: valuation.estimated,
           contractSize,
           currency: accountCurrency,
           selected
@@ -816,7 +884,11 @@ function tradeLinesForSymbol(
 
 function historyGrossProfit(item: TradeHistoryItem, symbolMappings: SymbolMapping[]): number {
   if (typeof item.profit === "number" && Number.isFinite(item.profit)) {
-    return item.profit + (item.swap ?? 0) + (item.commission ?? 0);
+    return item.profit + (item.swap ?? 0) + (item.commission ?? 0) + (item.fee ?? 0);
+  }
+
+  if (item.mode !== "PAPER") {
+    return 0;
   }
 
   if (item.close_price === null || item.close_price === undefined) {
@@ -2687,14 +2759,12 @@ useEffect(() => {
         const rightTime = Date.parse(right.opened_at);
         return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
       });
-    const deposit = 10000;
     const accountBalance = mt5Status?.account?.balance;
-    const grossProfit = typeof accountBalance === "number" && Number.isFinite(accountBalance)
-      ? accountBalance - deposit
-      : closedRows.reduce((total, item) => total + historyGrossProfit(item, symbolMappings), 0);
+    const grossProfit = closedRows.reduce((total, item) => total + historyGrossProfit(item, symbolMappings), 0);
     const swap = closedRows.reduce((total, item) => total + (item.swap ?? 0), 0);
-    const commission = closedRows.reduce((total, item) => total + (item.commission ?? 0), 0);
-    const balance = deposit + grossProfit;
+    const commission = closedRows.reduce((total, item) => total + (item.commission ?? 0) + (item.fee ?? 0), 0);
+    const balance = typeof accountBalance === "number" && Number.isFinite(accountBalance) ? accountBalance : grossProfit;
+    const deposit = typeof accountBalance === "number" && Number.isFinite(accountBalance) ? accountBalance - grossProfit : 0;
     const summaryRows = [
       { label: "Beneficio:", value: grossProfit, tone: grossProfit >= 0 ? "positive" : "negative" },
       { label: "Deposito", value: deposit, tone: "neutral" },
@@ -2841,8 +2911,8 @@ useEffect(() => {
     });
     const grossProfit = historyRows.reduce((total, item) => total + historyGrossProfit(item, symbolMappings), 0);
     const swap = historyRows.reduce((total, item) => total + (item.swap ?? 0), 0);
-    const commission = historyRows.reduce((total, item) => total + (item.commission ?? 0), 0);
-    const balance = mt5Status?.account?.balance ?? grossProfit + swap + commission;
+    const commission = historyRows.reduce((total, item) => total + (item.commission ?? 0) + (item.fee ?? 0), 0);
+    const balance = mt5Status?.account?.balance ?? grossProfit;
     const deposit = mt5Status?.account?.balance !== undefined ? balance - grossProfit - swap - commission : 0;
     const summaryRows = [
       { label: "Beneficio:", value: grossProfit, tone: grossProfit >= 0 ? "positive" : "negative" },

@@ -156,6 +156,7 @@ export interface TradeHistoryItem {
   profit: number | null;
   swap: number | null;
   commission: number | null;
+  fee?: number | null;
   mode: TradingMode;
   mt5_position_ticket: number | null;
   closing_deal_ticket: number | null;

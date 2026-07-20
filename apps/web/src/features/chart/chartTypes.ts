@@ -67,6 +67,7 @@ export interface TradeLine {
   volume?: number;
   openPrice?: number;
   profit?: number;
+  profitEstimated?: boolean;
   contractSize?: number;
   currency?: string;
   editable?: boolean;

@@ -14,6 +14,30 @@ from app.users.models import User
 router = APIRouter(prefix="/trade-history", tags=["trade-history"])
 
 
+def _fee_from_payload(payload: object) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("fee")
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _payload_fee(position: Position) -> float | None:
+    fee = _fee_from_payload(position.close_payload_json)
+    if fee is not None:
+        return fee
+
+    raw_payload = position.raw_payload_json
+    if isinstance(raw_payload, dict):
+        close_deal = raw_payload.get("close_deal")
+        fee = _fee_from_payload(close_deal)
+        if fee is not None:
+            return fee
+    return None
+
+
 @router.get("", response_model=list[TradeHistoryItem])
 def list_trade_history(
     db: Annotated[Session, Depends(get_db)],
@@ -68,6 +92,7 @@ def _to_history_item(position: Position) -> TradeHistoryItem:
         profit=position.profit,
         swap=position.swap,
         commission=position.commission,
+        fee=_payload_fee(position),
         mode=position.mode,
         mt5_position_ticket=position.mt5_position_ticket,
         closing_deal_ticket=position.closing_deal_ticket,

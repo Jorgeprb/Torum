@@ -19,6 +19,7 @@ class TradeHistoryItem(BaseModel):
     profit: float | None
     swap: float | None = None
     commission: float | None = None
+    fee: float | None = None
     mode: str
     mt5_position_ticket: int | None
     closing_deal_ticket: int | None = None

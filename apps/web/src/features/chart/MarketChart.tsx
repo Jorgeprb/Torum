@@ -431,18 +431,52 @@ export function MarketChart({
     askPriceLineRef.current = null;
   }
 
-  function syncBidAskPriceLines() {
+  function upsertBidAskPriceLines() {
     const series = seriesRef.current;
     if (!series) return;
 
-    removeBidPriceLine(series);
-    removeAskPriceLine(series);
-
-    if (showBidLine && typeof bidPrice === "number" && Number.isFinite(bidPrice)) {
-      bidPriceLineRef.current = series.createPriceLine({ price: bidPrice, color: "#2be0d0", lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "BID" });
+    if (!showBidLine || typeof bidPrice !== "number" || !Number.isFinite(bidPrice)) {
+      removeBidPriceLine(series);
+    } else if (bidPriceLineRef.current) {
+      bidPriceLineRef.current.applyOptions({
+        price: bidPrice,
+        color: "#2be0d0",
+        lineWidth: 1,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: "BID"
+      });
+    } else {
+      bidPriceLineRef.current = series.createPriceLine({
+        price: bidPrice,
+        color: "#2be0d0",
+        lineWidth: 1,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: "BID"
+      });
     }
-    if (showAskLine && typeof askPrice === "number" && Number.isFinite(askPrice)) {
-      askPriceLineRef.current = series.createPriceLine({ price: askPrice, color: "#f45d5d", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "ASK" });
+
+    if (!showAskLine || typeof askPrice !== "number" || !Number.isFinite(askPrice)) {
+      removeAskPriceLine(series);
+    } else if (askPriceLineRef.current) {
+      askPriceLineRef.current.applyOptions({
+        price: askPrice,
+        color: "#f45d5d",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: "ASK"
+      });
+    } else {
+      askPriceLineRef.current = series.createPriceLine({
+        price: askPrice,
+        color: "#f45d5d",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: "ASK"
+      });
     }
   }
 
@@ -867,14 +901,14 @@ export function MarketChart({
     setTradeExecutionMarkerOverlays(
       tradeExecutionMarkers.map((marker): TradeExecutionMarkerOverlay | null => {
         if (!Number.isFinite(marker.entryPrice)) return null;
-        const entryTime = timeToNumber(marker.entryTime);
+        const entryTime = utcToBrokerChartTime(timeToNumber(marker.entryTime));
         const entryX = timeToChartX(chart, sortedCandles, entryTime, Number.NaN);
         const entryY = series.priceToCoordinate(marker.entryPrice);
         if (Number.isNaN(entryX) || entryY === null) return null;
 
         const overlay: TradeExecutionMarkerOverlay = { ...marker, entryX, entryY: Number(entryY) };
         if (marker.exitTime !== null && marker.exitTime !== undefined && typeof marker.exitPrice === "number" && Number.isFinite(marker.exitPrice)) {
-          const exitTime = timeToNumber(marker.exitTime);
+          const exitTime = utcToBrokerChartTime(timeToNumber(marker.exitTime));
           const nextExitX = timeToChartX(chart, sortedCandles, exitTime, Number.NaN);
           const nextExitY = series.priceToCoordinate(marker.exitPrice);
           if (!Number.isNaN(nextExitX) && nextExitY !== null) {
@@ -967,6 +1001,19 @@ export function MarketChart({
       chart.remove(); chartRef.current = null; seriesRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const series = seriesRef.current;
+    const symbolChanged = previousPriceLineSymbolRef.current !== symbol;
+
+    if (symbolChanged) {
+      removeBidPriceLine(series);
+      removeAskPriceLine(series);
+      previousPriceLineSymbolRef.current = symbol;
+    }
+
+    upsertBidAskPriceLines();
+  }, [symbol, bidPrice, askPrice, showBidLine, showAskLine]);
 
   useEffect(() => { saveAlertVisualStyles(alertVisualStyles); }, [alertVisualStyles]);
   useEffect(() => { if (selectedDrawingId) setSelectedAlertId(null); }, [selectedDrawingId]);
@@ -1085,7 +1132,7 @@ export function MarketChart({
         removeAskPriceLine(series);
         previousPriceLineSymbolRef.current = symbol;
       } else {
-        syncBidAskPriceLines();
+        upsertBidAskPriceLines();
       }
       lineSeriesRef.current.forEach(ls => ls.setData([]));
       setOverlays([]); setDrawingShapes([]); setTradeLineOverlays([]); setPriceAlertOverlays([]); setTradeMarkerOverlays([]); setPullbackDebugOverlays([]); setTradeExecutionMarkerOverlays([]);
@@ -1197,13 +1244,6 @@ export function MarketChart({
     centerRecentBars(chart, candles.length, timeframe, getPreferredVisibleBars(candles.length));
     window.setTimeout(recalculateOverlays, 0);
   }, [effectiveRecenterToken]);
-
-  useEffect(() => {
-    if (previousPriceLineSymbolRef.current !== symbol) {
-      previousPriceLineSymbolRef.current = symbol;
-    }
-    syncBidAskPriceLines();
-  }, [askPrice, bidPrice, resetKey, showAskLine, showBidLine, symbol]);
 
   useEffect(() => {
     const chart = chartRef.current; if (!chart) return;

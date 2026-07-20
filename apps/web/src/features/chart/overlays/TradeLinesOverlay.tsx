@@ -98,7 +98,7 @@ export function TradeLinesOverlay({
                       : "trade-line__money trade-line__money--loss"
                   }
                 >
-                  {line.profit.toFixed(2)} {line.currency ?? ""}
+                  {line.profitEstimated ? "≈" : ""}{line.profit.toFixed(2)} {line.currency ?? ""}
                 </strong>
               </>
             ) : (
