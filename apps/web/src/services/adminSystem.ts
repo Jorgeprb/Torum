@@ -1,7 +1,5 @@
-import { getAuthToken } from "../stores/authStore";
-import { resolveApiBaseUrl } from "./runtime";
+import { apiRequest } from "./apiClient";
 
-const API_BASE_URL = resolveApiBaseUrl();
 
 export type SystemHealthStatus = "OK" | "WARN" | "FAIL" | "RESTARTING" | "UNKNOWN";
 export type RestartTarget = "mt5" | "api" | "frontend" | "bridge" | "all" | "pc";
@@ -34,27 +32,12 @@ export interface SystemStatusResponse {
   actions: SystemRestartAction[];
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  const token = getAuthToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `HTTP ${response.status}`);
-  }
-  return (await response.json()) as T;
-}
-
 export function getAdminSystemStatus(): Promise<SystemStatusResponse> {
-  return request<SystemStatusResponse>("/api/admin/system/status");
+  return apiRequest<SystemStatusResponse>("/api/admin/system/status");
 }
 
 export function restartSystemTarget(target: RestartTarget, confirmation: string): Promise<SystemRestartAction> {
-  return request<SystemRestartAction>(`/api/admin/system/restart/${target}`, {
+  return apiRequest<SystemRestartAction>(`/api/admin/system/restart/${target}`, {
     method: "POST",
     body: JSON.stringify({ confirmation })
   });

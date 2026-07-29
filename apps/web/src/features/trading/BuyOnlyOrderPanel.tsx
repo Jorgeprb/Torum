@@ -30,6 +30,7 @@ interface BuyOnlyOrderPanelProps {
   mt5Status: MT5Status | null;
   onOrderCompleted: (response: ManualOrderResponse) => void;
   onOrderStarted?: (message: string) => void;
+  onOrderFinished?: () => void;
   symbol: string;
   tradable: boolean;
 }
@@ -62,6 +63,7 @@ export function BuyOnlyOrderPanel({
   mt5Status,
   onOrderCompleted,
   onOrderStarted,
+  onOrderFinished,
   symbol,
   tradable
 }: BuyOnlyOrderPanelProps) {
@@ -162,19 +164,20 @@ export function BuyOnlyOrderPanel({
           confirmed: true,
           mode_acknowledged: settings.trading_mode,
           live_text: settings.trading_mode === "LIVE" ? liveText : null,
-          no_stop_loss_acknowledged: true
+          no_stop_loss_acknowledged: true,
+          risk_acknowledged: riskAccepted
         }
       });
       setLiveText("");
       setRiskAccepted(false);
       setSubmitNotice(response.ok ? "Orden ejecutada" : response.message);
       onOrderCompleted(response);
-      void recomputeRiskSnapshot(symbol).catch(() => undefined);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "No se pudo enviar la compra");
       setSubmitNotice(null);
     } finally {
       setSubmitting(false);
+      onOrderFinished?.();
     }
   }
 
@@ -195,7 +198,7 @@ export function BuyOnlyOrderPanel({
       .then((snapshot) => {
         if (riskSnapshotRequestRef.current !== requestId) return;
         setRiskSnapshot(snapshot);
-        if (snapshot.dirty || !snapshot.valid) {
+        if (!snapshot.valid) {
           setRiskSnapshotLoading(true);
           void recomputeRiskSnapshot(symbol)
             .then((updated) => {
@@ -229,10 +232,11 @@ export function BuyOnlyOrderPanel({
     [lastPrice, riskSnapshot, selectedLot]
   );
   const canAcceptRisk = riskSnapshot?.valid === true && riskProjection !== null;
-  const riskAcceptanceRequired = riskProjection?.breaches_limit === true;
+  const riskAcceptanceRequired = true;
   const confirmDisabled =
     submitting ||
-    (riskAcceptanceRequired && !riskAccepted) ||
+    !canAcceptRisk ||
+    !riskAccepted ||
     (mode === "LIVE" && liveText.trim().toUpperCase() !== "CONFIRM LIVE");
 
   return (
@@ -326,7 +330,7 @@ export function BuyOnlyOrderPanel({
                   type="checkbox"
                   onChange={(event) => setRiskAccepted(event.target.checked)}
                 />
-                Acepto superar el limite de riesgo
+                Acepto el riesgo calculado para esta compra
               </label>
             ) : null}
             {mode === "LIVE" ? (

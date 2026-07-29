@@ -20,6 +20,8 @@ class SymbolMapping(Base):
     digits: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     point: Mapped[float] = mapped_column(Float, nullable=False, default=0.01)
     contract_size: Mapped[float] = mapped_column(Float, nullable=False, default=100.0)
+    profit_currency: Mapped[str | None] = mapped_column(String(8))
+    risk_conversion_rate: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

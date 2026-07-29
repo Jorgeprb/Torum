@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { LogOut, Shield, Signal } from "lucide-react";
 
 import { StatusPill } from "../ui/StatusPill";
@@ -11,9 +11,42 @@ interface ShellProps {
   user: User;
 }
 
+const viewPaths: Record<MobileView, string> = {
+  chart: "/chart",
+  history: "/history",
+  news: "/news/calendar",
+  strategies: "/strategy/torum",
+  simulator: "/strategy/simulator",
+  indicators: "/indicators",
+  settings: "/settings/general",
+};
+
+function viewFromHash(): MobileView {
+  const path = window.location.hash.replace(/^#/, "");
+  if (path.startsWith("/strategy/simulator")) return "simulator";
+  if (path.startsWith("/strategy")) return "strategies";
+  if (path.startsWith("/history")) return "history";
+  if (path.startsWith("/news")) return "news";
+  if (path.startsWith("/indicators")) return "indicators";
+  if (path.startsWith("/settings")) return "settings";
+  return "chart";
+}
+
 export function Shell({ user }: ShellProps) {
   const logout = useAuthStore((state) => state.logout);
-  const [activeView, setActiveView] = useState<MobileView>("chart");
+  const [activeView, setActiveViewState] = useState<MobileView>(viewFromHash);
+
+  useEffect(() => {
+    const sync = () => setActiveViewState(viewFromHash());
+    window.addEventListener("hashchange", sync);
+    if (!window.location.hash) window.history.replaceState(null, "", `#${viewPaths.chart}`);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+
+  function setActiveView(view: MobileView) {
+    setActiveViewState(view);
+    if (window.location.hash !== `#${viewPaths[view]}`) window.location.hash = viewPaths[view];
+  }
   const activeLabel = accountNavItems.find((item) => item.id === activeView)?.label ?? "Grafico";
 
   return (

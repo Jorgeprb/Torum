@@ -7,10 +7,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 
-FINNHUB_API_KEY = os.getenv(
-    "FINNHUB_API_KEY",
-    "d7p2inpr01qr68pbfq1gd7p2inpr01qr68pbfq20",
-)
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
 FINNHUB_URL = "https://finnhub.io/api/v1/calendar/economic"
 SPAIN_TZ = ZoneInfo("Europe/Madrid")
@@ -163,6 +160,9 @@ def fetch_finnhub_events(
     end_date: str,
     api_key: str = FINNHUB_API_KEY,
 ) -> list[dict[str, Any]]:
+    if not api_key:
+        raise RuntimeError("FINNHUB_API_KEY is required")
+
     response = requests.get(
         FINNHUB_URL,
         params={

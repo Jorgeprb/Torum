@@ -12,3 +12,4 @@ requests>=2.32,<3.0
 httpx>=0.28,<1.0
 pywebpush>=2.0,<3.0
 pytest>=8.0,<9.0
+redis>=5.0,<6.0

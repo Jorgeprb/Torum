@@ -22,6 +22,11 @@ class RiskSnapshotRead(BaseModel):
     symbol: str
     mode: str = "ALL"
     source: str = "ALL"
+    account_login: int | None = None
+    account_server: str | None = None
+    account_currency: str | None = None
+    profit_currency: str | None = None
+    conversion_rate: float = 1.0
     ath_price: float | None
     stress_price: float | None
     balance: float | None

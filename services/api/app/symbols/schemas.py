@@ -12,6 +12,8 @@ class SymbolMappingBase(BaseModel):
     digits: int = Field(default=2, ge=0, le=10)
     point: float = Field(default=0.01, gt=0)
     contract_size: float = Field(default=100.0, gt=0)
+    profit_currency: str | None = Field(default=None, min_length=3, max_length=8)
+    risk_conversion_rate: float = Field(default=1.0, gt=0)
 
 
 class SymbolMappingCreate(SymbolMappingBase):
@@ -28,6 +30,8 @@ class SymbolMappingUpdate(BaseModel):
     digits: int | None = Field(default=None, ge=0, le=10)
     point: float | None = Field(default=None, gt=0)
     contract_size: float | None = Field(default=None, gt=0)
+    profit_currency: str | None = Field(default=None, min_length=3, max_length=8)
+    risk_conversion_rate: float | None = Field(default=None, gt=0)
 
 
 class SymbolMappingRead(SymbolMappingBase):

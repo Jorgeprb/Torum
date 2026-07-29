@@ -285,6 +285,27 @@ def test_torum_v1_plan_degrades_when_risk_exceeds_limit() -> None:
     assert plan.multiplier == 2
 
 
+def test_torum_v1_plan_does_not_reduce_s3_when_degrade_is_disabled() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=3,
+        current_price=4000.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+        strategy_params={"support_degrade_enabled": False},
+    )
+
+    assert plan.allowed is False
+    assert plan.multiplier == 0
+    assert plan.reason == "risk_limit_exceeded"
+
+
 def test_torum_v1_plan_counts_only_bot_positions_not_manual() -> None:
     db = _session()
     mapping = get_symbol_by_internal(db, "XAUUSD")

@@ -1,7 +1,5 @@
-import { getAuthToken } from "../stores/authStore";
-import { resolveApiBaseUrl } from "./runtime";
+import { apiRequest } from "./apiClient";
 
-const API_BASE_URL = resolveApiBaseUrl();
 
 export interface RiskPositionExposure {
   position_id: number;
@@ -39,27 +37,7 @@ export interface RiskCandidateProjection {
   breaches_limit: boolean;
 }
 
-interface RequestOptions extends RequestInit {
-  token?: string | null;
-}
-
 const riskSnapshotCache = new Map<string, RiskSnapshot>();
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  const token = options.token ?? getAuthToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `HTTP ${response.status}`);
-  }
-  return (await response.json()) as T;
-}
 
 export function readCachedRiskSnapshot(symbol: string): RiskSnapshot | null {
   return riskSnapshotCache.get(symbol.toUpperCase()) ?? null;
@@ -68,7 +46,7 @@ export function readCachedRiskSnapshot(symbol: string): RiskSnapshot | null {
 export async function getRiskSnapshot(symbol: string): Promise<RiskSnapshot> {
   const normalizedSymbol = symbol.toUpperCase();
   const params = new URLSearchParams({ symbol: normalizedSymbol });
-  const snapshot = await request<RiskSnapshot>(`/api/risk/snapshot?${params.toString()}`);
+  const snapshot = await apiRequest<RiskSnapshot>(`/api/risk/snapshot?${params.toString()}`);
   riskSnapshotCache.set(normalizedSymbol, snapshot);
   return snapshot;
 }
@@ -76,7 +54,7 @@ export async function getRiskSnapshot(symbol: string): Promise<RiskSnapshot> {
 export async function recomputeRiskSnapshot(symbol: string): Promise<RiskSnapshot> {
   const normalizedSymbol = symbol.toUpperCase();
   const params = new URLSearchParams({ symbol: normalizedSymbol });
-  const snapshot = await request<RiskSnapshot>(`/api/risk/recompute?${params.toString()}`, { method: "POST" });
+  const snapshot = await apiRequest<RiskSnapshot>(`/api/risk/recompute?${params.toString()}`, { method: "POST" });
   riskSnapshotCache.set(normalizedSymbol, snapshot);
   return snapshot;
 }

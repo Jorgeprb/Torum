@@ -4,6 +4,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from sqlalchemy.orm import Session
 
 from app.candles.service import candle_to_read
+from app.core.config import get_settings
+from app.core.decision_log import trace_event, trace_exception
+from app.core.service_auth import require_service_token
 from app.alerts.evaluator import PriceAlertEvaluator
 from app.alerts.push import PushNotificationService
 from app.db.session import get_db
@@ -12,6 +15,7 @@ from app.market_data.tick_time import tick_time_msc_from_datetime
 from app.risk.snapshot import RiskSnapshotService
 from app.settings.trading_service import get_global_trading_settings
 from app.strategies.auto_runner import run_torum_v1_for_symbols
+from app.strategies.candle_trigger import symbols_with_newly_closed_m5
 from app.strategies.notifications import notify_torum_v1_unlocks_for_symbols
 from app.ticks.schemas import TickBatchRequest, TickBatchResponse, TickInput, TickRead
 from app.ticks.service import TickIngestionError, get_recent_ticks, ingest_tick_batch
@@ -30,7 +34,7 @@ async def broadcast_tick_reads(ticks: list[dict[str, object]]) -> None:
         await market_ws_manager.broadcast_market_tick(tick)
 
 
-@router.post("", response_model=TickBatchResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=TickBatchResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_service_token)])
 def ingest_tick(
     payload: TickInput,
     background_tasks: BackgroundTasks,
@@ -41,7 +45,7 @@ def ingest_tick(
     return ingest_ticks_batch(batch, background_tasks, db)
 
 
-@router.post("/batch", response_model=TickBatchResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/batch", response_model=TickBatchResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_service_token)])
 def ingest_ticks_batch(
     payload: TickBatchRequest,
     background_tasks: BackgroundTasks,
@@ -64,9 +68,11 @@ def ingest_ticks_batch(
         received_ticks, inserted_ticks, candles, inserted_rows = ingest_tick_batch(db, payload)
     except TickIngestionError as exc:
         db.rollback()
+        trace_exception("tick_ingestion", "batch_rejected", exc, source=payload.source, received=len(payload.ticks))
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        trace_exception("tick_ingestion", "batch_failed", exc, source=payload.source, received=len(payload.ticks))
         raise
 
     candle_payloads = [candle_to_read(candle).model_dump() for candle in candles]
@@ -78,7 +84,37 @@ def ingest_ticks_batch(
     if inserted_rows:
         inserted_symbols = sorted({str(row["internal_symbol"]) for row in inserted_rows})
         background_tasks.add_task(notify_torum_v1_unlocks_for_symbols, inserted_symbols)
-        background_tasks.add_task(run_torum_v1_for_symbols, inserted_symbols)
+        settings = get_settings()
+        strategy_symbols = (
+            symbols_with_newly_closed_m5(candles)
+            if settings.strategy_run_on_candle_close_only
+            else inserted_symbols
+        )
+        if strategy_symbols:
+            trace_event(
+                "strategy_trigger",
+                "auto_run_scheduled",
+                symbols=strategy_symbols,
+                trigger_mode="candle_close" if settings.strategy_run_on_candle_close_only else "tick",
+                source=payload.source,
+                received=received_ticks,
+                inserted=inserted_ticks,
+                inserted_symbols=inserted_symbols,
+                m5_candle_buckets=[
+                    {
+                        "symbol": candle.internal_symbol,
+                        "time": candle.time,
+                        "open": candle.open,
+                        "high": candle.high,
+                        "low": candle.low,
+                        "close": candle.close,
+                    }
+                    for candle in candles
+                    if str(candle.timeframe).upper() == "M5"
+                    and candle.internal_symbol in strategy_symbols
+                ],
+            )
+            background_tasks.add_task(run_torum_v1_for_symbols, strategy_symbols)
 
     last_tick_time_by_symbol: dict[str, object] = {}
     for row in inserted_rows:
@@ -98,8 +134,7 @@ def ingest_ticks_batch(
     if next_balance is not None and next_balance != previous_balance:
         for symbol in ("XAUUSD", "XAUEUR"):
             RiskSnapshotService(db).mark_dirty(symbol)
-            RiskSnapshotService(db).recompute(symbol)
-            RiskSnapshotService(db).recompute(symbol, source="STRATEGY")
+        db.commit()
     if inserted_rows:
         last_tick_time = max(row["time"] for row in inserted_rows)
         background_tasks.add_task(market_ws_manager.broadcast_market_status, True, payload.source, last_tick_time)

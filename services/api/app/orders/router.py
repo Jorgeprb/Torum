@@ -9,7 +9,7 @@ from app.orders.repository import get_order, list_orders
 from app.orders.schemas import OrderRead
 from app.orders.service import OrderManager
 from app.trading.schemas import ManualOrderRequest, ManualOrderResponse
-from app.users.models import User
+from app.users.models import User, UserRole
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -27,19 +27,32 @@ def create_manual_order(
 @router.get("", response_model=list[OrderRead])
 def get_orders(
     db: Annotated[Session, Depends(get_db)],
-    _current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[OrderRead]:
-    return [OrderRead.model_validate(order) for order in list_orders(db, limit=limit)]
+    return [
+        OrderRead.model_validate(order)
+        for order in list_orders(
+            db,
+            limit=limit,
+            user_id=current_user.id,
+            include_all_users=current_user.role == UserRole.admin,
+        )
+    ]
 
 
 @router.get("/{order_id}", response_model=OrderRead)
 def get_order_by_id(
     order_id: int,
     db: Annotated[Session, Depends(get_db)],
-    _current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> OrderRead:
-    order = get_order(db, order_id)
+    order = get_order(
+        db,
+        order_id,
+        user_id=current_user.id,
+        include_all_users=current_user.role == UserRole.admin,
+    )
     if order is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
     return OrderRead.model_validate(order)

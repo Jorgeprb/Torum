@@ -4,6 +4,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.candles.models import Candle
+from app.core.config import get_settings
+from app.core.decision_log import trace_event
 from app.drawings.models import ChartDrawing
 from app.indicators.engine import IndicatorEngine
 from app.no_trade_zones.service import NoTradeZoneService
@@ -26,21 +28,100 @@ class StrategyContextBuilder:
         candles = self._load_candles(config.internal_symbol, candle_timeframe, limit)
         latest_tick = self._latest_tick(config.internal_symbol)
         indicators = self._load_indicators()
-        return StrategyContext(
+        no_trade_zones = NoTradeZoneService(self.db).get_active_zones(config.internal_symbol)
+        manual_zones = self._manual_zones(config)
+        open_positions = self._open_positions(config)
+        now = datetime.now(UTC)
+        context = StrategyContext(
             strategy_key=config.strategy_key,
             config=config,
             symbol=config.internal_symbol,
             timeframe=config.timeframe,
             mode=config.mode,
-            now=datetime.now(UTC),
+            now=now,
             candles=candles,
             latest_tick=latest_tick,
             indicators=indicators,
-            no_trade_zones=NoTradeZoneService(self.db).get_active_zones(config.internal_symbol),
-            manual_zones=self._manual_zones(config),
-            open_positions=self._open_positions(config),
+            no_trade_zones=no_trade_zones,
+            manual_zones=manual_zones,
+            open_positions=open_positions,
             params=params,
         )
+        recent_count = max(5, min(100, get_settings().strategy_trace_recent_candles))
+        trace_event(
+            "strategy_context",
+            "context_built",
+            strategy_key=config.strategy_key,
+            config_id=config.id,
+            config_revision=config.revision,
+            user_id=config.user_id,
+            symbol=config.internal_symbol,
+            mode=config.mode,
+            config_timeframe=config.timeframe,
+            candle_timeframe=candle_timeframe,
+            now=now,
+            candle_count=len(candles),
+            first_candle_time=candles[0].time if candles else None,
+            last_candle_time=candles[-1].time if candles else None,
+            recent_candles=[
+                {
+                    "time": candle.time,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                    "tick_count": candle.tick_count,
+                }
+                for candle in candles[-recent_count:]
+            ],
+            latest_tick={
+                "time": latest_tick.time,
+                "time_msc": latest_tick.time_msc,
+                "bid": latest_tick.bid,
+                "ask": latest_tick.ask,
+                "last": latest_tick.last,
+                "broker_symbol": latest_tick.broker_symbol,
+            }
+            if latest_tick is not None
+            else None,
+            manual_drawings=[
+                {
+                    "id": drawing.id,
+                    "type": drawing.drawing_type,
+                    "visible": drawing.visible,
+                    "payload": drawing.payload_json,
+                    "metadata": drawing.metadata_json,
+                    "style": drawing.style_json,
+                }
+                for drawing in manual_zones
+            ],
+            no_trade_zones=[
+                {
+                    "id": zone.id,
+                    "reason": zone.reason,
+                    "start_time": zone.start_time,
+                    "end_time": zone.end_time,
+                    "blocks_trading": zone.blocks_trading,
+                }
+                for zone in no_trade_zones
+            ],
+            open_positions=[
+                {
+                    "id": position.id,
+                    "order_id": position.order_id,
+                    "status": position.status,
+                    "side": position.side,
+                    "volume": position.volume,
+                    "open_price": position.open_price,
+                    "tp": position.tp,
+                    "opened_at": position.opened_at,
+                    "mt5_position_ticket": position.mt5_position_ticket,
+                }
+                for position in open_positions
+            ],
+        )
+        return context
 
     def _load_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]:
         rows = list(

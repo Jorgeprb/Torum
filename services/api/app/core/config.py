@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +32,28 @@ class Settings(BaseSettings):
 
     trading_mode: Literal["PAPER", "DEMO", "LIVE"] = "PAPER"
     mt5_bridge_base_url: str | None = "http://host.docker.internal:9100"
+    service_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("TORUM_SERVICE_TOKEN", "SERVICE_TOKEN"),
+    )
+    internal_auth_required: bool = True
+    mt5_missing_position_confirmations: int = 3
+    strategy_run_on_candle_close_only: bool = True
+    risk_recompute_debounce_seconds: float = 0.5
+    risk_use_mt5_profit_calibration: bool = True
+    risk_mt5_calibration_timeout_seconds: float = 2.0
+    trade_job_poll_interval_seconds: float = 0.5
+    trade_job_max_attempts: int = 8
+    run_internal_schedulers: bool = True
+    enforce_single_worker: bool = True
+
+    # Persistent diagnostics. Docker mounts this directory to ./logs on the host.
+    log_to_files: bool = True
+    log_directory: str = "logs"
+    log_max_bytes: int = 10_000_000
+    log_backup_count: int = 20
+    strategy_trace_enabled: bool = True
+    strategy_trace_recent_candles: int = 30
     price_stale_after_seconds: int = 30
     candle_price_source: str = "BID"
     chart_broker_time_zone: str = "Etc/GMT-3"
@@ -44,7 +66,7 @@ class Settings(BaseSettings):
     news_block_minutes_before: int = 60
     news_block_minutes_after: int = 60
     finnhub_calendar_url: str = "https://finnhub.io/api/v1/calendar/economic"
-    finnhub_api_key: SecretStr = "d7p2inpr01qr68pbfq1gd7p2inpr01qr68pbfq20"
+    finnhub_api_key: SecretStr | None = None
     news_provider_timeout_seconds: float = 10.0
 
     vapid_public_key: str | None = None
@@ -53,7 +75,7 @@ class Settings(BaseSettings):
 
     watchdog_base_url: str | None = "http://host.docker.internal:9200"
     watchdog_admin_token: SecretStr | None = None
-    watchdog_timeout_seconds: float = 5.0
+    watchdog_timeout_seconds: float = 15.0
 
     @property
     def cors_origins_list(self) -> list[str]:

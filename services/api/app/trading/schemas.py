@@ -17,6 +17,7 @@ class ClientConfirmation(BaseModel):
     mode_acknowledged: TradingMode | None = None
     live_text: str | None = None
     no_stop_loss_acknowledged: bool = False
+    risk_acknowledged: bool = False
 
 
 class ManualOrderRequest(BaseModel):
@@ -59,6 +60,7 @@ class ManualOrderPositionRead(BaseModel):
     commission: float | None = None
     status: PositionStatus
     mt5_position_ticket: int | None
+    mt5_position_identifier: int | None = None
     closing_deal_ticket: int | None = None
     magic_number: int | None
     opened_at: datetime

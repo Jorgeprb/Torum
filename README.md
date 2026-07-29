@@ -1,5 +1,8 @@
 # Torum
 
+> **Actualización de fiabilidad:** esta versión incluye la migración `0020_reliability_hardening`, autenticación de servicios internos y trabajos durables para TP/cierres/riesgo. Antes de arrancar, revisa [`STABILIZATION_REPORT.md`](STABILIZATION_REPORT.md), configura el mismo `TORUM_SERVICE_TOKEN` en API y bridge y ejecuta `alembic upgrade head`.
+
+
 Torum es una PWA de trading para oro, integrada con MetaTrader 5 mediante un bridge Python local. La fase actual mejora la interfaz responsive/mobile y mantiene estrategias desactivadas por defecto.
 
 ## Decision de arquitectura local
@@ -536,7 +539,7 @@ Incluido:
 
 Pendiente para fases posteriores:
 
-- Scheduler continuo de estrategias.
+- Externalización opcional de schedulers y worker de jobs para despliegues multi-worker.
 - Alertas avanzadas por indicadores/estrategias.
 
 ## Contrato mt5_bridge Fase 3
@@ -601,3 +604,39 @@ Estado del servidor local de ordenes del bridge:
 ```powershell
 Invoke-RestMethod http://127.0.0.1:9100/health
 ```
+
+
+## Editor visual Torum V1 y centro de noticias
+
+La configuración avanzada ya no depende de una lista plana de campos. El editor visual incluye:
+
+- pipeline completo de la estrategia;
+- configuración común y overrides XAUUSD/XAUEUR;
+- modo sencillo y avanzado;
+- borrador y publicación atómica;
+- revisiones, auditoría y restauración;
+- laboratorio histórico independiente desde el menú hamburguesa;
+- gráfico M5 con entradas, salidas, regiones, soportes, pullbacks y bloqueos;
+- métricas, curva de equity, MFE/MAE y depuración por vela;
+- trabajos con progreso, cancelación real y reanudación del seguimiento;
+- parámetros temporales, comparación, importación, exportación y presets;
+- reglas de noticias por impacto y calendario unificado.
+
+Documentación:
+
+```text
+docs/strategy_workbench.md
+docs/strategy_simulator.md
+docs/news_workbench.md
+SIMULATOR_IMPLEMENTATION_REPORT.md
+COMPLETE_IMPROVEMENTS_REPORT.md
+```
+
+La cabeza actual de Alembic es `0022_strategy_workbench`.
+
+```bash
+docker compose run --rm api alembic upgrade head
+```
+
+Redis se utiliza como aceleración opcional para locks de estrategia, estado MT5, caché de pullbacks y distribución de eventos WebSocket. El fallback local mantiene la aplicación operativa si Redis no está disponible. Se conserva un único worker por defecto mientras los schedulers y el worker de jobs se ejecuten dentro de la API.
+

@@ -3,7 +3,7 @@ param(
   [string]$WatchdogAdminToken,
   [string]$TorumRoot = "C:\Users\steel\Documents\Codex\Torum_App\torum",
   [string]$Mt5Path = "C:\Program Files\MetaTrader 5\terminal64.exe",
-  [string]$WatchdogHost = "127.0.0.1",
+  [string]$WatchdogHost = "0.0.0.0",
   [int]$WatchdogPort = 9200,
   [int]$Mt5PollIntervalMs = 50,
   [int]$Mt5BatchFlushIntervalMs = 100,
@@ -25,7 +25,7 @@ Set-TorumEnv "WATCHDOG_ADMIN_TOKEN" $WatchdogAdminToken
 Set-TorumEnv "WATCHDOG_HOST" $WatchdogHost
 Set-TorumEnv "WATCHDOG_PORT" ([string]$WatchdogPort)
 Set-TorumEnv "WATCHDOG_BASE_URL" "http://host.docker.internal:$WatchdogPort"
-Set-TorumEnv "WATCHDOG_TIMEOUT_SECONDS" "5"
+Set-TorumEnv "WATCHDOG_TIMEOUT_SECONDS" "15"
 Set-TorumEnv "JWT_SECRET_KEY" $JwtSecretKey
 Set-TorumEnv "CORS_ORIGINS" "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://100.124.49.118:4173,http://172.27.176.1:4173,http://172.18.64.1:4173,http://192.168.1.86:4173,https://pc-oficina.tail652fa7.ts.net"
 Set-TorumEnv "TORUM_ROOT" $TorumRoot

@@ -72,6 +72,15 @@ class ChartDrawingService:
         self._ensure_can_access(drawing, user)
         self._ensure_can_edit(drawing, user)
         data = payload.model_dump(exclude_unset=True)
+        expected_revision = data.pop("expected_revision", None)
+        if expected_revision is not None and int(expected_revision) != int(drawing.revision):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Drawing was changed by another request",
+                    "current_revision": drawing.revision,
+                },
+            )
         if "name" in data:
             drawing.name = data["name"].strip() if isinstance(data["name"], str) and data["name"].strip() else None
         if "payload" in data and data["payload"] is not None:
@@ -88,6 +97,7 @@ class ChartDrawingService:
             if user.role != UserRole.admin:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admin can lock drawings")
             drawing.locked = data["locked"]
+        drawing.revision = int(drawing.revision or 0) + 1
         self.db.commit()
         self.db.refresh(drawing)
         return drawing
@@ -97,6 +107,7 @@ class ChartDrawingService:
         self._ensure_can_edit(drawing, user)
         drawing.visible = False
         drawing.deleted_at = datetime.now(UTC)
+        drawing.revision = int(drawing.revision or 0) + 1
         self.db.commit()
 
     def to_read(self, drawing: ChartDrawing) -> ChartDrawingRead:
@@ -113,6 +124,7 @@ class ChartDrawingService:
             locked=drawing.locked,
             visible=drawing.visible,
             source=drawing.source,
+            revision=drawing.revision,
             created_at=drawing.created_at,
             updated_at=drawing.updated_at,
         )

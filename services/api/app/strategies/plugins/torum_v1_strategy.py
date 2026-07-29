@@ -1,9 +1,20 @@
+from dataclasses import asdict
 from typing import Any
+
+from app.core.config import get_settings
+from app.core.decision_log import trace_event
 
 from app.strategies.context import StrategyContext
 from app.strategies.signals import StrategySignalData
 from app.strategies.ath import latest_executable_price
-from app.strategies.torum_v1 import TORUM_V1_KEY, operation_zones_from_drawings, should_buy_torum_v1, support_zones_from_drawings
+from app.strategies.torum_v1 import (
+    TORUM_V1_KEY,
+    operation_zones_from_drawings,
+    should_buy_torum_v1,
+    support_zones_from_drawings,
+    torum_v1_diagnostic_snapshot,
+)
+from app.strategies.torum_v1_config import TorumV1Params
 
 
 class TorumV1Strategy:
@@ -11,63 +22,68 @@ class TorumV1Strategy:
     name = "Estrategia Torum V1.0"
     version = "1.0"
     description = "Bloqueo visual y entrada BUY por pullback M5 dentro de zona operativa manual."
-    default_params: dict[str, Any] = {
-        "use_news": True,
-        "enabled": True,
-        "timeframe": "H2",
-        "session_start": "09:00",
-        "session_end": "15:00",
-        "enable_operation_zones": True,
-        "entry_timeframe": "M5",
-        "pullback_enabled": True,
-        "pullback_max_count": 10,
-        "pullback_min_pct": 0.0,
-        "pullback_threshold_pct": 0.0,
-        "pullback_entry_min_pct": 0.20,
-        "pullback_lookback_bars": 12,
-        "pullback_swing_confirm_bars": 1,
-        "pullback_allow_peak_extension": True,
-        "pullback_require_bearish_leg": True,
-        "pullback_min_bearish_candles": 1,
-        "pullback_min_lower_close_candles": 1,
-        "pullback_disallow_same_candle_peak_low": True,
-        "pullback_impulse_green_filter_enabled": True,
-        "pullback_recovery_pct": 0.10,
-        "pullback_end_confirmation_bars": 1,
-        "pullback_min_bars_between": 0,
-        "pullback_use_wicks": True,
-        "pullback_use_close_confirmation": True,
-        "pullback_live_update_enabled": True,
-        "pullback_live_anchor_to_low": True,
-        "pullback_show_labels": True,
-        "pullback_show_only_live": False,
-        "pullback_label_decimals": 2,
-        "pullback_line_width": 2,
-        "pullback_opacity": 0.95,
-        "show_pullback_debug": False,
-        "require_zone": True,
-        "one_position_per_symbol": False,
-        "ath_green_prefer_x2_entries": True,
-        "usd_strength_filter_enabled": True,
-        "usd_strength_apply_to_symbols": ["XAUUSD", "XAUEUR"],
-        "usd_strength_mode": "only_operate_when_weak",
-        "usd_sma_period": 30,
-        "usd_neutral_band_points": 0.10,
-        "usd_allow_when_neutral": False,
-        "usd_strong_drop_override_enabled": True,
-        "usd_strong_drop_lookback_days": 3,
-        "usd_strong_drop_min_pct": 0.45,
-        "usd_strong_drop_require_bearish_close": True,
-        "usd_strength_strict": False,
-    }
+    default_params: dict[str, Any] = TorumV1Params.defaults_for_symbol("XAUEUR").model_dump()
     supported_symbols = ("XAUEUR", "XAUUSD")
     supported_timeframes = ("H2", "H3", "M5")
     required_indicators: tuple[str, ...] = ()
     required_context = ("candles", "no_trade_zones")
 
     def generate_signal(self, context: StrategyContext) -> StrategySignalData:
-        params = {**self.default_params, **context.params}
+        params = TorumV1Params.normalize(context.symbol, context.params).model_dump()
+        current_price = latest_executable_price(context.latest_tick, "BUY")
+        operation_zones = operation_zones_from_drawings(context.manual_zones)
+        support_zones = support_zones_from_drawings(context.manual_zones)
+        recent_count = max(5, min(100, get_settings().strategy_trace_recent_candles))
+        trace_event(
+            "torum_v1_technical",
+            "evaluation_started",
+            config_id=context.config.id,
+            config_revision=context.config.revision,
+            user_id=context.config.user_id,
+            symbol=context.symbol,
+            mode=context.mode,
+            now=context.now,
+            current_price=current_price,
+            params=params,
+            candle_count=len(context.candles),
+            recent_candles=[
+                {
+                    "time": candle.time,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                    "tick_count": candle.tick_count,
+                }
+                for candle in context.candles[-recent_count:]
+            ],
+            operation_zones=[asdict(zone) for zone in operation_zones],
+            support_zones=[asdict(zone) for zone in support_zones],
+            open_positions=[
+                {
+                    "id": position.id,
+                    "order_id": position.order_id,
+                    "status": position.status,
+                    "volume": position.volume,
+                    "open_price": position.open_price,
+                    "tp": position.tp,
+                    "opened_at": position.opened_at,
+                    "mt5_position_ticket": position.mt5_position_ticket,
+                }
+                for position in context.open_positions
+            ],
+        )
         if str(params.get("entry_timeframe", "M5")).upper() != "M5":
+            trace_event(
+                "torum_v1_technical",
+                "decision",
+                config_id=context.config.id,
+                symbol=context.symbol,
+                should_buy=False,
+                reason="entry_timeframe_not_m5",
+                configured_entry_timeframe=params.get("entry_timeframe"),
+            )
             return StrategySignalData(
                 strategy_key=self.key,
                 internal_symbol=context.symbol,
@@ -81,12 +97,49 @@ class TorumV1Strategy:
         decision = should_buy_torum_v1(
             symbol=context.symbol,
             candles_m5=context.candles,
-            operation_zones=operation_zones_from_drawings(context.manual_zones),
-            support_zones=support_zones_from_drawings(context.manual_zones),
+            operation_zones=operation_zones,
+            support_zones=support_zones,
             params=params,
             now=context.now,
-            current_price=latest_executable_price(context.latest_tick, "BUY"),
+            current_price=current_price,
             open_positions=context.open_positions,
+        )
+        diagnostic_snapshot = torum_v1_diagnostic_snapshot(
+            symbol=context.symbol,
+            candles_m5=context.candles,
+            operation_zones=operation_zones,
+            support_zones=support_zones,
+            params=params,
+            now=context.now,
+            current_price=current_price,
+        )
+        trace_event(
+            "torum_v1_technical",
+            "diagnostic_snapshot",
+            config_id=context.config.id,
+            config_revision=context.config.revision,
+            user_id=context.config.user_id,
+            symbol=context.symbol,
+            decision_should_buy=decision.should_buy,
+            decision_reason=decision.reason,
+            snapshot=diagnostic_snapshot,
+        )
+        trace_event(
+            "torum_v1_technical",
+            "decision",
+            config_id=context.config.id,
+            config_revision=context.config.revision,
+            user_id=context.config.user_id,
+            symbol=context.symbol,
+            mode=context.mode,
+            should_buy=decision.should_buy,
+            reason=decision.reason,
+            confirmation_candle_time=decision.confirmation_candle_time,
+            pullback=asdict(decision.pullback) if decision.pullback is not None else None,
+            operation_zone=asdict(decision.zone) if decision.zone is not None else None,
+            support_zone=asdict(decision.support) if decision.support is not None else None,
+            metadata=decision.metadata,
+            current_price=current_price,
         )
         if not decision.should_buy:
             return StrategySignalData(
@@ -107,6 +160,20 @@ class TorumV1Strategy:
                 "last_signal_operation_zone_id": decision.zone.drawing_id if decision.zone is not None else None,
             }
 
+        trace_event(
+            "torum_v1_technical",
+            "entry_signal_generated",
+            config_id=context.config.id,
+            config_revision=context.config.revision,
+            user_id=context.config.user_id,
+            symbol=context.symbol,
+            reason=decision.reason,
+            confirmation_candle_time=decision.confirmation_candle_time,
+            pullback=asdict(decision.pullback) if decision.pullback is not None else None,
+            operation_zone=asdict(decision.zone) if decision.zone is not None else None,
+            support_zone=asdict(decision.support) if decision.support is not None else None,
+            metadata=decision.metadata,
+        )
         return StrategySignalData(
             strategy_key=self.key,
             internal_symbol=context.symbol,

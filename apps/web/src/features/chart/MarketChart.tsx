@@ -1,7 +1,6 @@
 import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   type IChartApi,
-  type IPriceLine,
   type ISeriesApi,
   type LineData,
   LineStyle,
@@ -37,7 +36,6 @@ import {
   formatChartTickMark,
   timeframeToSeconds,
   timeToNumber,
-  utcToBrokerChartTime
 } from "./chartTime";
 
 import {
@@ -63,6 +61,7 @@ import {
   centerSymbolChange,
   chartTimeToUnix,
   chartXToTime,
+  containingCandleTime,
   cssPixelValue,
   disablePriceAutoScale,
   hardResetChartView,
@@ -87,6 +86,7 @@ import { PriceAlertsOverlay } from "./overlays/PriceAlertsOverlay";
 import { ChartActionButtons } from "./overlays/ChartActionButtons";
 import { DrawingStyleEditor, type TorumZoneVisualStyle } from "./overlays/DrawingStyleEditor";
 import { AthPriceZonesOverlay } from "./overlays/AthPriceZonesOverlay";
+import { useBidAskPriceLines } from "./hooks/useBidAskPriceLines";
 
 // ── Alert style persistence ──────────────────────────────────────────────────
 const DEFAULT_ALERT_VISUAL_STYLE: PriceAlertVisualStyle = {
@@ -228,6 +228,8 @@ interface MeasurePoint {
 export function MarketChart({
   candles,
   loadingCandles = false,
+  preferredBarSpacing = initialCandleBarSpacing,
+  minimumBarSpacing = 1,
   symbolResetToken = 0,
   hardResetToken = 0,
   noTradeZones = [],
@@ -255,6 +257,7 @@ export function MarketChart({
   onCancelPriceAlert,
   bidPrice = null,
   askPrice = null,
+  livePrice = null,
   showBidLine = true,
   showAskLine = true,
   autoFollowEnabled = true,
@@ -274,14 +277,12 @@ export function MarketChart({
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lineSeriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
   const futurePaddingSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
-  const bidPriceLineRef = useRef<IPriceLine | null>(null);
-  const askPriceLineRef = useRef<IPriceLine | null>(null);
-  const previousPriceLineSymbolRef = useRef(symbol);
   const loadedResetKeyRef = useRef<string | null>(null);
   const hasFullDataRef = useRef(false);
   const firstDataTimeRef = useRef<number | null>(null);
   const lastDataTimeRef = useRef<number | null>(null);
   const dataLengthRef = useRef(0);
+  const lastRenderedCandleRef = useRef<ReturnType<typeof normalizeCandlesForChart>[number] | null>(null);
   const appliedCenterRequestKeyRef = useRef<string | null>(null);
   const pendingCenterResetKeyRef = useRef<string | null>(null);
   const centeredResetKeyRef = useRef<string | null>(null);
@@ -359,7 +360,7 @@ export function MarketChart({
 
   function getPreferredVisibleBars(candleCount: number): number {
     const containerWidth = containerRef.current?.clientWidth ?? 360;
-    return calculateVisibleBarsForWidth(containerWidth, timeframe, candleCount);
+    return calculateVisibleBarsForWidth(containerWidth, timeframe, candleCount, preferredBarSpacing);
   }
 
   function lastChartDataTime(data: ReturnType<typeof normalizeCandlesForChart>): number | null {
@@ -401,6 +402,7 @@ export function MarketChart({
     firstDataTimeRef.current = nextFirstTime;
     lastDataTimeRef.current = nextLastTime;
     dataLengthRef.current = data.length;
+    lastRenderedCandleRef.current = data[data.length - 1] ?? null;
 
     if (prependedHistory && visibleRange && addedBars > 0) {
       chart?.timeScale().setVisibleLogicalRange({
@@ -419,65 +421,7 @@ export function MarketChart({
     firstDataTimeRef.current = null;
     lastDataTimeRef.current = null;
     dataLengthRef.current = 0;
-  }
-
-  function removeBidPriceLine(series = seriesRef.current) {
-    if (series && bidPriceLineRef.current) series.removePriceLine(bidPriceLineRef.current);
-    bidPriceLineRef.current = null;
-  }
-
-  function removeAskPriceLine(series = seriesRef.current) {
-    if (series && askPriceLineRef.current) series.removePriceLine(askPriceLineRef.current);
-    askPriceLineRef.current = null;
-  }
-
-  function upsertBidAskPriceLines() {
-    const series = seriesRef.current;
-    if (!series) return;
-
-    if (!showBidLine || typeof bidPrice !== "number" || !Number.isFinite(bidPrice)) {
-      removeBidPriceLine(series);
-    } else if (bidPriceLineRef.current) {
-      bidPriceLineRef.current.applyOptions({
-        price: bidPrice,
-        color: "#2be0d0",
-        lineWidth: 1,
-        lineStyle: LineStyle.Solid,
-        axisLabelVisible: true,
-        title: "BID"
-      });
-    } else {
-      bidPriceLineRef.current = series.createPriceLine({
-        price: bidPrice,
-        color: "#2be0d0",
-        lineWidth: 1,
-        lineStyle: LineStyle.Solid,
-        axisLabelVisible: true,
-        title: "BID"
-      });
-    }
-
-    if (!showAskLine || typeof askPrice !== "number" || !Number.isFinite(askPrice)) {
-      removeAskPriceLine(series);
-    } else if (askPriceLineRef.current) {
-      askPriceLineRef.current.applyOptions({
-        price: askPrice,
-        color: "#f45d5d",
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: "ASK"
-      });
-    } else {
-      askPriceLineRef.current = series.createPriceLine({
-        price: askPrice,
-        color: "#f45d5d",
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: "ASK"
-      });
-    }
+    lastRenderedCandleRef.current = null;
   }
 
   function applyCenterRequestIfNeeded(sc: ReturnType<typeof normalizeCandlesForChart>, nextKey: string): boolean {
@@ -761,7 +705,7 @@ export function MarketChart({
   }
 
   // ── recalculateOverlays ────────────────────────────────────────────────────
-  const recalculateOverlays = useCallback(() => {
+  const recalculateOverlaysNow = useCallback(() => {
     const chart = chartRef.current;
     const series = seriesRef.current;
     const container = containerRef.current;
@@ -774,6 +718,10 @@ export function MarketChart({
     syncPriceScaleWidth(container);
     const containerWidth = chartPaneWidth(container);
     const containerHeight = container.clientHeight;
+    const logicalRange = chart.timeScale().getVisibleLogicalRange();
+    const visibleBars = logicalRange ? Math.max(1, Number(logicalRange.to) - Number(logicalRange.from)) : 1;
+    const pixelsPerBar = containerWidth / visibleBars;
+    const denseChartView = pixelsPerBar < 3;
     const sortedCandles = normalizeCandlesForChart(candles);
     const lastCandleTime = lastRealCandleTime(sortedCandles);
     const timeframeSeconds = timeframeToSeconds(timeframe);
@@ -802,12 +750,12 @@ export function MarketChart({
       const color = operationZone ? torumZoneVisualStyle.color : styleValue(drawing.style, "color", "#f5c542");
       const lineWidth = numericStyleValue(drawing.style, "lineWidth", 2);
       const ls = operationZone ? "dashed" : lineStyleValue(drawing.style);
-      const glow = clampedNumericStyleValue(drawing.style, "glow", 0, 0, 18);
+      const glow = denseChartView ? 0 : clampedNumericStyleValue(drawing.style, "glow", 0, 0, 18);
       const opacity = operationZone ? torumZoneVisualStyle.opacity : clampedNumericStyleValue(drawing.style, "opacity", drawing.drawing_type === "manual_zone" ? 0.16 : 0.13, 0, 1);
       const bgColor = drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone" ? hexToRgba(color, opacity) : styleValue(drawing.style, "backgroundColor", "rgba(245,197,66,0.15)");
       const textColor = styleValue(drawing.style, "textColor", "#edf2ef");
       const fontSize = clampedNumericStyleValue(drawing.style, "fontSize", 14, 8, 48);
-      const label = operationZone ? "TORUM V1 BUY ZONE" : drawingLabel(drawing);
+      const label = denseChartView && !operationZone ? "" : operationZone ? "TORUM V1 BUY ZONE" : drawingLabel(drawing);
       const base = { id: drawing.id, drawing, color, lineWidth, lineStyle: ls, glow, label };
       const payload = draftDrawingPayloadsRef.current[drawing.id] ?? drawing.payload;
 
@@ -896,23 +844,35 @@ export function MarketChart({
         }).filter((l): l is TradeLineOverlay => l !== null)
     );
 
-    setTradeMarkerOverlays([]);
+    setTradeMarkerOverlays(
+      tradeMarkers.map((marker): TradeMarkerOverlay | null => {
+        if (!Number.isFinite(marker.price)) return null;
+        const candleTime = containingCandleTime(sortedCandles, timeToNumber(marker.time), timeframe);
+        if (candleTime === null) return null;
+        const x = chart.timeScale().timeToCoordinate(candleTime as UTCTimestamp);
+        const y = series.priceToCoordinate(marker.price);
+        return x === null || y === null ? null : { ...marker, x: Number(x), y: Number(y) };
+      }).filter((marker): marker is TradeMarkerOverlay => marker !== null)
+    );
 
     setTradeExecutionMarkerOverlays(
       tradeExecutionMarkers.map((marker): TradeExecutionMarkerOverlay | null => {
         if (!Number.isFinite(marker.entryPrice)) return null;
-        const entryTime = utcToBrokerChartTime(timeToNumber(marker.entryTime));
-        const entryX = timeToChartX(chart, sortedCandles, entryTime, Number.NaN);
+        const entryCandleTime = containingCandleTime(sortedCandles, timeToNumber(marker.entryTime), timeframe);
+        if (entryCandleTime === null) return null;
+        const rawEntryX = chart.timeScale().timeToCoordinate(entryCandleTime as UTCTimestamp);
         const entryY = series.priceToCoordinate(marker.entryPrice);
-        if (Number.isNaN(entryX) || entryY === null) return null;
+        if (rawEntryX === null || entryY === null) return null;
 
-        const overlay: TradeExecutionMarkerOverlay = { ...marker, entryX, entryY: Number(entryY) };
+        const overlay: TradeExecutionMarkerOverlay = { ...marker, entryX: Number(rawEntryX), entryY: Number(entryY) };
         if (marker.exitTime !== null && marker.exitTime !== undefined && typeof marker.exitPrice === "number" && Number.isFinite(marker.exitPrice)) {
-          const exitTime = utcToBrokerChartTime(timeToNumber(marker.exitTime));
-          const nextExitX = timeToChartX(chart, sortedCandles, exitTime, Number.NaN);
+          const exitCandleTime = containingCandleTime(sortedCandles, timeToNumber(marker.exitTime), timeframe);
+          const rawExitX = exitCandleTime === null ? null : chart.timeScale().timeToCoordinate(exitCandleTime as UTCTimestamp);
           const nextExitY = series.priceToCoordinate(marker.exitPrice);
-          if (!Number.isNaN(nextExitX) && nextExitY !== null) {
-            overlay.exitX = nextExitX;
+          if (rawExitX !== null && nextExitY !== null) {
+            const sameCandle = exitCandleTime === entryCandleTime;
+            overlay.entryX = Number(rawEntryX) + (sameCandle ? -3 : 0);
+            overlay.exitX = Number(rawExitX) + (sameCandle ? 3 : 0);
             overlay.exitY = Number(nextExitY);
           }
         }
@@ -931,12 +891,14 @@ export function MarketChart({
     );
 
     setPullbackDebugOverlays(
-      (pullbackDebugVisible ? strategyDebugPullbacks : []).map(debug => {
+      (pullbackDebugVisible ? strategyDebugPullbacks : []).map<PullbackDebugOverlay | null>(debug => {
         const x1 = timeToChartX(chart, sortedCandles, debug.swing_high_time, Number.NaN);
         const x2 = timeToChartX(chart, sortedCandles, debug.pullback_low_time, Number.NaN);
         const y1 = series.priceToCoordinate(debug.swing_high);
         const y2 = series.priceToCoordinate(debug.pullback_low);
-        return Number.isNaN(x1) || Number.isNaN(x2) || y1 === null || y2 === null ? null : { debug, x1, y1: Number(y1), x2, y2: Number(y2) };
+        return Number.isNaN(x1) || Number.isNaN(x2) || y1 === null || y2 === null
+          ? null
+          : { debug, x1, y1: Number(y1), x2, y2: Number(y2), compact: denseChartView };
       }).filter((o): o is PullbackDebugOverlay => o !== null)
     );
 
@@ -968,13 +930,18 @@ export function MarketChart({
     }
   }, [athZones, candles, drawings, draftAlertPrices, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, pullbackDebugVisible, showFutureNewsZones, strategyDebugPullbacks, timeframe, torumZoneVisualStyle, tradeExecutionMarkers, tradeLines, tradeMarkers]);
 
-  function scheduleOverlayRecalculate() {
+  // Many chart events can fire in the same frame (tick, zoom, pan, drawing drag,
+  // resize). Coalesce them so the expensive coordinate pass runs at most once
+  // per rendered frame.
+  const recalculateOverlays = useCallback(() => {
     if (overlayRecalculateFrameRef.current !== null) return;
     overlayRecalculateFrameRef.current = window.requestAnimationFrame(() => {
       overlayRecalculateFrameRef.current = null;
-      recalculateOverlays();
+      recalculateOverlaysNow();
     });
-  }
+  }, [recalculateOverlaysNow]);
+
+  const scheduleOverlayRecalculate = recalculateOverlays;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -984,7 +951,7 @@ export function MarketChart({
       localization: { locale: "es-ES", timeFormatter: formatChartCrosshairTime },
       grid: { vertLines: { color: "#24303a", style: LineStyle.Dashed }, horzLines: { color: "#24303a", style: LineStyle.Dashed } },
       rightPriceScale: { borderColor: "#3a434a", scaleMargins: { top: 0.18, bottom: 0.18 } },
-      timeScale: { borderColor: "#293033", barSpacing: initialCandleBarSpacing, minBarSpacing: 6, timeVisible: true, secondsVisible: false, tickMarkFormatter: formatChartTickMark },
+      timeScale: { borderColor: "#293033", barSpacing: preferredBarSpacing, minBarSpacing: minimumBarSpacing, timeVisible: true, secondsVisible: false, tickMarkFormatter: formatChartTickMark },
       handleScale: { axisPressedMouseMove: { time: true, price: true }, mouseWheel: true, pinch: true },
       handleScroll: { horzTouchDrag: true, vertTouchDrag: true, mouseWheel: true, pressedMouseMove: true },
       crosshair: { mode: 1 }
@@ -998,22 +965,48 @@ export function MarketChart({
       firstDataTimeRef.current = null;
       lastDataTimeRef.current = null;
       dataLengthRef.current = 0;
+      lastRenderedCandleRef.current = null;
       chart.remove(); chartRef.current = null; seriesRef.current = null;
     };
   }, []);
 
+  // Live ticks update only the last candle. Replacing the entire series on every
+  // tick caused React renders, overlay recalculation and visible stutter.
   useEffect(() => {
     const series = seriesRef.current;
-    const symbolChanged = previousPriceLineSymbolRef.current !== symbol;
+    if (!series || !hasFullDataRef.current || typeof livePrice !== "number" || !Number.isFinite(livePrice)) return;
+    if (!candlesMatchCurrentMarket(candles, symbol, timeframe)) return;
 
-    if (symbolChanged) {
-      removeBidPriceLine(series);
-      removeAskPriceLine(series);
-      previousPriceLineSymbolRef.current = symbol;
-    }
+    const normalized = normalizeCandlesForChart(candles);
+    const sourceLast = normalized[normalized.length - 1];
+    const previous = lastRenderedCandleRef.current ?? sourceLast;
+    if (!sourceLast || !previous || timeToNumber(sourceLast.time) !== timeToNumber(previous.time)) return;
 
-    upsertBidAskPriceLines();
-  }, [symbol, bidPrice, askPrice, showBidLine, showAskLine]);
+    const next = {
+      ...previous,
+      high: Math.max(previous.high, livePrice),
+      low: Math.min(previous.low, livePrice),
+      close: livePrice
+    };
+    series.update(next);
+    lastRenderedCandleRef.current = next;
+  }, [candles, livePrice, symbol, timeframe]);
+
+  useBidAskPriceLines({
+    seriesRef,
+    symbol,
+    bidPrice,
+    askPrice,
+    showBidLine,
+    showAskLine,
+  });
+
+  useEffect(() => {
+    chartRef.current?.timeScale().applyOptions({
+      barSpacing: preferredBarSpacing,
+      minBarSpacing: minimumBarSpacing
+    });
+  }, [minimumBarSpacing, preferredBarSpacing]);
 
   useEffect(() => { saveAlertVisualStyles(alertVisualStyles); }, [alertVisualStyles]);
   useEffect(() => { if (selectedDrawingId) setSelectedAlertId(null); }, [selectedDrawingId]);
@@ -1122,18 +1115,9 @@ export function MarketChart({
     const sc = dataMatchesMarket ? normalizeCandlesForChart(candles) : [];
     const shouldReset = loadedResetKeyRef.current !== nextKey;
     const shouldSymReset = appliedSymbolResetTokenRef.current !== symbolResetToken;
-    const symbolChangedForPriceLines = previousPriceLineSymbolRef.current !== symbol;
     if (shouldReset) {
       centeredResetKeyRef.current = null;pendingCenterResetKeyRef.current = nextKey;
       appliedCenterRequestKeyRef.current = null;clearMainSeriesData();series.setMarkers([]);
-      
-      if (symbolChangedForPriceLines) {
-        removeBidPriceLine(series);
-        removeAskPriceLine(series);
-        previousPriceLineSymbolRef.current = symbol;
-      } else {
-        upsertBidAskPriceLines();
-      }
       lineSeriesRef.current.forEach(ls => ls.setData([]));
       setOverlays([]); setDrawingShapes([]); setTradeLineOverlays([]); setPriceAlertOverlays([]); setTradeMarkerOverlays([]); setPullbackDebugOverlays([]); setTradeExecutionMarkerOverlays([]);
       setAthZoneOverlays([]);

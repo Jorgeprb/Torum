@@ -68,3 +68,4 @@ class MT5PositionsSyncRead(BaseModel):
     created: int
     updated: int
     closed: int
+    changed_positions: list[dict] = Field(default_factory=list)

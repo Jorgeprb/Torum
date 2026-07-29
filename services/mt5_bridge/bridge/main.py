@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import logging
 import signal
@@ -6,7 +8,7 @@ from bridge.backend_client import BackendClient
 from bridge.config import get_settings
 from bridge.logging_config import configure_logging
 from bridge.mt5_client import MT5Client
-from bridge.order_server import start_order_server
+from bridge.order_server import OrderServerHandle, start_order_server
 from bridge.position_syncer import PositionSyncer
 from bridge.tick_buffer import TickBuffer
 from bridge.tick_collector import TickCollector
@@ -32,7 +34,13 @@ def main() -> None:
     if args.market_data_only:
         settings.mt5_market_data_only = True
 
-    configure_logging(args.log_level or settings.log_level)
+    configure_logging(
+        args.log_level or settings.log_level,
+        log_to_file=settings.mt5_log_to_file,
+        log_directory=settings.mt5_log_directory or None,
+        max_bytes=settings.mt5_log_max_bytes,
+        backup_count=settings.mt5_log_backup_count,
+    )
     backend_client = BackendClient(settings)
     mt5_client = MT5Client(settings)
     tick_buffer = TickBuffer(
@@ -47,9 +55,13 @@ def main() -> None:
         backend_client=backend_client,
         tick_buffer=tick_buffer,
     )
+
+    order_server: OrderServerHandle | None = None
+    position_syncer: PositionSyncer | None = None
     if not args.once:
-        start_order_server(settings, mt5_client)
-        PositionSyncer(settings=settings, mt5_client=mt5_client, backend_client=backend_client).start()
+        order_server = start_order_server(settings, mt5_client)
+        position_syncer = PositionSyncer(settings=settings, mt5_client=mt5_client, backend_client=backend_client)
+        position_syncer.start()
 
     def stop_bridge(_signum: int, _frame: object) -> None:
         logger.info("Stop requested")
@@ -58,7 +70,15 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop_bridge)
     signal.signal(signal.SIGTERM, stop_bridge)
 
-    collector.run(once=args.once)
+    try:
+        collector.run(once=args.once)
+    finally:
+        if position_syncer is not None:
+            position_syncer.stop()
+        if order_server is not None:
+            order_server.stop()
+        tick_buffer.stop(flush=True)
+        mt5_client.shutdown()
 
 
 if __name__ == "__main__":

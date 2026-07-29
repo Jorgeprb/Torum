@@ -1,17 +1,18 @@
 from datetime import UTC, datetime
 from dataclasses import asdict
-from threading import Lock
 from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.decision_log import trace_event, trace_exception
+from app.core.distributed_state import HybridLock
 from app.mt5.status_store import mt5_status_store
 from app.orders.service import OrderManager
 from app.risk.manager import RiskManager
 from app.settings.trading_service import get_global_trading_settings
-from app.strategies.ath import ath_zone_for_price, get_or_update_symbol_ath, latest_executable_price, plan_torum_v1_bot_exposure
+from app.strategies.ath import ath_zone_for_price, ath_zone_for_price_config, get_or_update_symbol_ath, latest_executable_price, plan_torum_v1_bot_exposure
 from app.market_context.dollar_strength import DollarStrengthService, usd_strength_decision_for_symbol
 from app.strategies.engine import StrategyContextBuilder
 from app.strategies.models import StrategyConfig, StrategyRun, StrategySignal
@@ -22,7 +23,7 @@ from app.symbols.service import get_symbol_by_internal
 from app.trading.schemas import ClientConfirmation, ManualOrderRequest
 from app.users.models import User
 
-_TORUM_V1_SYMBOL_LOCKS: dict[str, Lock] = {}
+_TORUM_V1_SYMBOL_LOCKS: dict[str, HybridLock] = {}
 
 
 class StrategyRunner:
@@ -44,22 +45,39 @@ class StrategyRunner:
         self.db.add(run)
         self.db.commit()
         self.db.refresh(run)
+        trace_event(
+            "strategy_runner",
+            "run_started",
+            run_id=run.id,
+            config_id=config.id,
+            config_revision=config.revision,
+            strategy_key=config.strategy_key,
+            symbol=config.internal_symbol,
+            mode=config.mode,
+            user_id=user.id,
+            started_at=started,
+        )
 
         settings = get_global_strategy_settings(self.db)
         if not settings.strategies_enabled:
+            trace_event("strategy_runner", "run_blocked", run_id=run.id, config_id=config.id, symbol=config.internal_symbol, reason="strategies_disabled")
             return self._fail_run(run, "Strategies are disabled")
         if not config.enabled:
+            trace_event("strategy_runner", "run_blocked", run_id=run.id, config_id=config.id, symbol=config.internal_symbol, reason="config_disabled")
             return self._fail_run(run, "Strategy config is disabled")
 
         definition = get_definition(self.db, config.strategy_key)
         if definition is None or not definition.enabled:
+            trace_event("strategy_runner", "run_blocked", run_id=run.id, config_id=config.id, symbol=config.internal_symbol, reason="definition_disabled_or_missing")
             return self._fail_run(run, "Strategy definition is disabled or missing")
         if config.mode == "LIVE" and not settings.strategy_live_enabled:
+            trace_event("strategy_runner", "run_blocked", run_id=run.id, config_id=config.id, symbol=config.internal_symbol, reason="strategy_live_disabled")
             return self._fail_run(run, "Strategy LIVE execution is disabled")
 
         lock = _torum_v1_symbol_lock(config.internal_symbol) if config.strategy_key == "torum_v1" else None
-        if lock is not None:
-            lock.acquire()
+        if lock is not None and not lock.acquire(timeout=30.0):
+            trace_event("strategy_runner", "run_blocked", run_id=run.id, config_id=config.id, symbol=config.internal_symbol, reason="symbol_lock_timeout")
+            return self._fail_run(run, "Strategy execution is already running for this symbol")
 
         signal: StrategySignal | None = None
         try:
@@ -70,11 +88,35 @@ class StrategyRunner:
             run.indicators_used_json = {"required": list(plugin.required_indicators), "available": list(context.indicators.keys())}
             run.context_summary_json = context.summary()
             signal = self._save_signal(config, user, signal_data)
+            trace_event(
+                "strategy_runner",
+                "signal_saved",
+                run_id=run.id,
+                signal_id=signal.id,
+                config_id=config.id,
+                symbol=signal.internal_symbol,
+                signal_type=signal.signal_type,
+                side=signal.side,
+                reason=signal.reason,
+                suggested_volume=signal.suggested_volume,
+                metadata=signal.metadata_json,
+                context_summary=run.context_summary_json,
+            )
             if signal.signal_type == "NONE":
                 signal.status = "IGNORED"
                 run.status = "FINISHED"
                 run.finished_at = datetime.now(UTC)
                 self.db.commit()
+                trace_event(
+                    "strategy_runner",
+                    "run_finished_without_entry",
+                    run_id=run.id,
+                    signal_id=signal.id,
+                    config_id=config.id,
+                    symbol=signal.internal_symbol,
+                    reason=signal.reason,
+                    metadata=signal.metadata_json,
+                )
                 return StrategyRunResult(
                     ok=True,
                     run=StrategyRunRead.model_validate(run),
@@ -85,6 +127,18 @@ class StrategyRunner:
             if signal.strategy_key == "torum_v1" and signal.signal_type == "ENTRY" and signal.side == "BUY":
                 duplicate = self._previous_torum_v1_setup_signal(signal)
                 if duplicate is not None:
+                    trace_event(
+                        "strategy_runner",
+                        "entry_rejected",
+                        run_id=run.id,
+                        signal_id=signal.id,
+                        config_id=config.id,
+                        symbol=signal.internal_symbol,
+                        stage="duplicate_setup",
+                        reason="duplicate_setup_signal",
+                        duplicate_signal_id=duplicate.id,
+                        metadata=signal.metadata_json,
+                    )
                     signal.status = "REJECTED_BY_RISK"
                     signal.risk_result_json = {"allowed": False, "reasons": ["duplicate_setup_signal"], "warnings": []}
                     run.status = "FINISHED"
@@ -105,6 +159,17 @@ class StrategyRunner:
                     usd_snapshot,
                 )
                 signal.metadata_json = {**(signal.metadata_json or {}), **usd_decision.metadata}
+                trace_event(
+                    "strategy_runner",
+                    "usd_filter_evaluated",
+                    run_id=run.id,
+                    signal_id=signal.id,
+                    config_id=config.id,
+                    symbol=signal.internal_symbol,
+                    allowed=usd_decision.allowed,
+                    reason=usd_decision.reason,
+                    metadata=usd_decision.metadata,
+                )
                 if not usd_decision.allowed:
                     signal.status = "REJECTED_BY_RISK"
                     signal.risk_result_json = {"allowed": False, "reasons": [usd_decision.reason], "warnings": []}
@@ -138,6 +203,7 @@ class StrategyRunner:
                     balance=account.balance if account is not None else None,
                     trading_settings=trading_settings,
                     symbol_mapping=get_symbol_by_internal(self.db, signal.internal_symbol),
+                    strategy_params=params if isinstance(params, dict) else {},
                     exclude_signal_id=signal.id,
                 )
                 signal.metadata_json = {
@@ -149,6 +215,19 @@ class StrategyRunner:
                     "plan_reason": plan.reason,
                     "bot_exposure_plan": asdict(plan),
                 }
+                trace_event(
+                    "strategy_runner",
+                    "exposure_plan_evaluated",
+                    run_id=run.id,
+                    signal_id=signal.id,
+                    config_id=config.id,
+                    symbol=signal.internal_symbol,
+                    latest_price=latest_price,
+                    account_balance=account.balance if account is not None else None,
+                    raw_desired_multiplier=raw_desired_multiplier,
+                    desired_multiplier=desired_multiplier,
+                    plan=asdict(plan),
+                )
                 if not plan.allowed:
                     signal.status = "REJECTED_BY_RISK"
                     signal.risk_result_json = {"allowed": False, "reasons": [plan.reason], "warnings": []}
@@ -176,6 +255,16 @@ class StrategyRunner:
                 comment=f"Strategy {signal.strategy_key} signal {signal.id}",
                 client_confirmation=ClientConfirmation(confirmed=True, mode_acknowledged=config.mode),
             )
+            trace_event(
+                "strategy_runner",
+                "order_payload_prepared",
+                run_id=run.id,
+                signal_id=signal.id,
+                config_id=config.id,
+                symbol=signal.internal_symbol,
+                mode=config.mode,
+                order=order_payload.model_dump(mode="json"),
+            )
             risk_decision = RiskManager(self.db).evaluate_strategy_order(
                 order=order_payload,
                 trading_settings=_strategy_trading_settings(get_global_trading_settings(self.db), config.mode),
@@ -188,6 +277,17 @@ class StrategyRunner:
                 exclude_signal_id=signal.id,
             )
             signal.risk_result_json = risk_decision.model_dump()
+            trace_event(
+                "strategy_runner",
+                "risk_evaluated",
+                run_id=run.id,
+                signal_id=signal.id,
+                config_id=config.id,
+                symbol=signal.internal_symbol,
+                allowed=risk_decision.allowed,
+                reasons=risk_decision.reasons,
+                warnings=risk_decision.warnings,
+            )
             if not risk_decision.allowed:
                 signal.status = "REJECTED_BY_RISK"
                 run.status = "FINISHED"
@@ -204,6 +304,16 @@ class StrategyRunner:
 
             signal.status = "SENT_TO_ORDER_MANAGER"
             self.db.commit()
+            trace_event(
+                "strategy_runner",
+                "order_manager_called",
+                run_id=run.id,
+                signal_id=signal.id,
+                config_id=config.id,
+                symbol=signal.internal_symbol,
+                mode=config.mode,
+                order=order_payload.model_dump(mode="json"),
+            )
             order_response = self.order_manager.create_strategy_order(
                 order_payload,
                 user,
@@ -214,6 +324,30 @@ class StrategyRunner:
             )
             signal.order_id = order_response.order_id
             signal.status = "ORDER_EXECUTED" if order_response.ok else ("REJECTED_BY_RISK" if order_response.status == "REJECTED" else "ORDER_FAILED")
+            trace_event(
+                "strategy_runner",
+                "order_manager_result",
+                run_id=run.id,
+                signal_id=signal.id,
+                config_id=config.id,
+                symbol=signal.internal_symbol,
+                ok=order_response.ok,
+                order_id=order_response.order_id,
+                status=order_response.status,
+                message=order_response.message,
+                reasons=order_response.reasons,
+                warnings=order_response.warnings,
+                executed_price=order_response.executed_price,
+                final_tp=order_response.final_tp,
+                mt5_position_ticket=order_response.mt5_position_ticket,
+                meta=order_response.meta,
+            )
+            if order_response.ok:
+                _record_torum_v1_executed_entry_cycle(
+                    config,
+                    signal,
+                    order_id=order_response.order_id,
+                )
             run.status = "FINISHED"
             run.finished_at = datetime.now(UTC)
             self.db.commit()
@@ -227,6 +361,16 @@ class StrategyRunner:
                 warnings=order_response.warnings,
             )
         except Exception as exc:
+            trace_exception(
+                "strategy_runner",
+                "run_failed",
+                exc,
+                run_id=run.id,
+                config_id=config.id,
+                symbol=config.internal_symbol,
+                signal_id=signal.id if signal is not None else None,
+                signal_status=signal.status if signal is not None else None,
+            )
             if signal is not None and signal.status in {"RISK_APPROVED", "SENT_TO_ORDER_MANAGER"}:
                 signal.status = "ORDER_FAILED"
                 signal.risk_result_json = {"allowed": False, "reasons": [str(exc)], "warnings": []}
@@ -251,7 +395,11 @@ class StrategyRunner:
             sl=signal_data.sl,
             tp=signal_data.tp,
             reason=signal_data.reason,
-            metadata_json=signal_data.metadata,
+            metadata_json={
+                **(signal_data.metadata or {}),
+                "strategy_config_revision": int(config.revision or 1),
+                "strategy_config_id": config.id,
+            },
             status="GENERATED",
         )
         self.db.add(signal)
@@ -291,6 +439,14 @@ class StrategyRunner:
         return None
 
     def _fail_run(self, run: StrategyRun, message: str) -> StrategyRunResult:
+        trace_event(
+            "strategy_runner",
+            "run_marked_failed",
+            run_id=run.id,
+            config_id=run.strategy_config_id,
+            strategy_key=run.strategy_key,
+            message=message,
+        )
         run.status = "FAILED"
         run.finished_at = datetime.now(UTC)
         run.error_message = message
@@ -298,6 +454,67 @@ class StrategyRunner:
         self.db.refresh(run)
         return StrategyRunResult(ok=False, run=StrategyRunRead.model_validate(run), signal=None, message=message, reasons=[message])
 
+
+
+def _record_torum_v1_executed_entry_cycle(
+    config: StrategyConfig,
+    signal: StrategySignal,
+    *,
+    order_id: int | None,
+) -> None:
+    """Persist a pullback reset only after a Torum entry was really executed."""
+
+    if (
+        signal.strategy_key != "torum_v1"
+        or signal.signal_type != "ENTRY"
+        or signal.side != "BUY"
+    ):
+        return
+
+    metadata = signal.metadata_json or {}
+    confirmation_time = _positive_int_or_none(metadata.get("confirmation_candle_time"))
+    if confirmation_time is None:
+        return
+
+    current_params = dict(config.params_json or {})
+    raw_boundaries = current_params.get("executed_entry_cycle_boundaries")
+    boundaries = list(raw_boundaries) if isinstance(raw_boundaries, list) else []
+    normalized = {
+        parsed
+        for value in boundaries
+        if (parsed := _positive_int_or_none(value)) is not None
+    }
+    normalized.add(confirmation_time)
+    # The context builder loads at most a few hundred M5 bars. Keeping the most
+    # recent boundaries is sufficient and avoids unbounded JSON growth.
+    recent_boundaries = sorted(normalized)[-100:]
+
+    config.params_json = {
+        **current_params,
+        "last_executed_entry_candle_time": confirmation_time,
+        "last_executed_entry_order_id": order_id,
+        "executed_entry_cycle_boundaries": recent_boundaries,
+    }
+    trace_event(
+        "strategy_runner",
+        "executed_entry_cycle_recorded",
+        config_id=config.id,
+        signal_id=signal.id,
+        symbol=signal.internal_symbol,
+        order_id=order_id,
+        confirmation_candle_time=confirmation_time,
+        cycle_boundaries=recent_boundaries,
+    )
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 def _strategy_trading_settings(trading_settings: object, mode: str) -> object:
     return SimpleNamespace(
@@ -325,11 +542,11 @@ def _strategy_trading_settings(trading_settings: object, mode: str) -> object:
     )
 
 
-def _torum_v1_symbol_lock(symbol: str) -> Lock:
+def _torum_v1_symbol_lock(symbol: str) -> HybridLock:
     normalized = symbol.upper()
     lock = _TORUM_V1_SYMBOL_LOCKS.get(normalized)
     if lock is None:
-        lock = Lock()
+        lock = HybridLock(f"strategy:torum_v1:{normalized}")
         _TORUM_V1_SYMBOL_LOCKS[normalized] = lock
     return lock
 
@@ -346,7 +563,7 @@ def _torum_v1_desired_multiplier_for_ath_zone(
     if not _bool_param(params.get("ath_green_prefer_x2_entries"), True):
         return safe_desired
     ath = get_or_update_symbol_ath(db, symbol)
-    zone = ath_zone_for_price(ath, current_price)
+    zone = ath_zone_for_price_config(ath, current_price, params)
     if zone is not None and zone.key in {"green", "deep_green"}:
         return max(safe_desired, 2)
     return safe_desired

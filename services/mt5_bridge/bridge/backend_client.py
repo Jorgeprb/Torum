@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import logging
+from threading import local
 import time
 from typing import Any
 
@@ -26,16 +29,26 @@ def _json_safe(value: Any) -> Any:
 class BackendClient:
     def __init__(self, settings: BridgeSettings) -> None:
         self.settings = settings
-        self.session = requests.Session()
+        self._local = local()
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            token = self.settings.torum_service_token.get_secret_value() if self.settings.torum_service_token else ""
+            if token:
+                session.headers.update({"X-Torum-Service-Token": token})
+            self._local.session = session
+        return session
 
     def health(self) -> bool:
         try:
-            response = self.session.get(
+            response = self._session().get(
                 self._url(self.settings.torum_health_endpoint),
                 timeout=self.settings.torum_http_timeout_seconds,
             )
             if response.status_code == 404 and self.settings.torum_health_endpoint != "/health":
-                response = self.session.get(self._url("/health"), timeout=self.settings.torum_http_timeout_seconds)
+                response = self._session().get(self._url("/health"), timeout=self.settings.torum_http_timeout_seconds)
             response.raise_for_status()
             return True
         except requests.RequestException as exc:
@@ -44,7 +57,7 @@ class BackendClient:
 
     def get_symbols(self) -> list[dict[str, object]] | None:
         try:
-            response = self.session.get(
+            response = self._session().get(
                 self._url(self.settings.torum_symbols_endpoint),
                 timeout=self.settings.torum_http_timeout_seconds,
             )
@@ -57,12 +70,7 @@ class BackendClient:
             logger.warning("Could not load symbols from backend: %s", exc)
         return None
 
-    def post_ticks_batch(
-        self,
-        ticks: list[dict[str, Any]],
-        account: dict[str, Any] | None,
-        source: str = "MT5",
-    ) -> dict[str, Any]:
+    def post_ticks_batch(self, ticks: list[dict[str, Any]], account: dict[str, Any] | None, source: str = "MT5") -> dict[str, Any]:
         payload: dict[str, Any] = {"source": source, "ticks": ticks}
         if account is not None:
             payload["account"] = account
@@ -96,7 +104,7 @@ class BackendClient:
         last_error: requests.RequestException | None = None
         for attempt in range(1, self.settings.torum_http_max_retries + 1):
             try:
-                response = self.session.post(
+                response = self._session().post(
                     self._url(endpoint),
                     json=_json_safe(payload),
                     timeout=self.settings.torum_http_timeout_seconds,
@@ -106,8 +114,8 @@ class BackendClient:
             except requests.RequestException as exc:
                 last_error = exc
                 logger.warning("POST %s failed on attempt %s: %s", endpoint, attempt, exc)
-                time.sleep(min(2.0, 0.25 * attempt))
-
+                if attempt < self.settings.torum_http_max_retries:
+                    time.sleep(min(2.0, 0.25 * attempt))
         assert last_error is not None
         raise last_error
 

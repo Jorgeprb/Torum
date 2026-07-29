@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 import logging
 import time
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 class TickDeduplicator:
     def __init__(self, max_keys: int = 200000) -> None:
         self.max_keys = max_keys
-        self._seen: set[tuple[object, ...]] = set()
+        self._seen: OrderedDict[tuple[object, ...], None] = OrderedDict()
 
     def is_new(self, tick: dict[str, Any]) -> bool:
         key = (
@@ -34,10 +35,11 @@ class TickDeduplicator:
             tick.get("last"),
         )
         if key in self._seen:
+            self._seen.move_to_end(key)
             return False
-        self._seen.add(key)
-        if len(self._seen) > self.max_keys:
-            self._seen = set(list(self._seen)[-self.max_keys // 2 :])
+        self._seen[key] = None
+        while len(self._seen) > self.max_keys:
+            self._seen.popitem(last=False)
         return True
 
 
@@ -68,6 +70,7 @@ class TickCollector:
     def run(self, once: bool = False) -> None:
         mappings: list[SymbolMapping] = []
         account: AccountState | None = None
+        self.tick_buffer.start()
         try:
             backend_symbols = self.backend_client.get_symbols()
             mappings = SymbolMapper(self.settings).load(backend_symbols)
@@ -106,7 +109,6 @@ class TickCollector:
             raise
         finally:
             self._flush(account=account, force=True)
-            self.mt5_client.shutdown()
 
     def _select_symbols(self, mappings: list[SymbolMapping]) -> list[SymbolMapping]:
         active: list[SymbolMapping] = []

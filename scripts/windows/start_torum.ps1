@@ -61,8 +61,15 @@ Start-Process `
     -ArgumentList "-m bridge.main"
 
 $watchdogPath = Join-Path $TorumRoot "services\watchdog"
-$watchdogPython = if ($env:WATCHDOG_PYTHON) { $env:WATCHDOG_PYTHON } else { "python" }
-$watchdogHost = if ($env:WATCHDOG_HOST) { $env:WATCHDOG_HOST } else { "127.0.0.1" }
+$watchdogVenvPython = Join-Path $watchdogPath ".venv\Scripts\python.exe"
+$watchdogPython = if ($env:WATCHDOG_PYTHON) {
+    $env:WATCHDOG_PYTHON
+} elseif (Test-Path -LiteralPath $watchdogVenvPython) {
+    $watchdogVenvPython
+} else {
+    "python"
+}
+$watchdogHost = if ($env:WATCHDOG_HOST) { $env:WATCHDOG_HOST } else { "0.0.0.0" }
 $watchdogPort = if ($env:WATCHDOG_PORT) { $env:WATCHDOG_PORT } else { "9200" }
 
 Start-Process `

@@ -303,3 +303,37 @@ def test_chart_overlays_hides_finished_news_zones() -> None:
     assert response.status_code == 200
     zones = response.json()["no_trade_zones"]
     assert [zone["reason"] for zone in zones] == ["active tail"]
+
+
+def test_drawing_revision_rejects_stale_update() -> None:
+    db = _session()
+    user = _user(db)
+    service = ChartDrawingService(db)
+    drawing = service.create(
+        ChartDrawingCreate(
+            internal_symbol="XAUUSD",
+            timeframe="M5",
+            drawing_type="horizontal_line",
+            payload={"price": 2325.5},
+        ),
+        user,
+    )
+    assert drawing.revision == 1
+
+    updated = service.update(
+        drawing,
+        ChartDrawingUpdate(expected_revision=1, payload={"price": 2326.0}),
+        user,
+    )
+    assert updated.revision == 2
+
+    try:
+        service.update(
+            updated,
+            ChartDrawingUpdate(expected_revision=1, payload={"price": 2327.0}),
+            user,
+        )
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 409
+    else:
+        raise AssertionError("Expected stale drawing revision to be rejected")

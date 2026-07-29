@@ -1,7 +1,5 @@
-import { getAuthToken } from "../stores/authStore";
-import { resolveApiBaseUrl } from "./runtime";
+import { apiRequest } from "./apiClient";
 
-const API_BASE_URL = resolveApiBaseUrl();
 
 export type DrawingTool = "select" | "horizontal_line" | "vertical_line" | "trend_line" | "rectangle" | "text" | "manual_zone";
 
@@ -18,6 +16,7 @@ export interface ChartDrawingRead {
   locked: boolean;
   visible: boolean;
   source: string;
+  revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -36,6 +35,7 @@ export interface ChartDrawingCreate {
 }
 
 export interface ChartDrawingUpdate {
+  expected_revision?: number;
   name?: string | null;
   payload?: Record<string, unknown>;
   style?: Record<string, unknown>;
@@ -44,51 +44,28 @@ export interface ChartDrawingUpdate {
   visible?: boolean;
 }
 
-interface RequestOptions extends RequestInit {
-  token?: string | null;
-}
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  const token = options.token ?? getAuthToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `HTTP ${response.status}`);
-  }
-  if (response.status === 204) {
-    return undefined as T;
-  }
-  return (await response.json()) as T;
-}
-
 export function getDrawings(symbol: string, timeframe?: string | null, includeHidden = true): Promise<ChartDrawingRead[]> {
   const params = new URLSearchParams({ symbol, include_hidden: includeHidden ? "true" : "false" });
   if (timeframe) {
     params.set("timeframe", timeframe);
   }
-  return request<ChartDrawingRead[]>(`/api/drawings?${params.toString()}`);
+  return apiRequest<ChartDrawingRead[]>(`/api/drawings?${params.toString()}`);
 }
 
 export function createDrawing(payload: ChartDrawingCreate): Promise<ChartDrawingRead> {
-  return request<ChartDrawingRead>("/api/drawings", {
+  return apiRequest<ChartDrawingRead>("/api/drawings", {
     method: "POST",
     body: JSON.stringify(payload)
   });
 }
 
 export function patchDrawing(id: string, payload: ChartDrawingUpdate): Promise<ChartDrawingRead> {
-  return request<ChartDrawingRead>(`/api/drawings/${id}`, {
+  return apiRequest<ChartDrawingRead>(`/api/drawings/${id}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
   });
 }
 
 export function deleteDrawing(id: string): Promise<void> {
-  return request<void>(`/api/drawings/${id}`, { method: "DELETE" });
+  return apiRequest<void>(`/api/drawings/${id}`, { method: "DELETE" });
 }

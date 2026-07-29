@@ -1,9 +1,12 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
+import os
+from time import perf_counter
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.auth.router import router as auth_router
 from app.alerts.routes import router as alerts_router
@@ -15,6 +18,7 @@ from app.indicators.routes import router as indicators_router
 from app.indicators.service import seed_default_indicators
 from app.drawings.routes import router as drawings_router
 from app.core.logging import configure_logging
+from app.core.request_context import new_request_id, reset_request_id, set_request_id
 from app.market_data.mock import MockMarketService
 from app.market_data.diagnostics_router import router as market_diagnostics_router
 from app.market_data.router import router as mock_market_router
@@ -36,8 +40,10 @@ from app.symbols.router import router as symbols_router
 from app.symbols.service import seed_default_symbols
 from app.ticks.router import router as ticks_router
 from app.trade_history.routes import router as trade_history_router
+from app.trade_jobs.service import trade_job_worker
 from app.trading.routes import router as trading_router
 from app.users.service import seed_initial_users
+from app.websockets.manager import market_ws_manager
 from app.websockets.router import router as websocket_router
 
 logger = logging.getLogger(__name__)
@@ -53,14 +59,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     seed_global_news_settings()
     seed_default_indicators()
     seed_strategy_engine_defaults()
-    news_provider_scheduler.start()
-    dollar_strength_scheduler.start()
+    settings = get_settings()
+    worker_count = max(
+        int(os.getenv("WEB_CONCURRENCY", "1") or "1"),
+        int(os.getenv("UVICORN_WORKERS", "1") or "1"),
+    )
+    if settings.enforce_single_worker and worker_count > 1:
+        raise RuntimeError(
+            "Torum API single-worker mode is enabled to guarantee one internal scheduler/job worker; disable only when schedulers are externalized"
+        )
+    market_ws_manager.start()
+    trade_job_worker.start()
+    if settings.run_internal_schedulers:
+        news_provider_scheduler.start()
+        dollar_strength_scheduler.start()
+    else:
+        logger.warning("Internal schedulers disabled; ensure exactly one external scheduler instance is running")
     logger.info("Torum API started")
     try:
         yield
     finally:
-        dollar_strength_scheduler.stop()
-        news_provider_scheduler.stop()
+        if settings.run_internal_schedulers:
+            dollar_strength_scheduler.stop()
+            news_provider_scheduler.stop()
+        trade_job_worker.stop()
+        market_ws_manager.stop()
         await app.state.mock_market.stop()
 
 
@@ -71,6 +94,36 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    @app.middleware("http")
+    async def request_context_middleware(request: Request, call_next):
+        request_id = new_request_id(request.headers.get("X-Request-ID"))
+        token = set_request_id(request_id)
+        started = perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "http_request_failed request_id=%s method=%s path=%s",
+                request_id,
+                request.method,
+                request.url.path,
+            )
+            raise
+        finally:
+            reset_request_id(token)
+        response.headers["X-Request-ID"] = request_id
+        elapsed_ms = (perf_counter() - started) * 1000
+        log = logger.debug if request.url.path in {"/health", "/api/health"} else logger.info
+        log(
+            "http_request request_id=%s method=%s path=%s status=%s duration_ms=%.1f",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
+        )
+        return response
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
@@ -78,6 +131,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Historical simulation payloads can contain thousands of candles and
+    # debug events. Compress them without changing the API contract.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
     app.include_router(auth_router, prefix=settings.api_v1_prefix)
     app.include_router(settings_router, prefix=settings.api_v1_prefix)

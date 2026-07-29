@@ -9,8 +9,15 @@ if ([string]::IsNullOrWhiteSpace($TorumRoot)) {
 }
 
 $watchdogPath = Join-Path $TorumRoot "services\watchdog"
-$watchdogPython = if ($env:WATCHDOG_PYTHON) { $env:WATCHDOG_PYTHON } else { "python" }
-$watchdogHost = if ($env:WATCHDOG_HOST) { $env:WATCHDOG_HOST } else { "127.0.0.1" }
+$watchdogVenvPython = Join-Path $watchdogPath ".venv\Scripts\python.exe"
+$watchdogPython = if ($env:WATCHDOG_PYTHON) {
+  $env:WATCHDOG_PYTHON
+} elseif (Test-Path -LiteralPath $watchdogVenvPython) {
+  $watchdogVenvPython
+} else {
+  "python"
+}
+$watchdogHost = if ($env:WATCHDOG_HOST) { $env:WATCHDOG_HOST } else { "0.0.0.0" }
 $watchdogPort = if ($env:WATCHDOG_PORT) { $env:WATCHDOG_PORT } else { "9200" }
 $escapedWatchdogPath = [Regex]::Escape($watchdogPath)
 
@@ -21,8 +28,18 @@ $processes = Get-CimInstance Win32_Process |
     ($_.CommandLine -match $escapedWatchdogPath -or $_.ExecutablePath -match "python")
   }
 
-foreach ($process in $processes) {
-  Stop-Process -Id $process.ProcessId -Force
+$processIds = @($processes | ForEach-Object { $_.ProcessId })
+$processIds += @(
+  Get-NetTCPConnection -LocalPort ([int]$watchdogPort) -State Listen -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.OwningProcess }
+)
+
+foreach ($processId in ($processIds | Sort-Object -Unique)) {
+  try {
+    Stop-Process -Id $processId -Force -ErrorAction Stop
+  } catch {
+    Write-Warning "No se pudo detener watchdog PID ${processId}: $($_.Exception.Message)"
+  }
 }
 
 Start-Sleep -Seconds 1

@@ -1,9 +1,11 @@
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mt5.schemas import MT5StatusRead
+from app.core.decision_log import trace_event
 from app.news.service import get_global_news_settings
 from app.no_trade_zones.service import NoTradeZoneService
 from app.settings.trading_settings import TradingSettings
@@ -15,6 +17,7 @@ from app.trading.lot_sizing import calculate_lot_size
 from app.risk.schemas import RiskDecision
 from app.strategies.ath import get_or_update_symbol_ath, ath_zone_for_price, latest_executable_price, plan_torum_v1_bot_exposure
 from app.strategies.torum_v1 import TorumV1StatusService
+from app.strategies.models import StrategyConfig
 
 
 class RiskManager:
@@ -124,6 +127,10 @@ class RiskManager:
         )
         reasons = list(decision.reasons)
         warnings = list(decision.warnings)
+        bot_status = None
+        bot_block_reasons: list[str] = []
+        exposure_plan = None
+        current_price = None
         if strategy_settings is None:
             reasons.append("Strategy settings are not configured")
         else:
@@ -131,11 +138,17 @@ class RiskManager:
                 reasons.append("Strategies are disabled")
             if trading_settings.trading_mode == "LIVE" and not getattr(strategy_settings, "strategy_live_enabled", False):
                 reasons.append("Strategy LIVE execution is disabled")
-        reasons.extend(TorumV1StatusService(self.db).bot_block_reasons(order.internal_symbol, user_id))
+        status_service = TorumV1StatusService(self.db)
+        bot_block_reasons = status_service.bot_block_reasons(order.internal_symbol, user_id)
+        reasons.extend(bot_block_reasons)
+        try:
+            bot_status = status_service.status_for_user(user_id).assets.get(order.internal_symbol.upper())
+        except Exception:  # noqa: BLE001 - risk result remains authoritative
+            bot_status = None
         if strategy_key == "torum_v1":
             latest_tick = self.latest_tick(order.internal_symbol)
             current_price = latest_executable_price(latest_tick, order.side)
-            balance = getattr(mt5_status.account, "balance", None) if mt5_status.account is not None else None
+            balance = getattr(getattr(mt5_status, "account", None), "balance", None)
             base_lot = calculate_lot_size(
                 available_equity=balance,
                 equity_per_0_01_lot=getattr(trading_settings, "equity_per_0_01_lot", 2500.0),
@@ -144,6 +157,14 @@ class RiskManager:
                 enabled=getattr(trading_settings, "lot_per_equity_enabled", True),
             ).base_lot
             desired_multiplier = max(1, int(round(order.volume / base_lot))) if base_lot > 0 else 1
+            strategy_config = self.db.scalar(
+                select(StrategyConfig).where(
+                    StrategyConfig.strategy_key == "torum_v1",
+                    StrategyConfig.user_id == user_id,
+                    StrategyConfig.internal_symbol == order.internal_symbol.upper(),
+                ).order_by(StrategyConfig.enabled.desc(), StrategyConfig.id)
+            )
+            strategy_params = dict(strategy_config.params_json or {}) if strategy_config is not None else {}
             plan = plan_torum_v1_bot_exposure(
                 self.db,
                 symbol=order.internal_symbol,
@@ -153,9 +174,11 @@ class RiskManager:
                 balance=balance,
                 trading_settings=trading_settings,
                 symbol_mapping=symbol_mapping,
+                strategy_params=strategy_params,
                 exclude_order_id=exclude_order_id,
                 exclude_signal_id=exclude_signal_id,
             )
+            exposure_plan = asdict(plan)
             if not plan.allowed and plan.reason == "ath_red_zone":
                 reasons.append(f"BOT bloqueado por zona ATH roja en {order.internal_symbol}")
             elif not plan.allowed:
@@ -165,7 +188,49 @@ class RiskManager:
                 zone = ath_zone_for_price(ath, current_price)
                 if zone is not None and zone.max_lot_equivalents == 0:
                     reasons.append(f"BOT bloqueado por zona ATH roja en {order.internal_symbol}")
-        return RiskDecision(allowed=not reasons, reasons=reasons, warnings=warnings)
+        final_decision = RiskDecision(allowed=not reasons, reasons=reasons, warnings=warnings)
+        trace_event(
+            "risk_manager",
+            "strategy_order_evaluated",
+            strategy_key=strategy_key,
+            user_id=user_id,
+            symbol=order.internal_symbol,
+            side=order.side,
+            order_type=order.order_type,
+            volume=order.volume,
+            sl=order.sl,
+            tp=order.tp,
+            mode=trading_settings.trading_mode,
+            current_price=current_price,
+            allowed=final_decision.allowed,
+            reasons=final_decision.reasons,
+            warnings=final_decision.warnings,
+            bot_block_reasons=bot_block_reasons,
+            bot_status={
+                "status": bot_status.status,
+                "reason": bot_status.reason,
+                "enabled": bot_status.enabled,
+                "session_start": bot_status.session_start,
+                "session_end": bot_status.session_end,
+                "unlocked_at": bot_status.unlocked_at,
+                "blocked_by_news": bot_status.blocked_by_news,
+                "timeframe": bot_status.timeframe,
+                "active_config_id": bot_status.active_config_id,
+            }
+            if bot_status is not None
+            else None,
+            exposure_plan=exposure_plan,
+            mt5_status={
+                "connected_to_mt5": getattr(mt5_status, "connected_to_mt5", None),
+                "updated_at": getattr(mt5_status, "updated_at", None),
+                "account_trade_mode": getattr(mt5_status, "account_trade_mode", None),
+                "account_login": getattr(getattr(mt5_status, "account", None), "login", None),
+                "account_balance": getattr(getattr(mt5_status, "account", None), "balance", None),
+            },
+            exclude_order_id=exclude_order_id,
+            exclude_signal_id=exclude_signal_id,
+        )
+        return final_decision
 
     def latest_tick(self, internal_symbol: str) -> Tick | None:
         return self.db.scalar(

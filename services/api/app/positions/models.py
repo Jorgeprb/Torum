@@ -27,12 +27,20 @@ class Position(Base):
     profit: Mapped[float | None] = mapped_column(Float)
     swap: Mapped[float | None] = mapped_column(Float)
     commission: Mapped[float | None] = mapped_column(Float)
+    fee: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     mt5_position_ticket: Mapped[int | None] = mapped_column(BigInteger)
+    mt5_position_identifier: Mapped[int | None] = mapped_column(BigInteger)
     closing_deal_ticket: Mapped[int | None] = mapped_column(BigInteger)
     magic_number: Mapped[int | None] = mapped_column(Integer)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    open_time_msc: Mapped[int | None] = mapped_column(BigInteger)
+    close_time_msc: Mapped[int | None] = mapped_column(BigInteger)
+    enrichment_status: Mapped[str] = mapped_column(String(32), nullable=False, default="CONFIRMED")
+    missing_sync_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_seen_mt5_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_state: Mapped[str] = mapped_column(String(24), nullable=False, default="CONFIRMED")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -41,6 +49,13 @@ class Position(Base):
     )
     raw_payload_json: Mapped[dict | None] = mapped_column(JSON)
     close_payload_json: Mapped[dict | None] = mapped_column(JSON)
+
+    @property
+    def net_profit(self) -> float | None:
+        values = [self.profit, self.swap, self.commission, self.fee]
+        if all(value is None for value in values):
+            return None
+        return sum(float(value or 0.0) for value in values)
 
     @property
     def tp_percent(self) -> float | None:

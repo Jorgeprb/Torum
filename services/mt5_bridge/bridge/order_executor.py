@@ -2,6 +2,8 @@ import logging
 import math
 import re
 import unicodedata
+from contextlib import nullcontext
+from functools import wraps
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any
@@ -15,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 MT5_COMMENT_MAX_LEN = 20
 
+def _serialized_order_call(func):
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        operation = getattr(self.mt5_client, "operation", None)
+        context = operation("order", func.__name__) if callable(operation) else nullcontext()
+        with context:
+            return func(self, *args, **kwargs)
+
+    return wrapper
+
 
 class OrderExecutor:
     def __init__(self, settings: BridgeSettings, mt5_client: MT5Client) -> None:
@@ -24,6 +36,7 @@ class OrderExecutor:
         self._symbol_info_cache: dict[str, Any] = {}
         self._filling_modes_cache: dict[str, list[int]] = {}
 
+    @_serialized_order_call
     def execute_market_order(self, payload: MarketOrderRequest) -> BridgeOrderResponse:
         started = perf_counter()
         validate_started = perf_counter()
@@ -103,7 +116,7 @@ class OrderExecutor:
         )
         order_send_ms = (perf_counter() - send_started) * 1000
         if response.ok and not response.position:
-            resolved = self.resolve_position_ticket_after_market_order(
+            resolved_snapshot = self.resolve_position_snapshot_after_market_order(
                 symbol=payload.broker_symbol,
                 side=payload.side,
                 volume=volume,
@@ -112,11 +125,15 @@ class OrderExecutor:
                 order=response.order,
                 since_time=since_time,
             )
-            if resolved is not None:
-                response.position = resolved
+            if resolved_snapshot is not None:
+                resolved_ticket = _int_or_none(resolved_snapshot.get("ticket") or resolved_snapshot.get("identifier"))
+                response.position = resolved_ticket
+                if (response.price is None or response.price <= 0) and _float_or_none(resolved_snapshot.get("price_open")):
+                    response.price = _float_or_none(resolved_snapshot.get("price_open"))
                 response.raw = {
                     **response.raw,
-                    "resolved_position": resolved,
+                    "resolved_position": resolved_ticket,
+                    "resolved_position_snapshot": resolved_snapshot,
                     "position_resolved_by": "positions_get_recent",
                 }
         logger.info(
@@ -131,6 +148,7 @@ class OrderExecutor:
         )
         return response
 
+    @_serialized_order_call
     def close_position(self, ticket: int, payload: ClosePositionRequest) -> BridgeOrderResponse:
         started = perf_counter()
         validation_error = self._validate_execution_allowed(payload.mode)
@@ -195,6 +213,7 @@ class OrderExecutor:
             logger.info("close_deal_lookup_ms ticket=%s ms=%.2f", ticket, (perf_counter() - lookup_started) * 1000)
         return response
 
+    @_serialized_order_call
     def close_deal(self, ticket: int, deal_ticket: int | None = None) -> dict[str, Any]:
         started = perf_counter()
         try:
@@ -204,12 +223,19 @@ class OrderExecutor:
         mt5 = self.mt5_client.mt5
         if mt5 is None:
             return {"ok": False, "comment": "MT5 unavailable", "close_deal": None}
-        close_deal = _load_recent_close_deal(mt5, ticket, deal_ticket)
-        logger.info("close_deal_lookup_ms ticket=%s ms=%.2f", ticket, (perf_counter() - started) * 1000)
+        position_deals = _load_recent_position_deals(mt5, ticket)
+        close_deal = _select_recent_close_deal(position_deals, deal_ticket)
+        logger.info("close_deal_lookup_ms ticket=%s deals=%s ms=%.2f", ticket, len(position_deals), (perf_counter() - started) * 1000)
         if close_deal is None:
-            return {"ok": False, "comment": "close_deal_not_found", "close_deal": None}
-        return {"ok": True, "comment": "close_deal_found", "close_deal": close_deal}
+            return {"ok": False, "comment": "close_deal_not_found", "close_deal": None, "deals": position_deals}
+        return {
+            "ok": True,
+            "comment": "close_deal_found",
+            "close_deal": close_deal,
+            "deals": position_deals,
+        }
 
+    @_serialized_order_call
     def modify_position_tp(self, ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
         validation_error = self._validate_execution_allowed(payload.mode)
         if validation_error is not None:
@@ -245,6 +271,7 @@ class OrderExecutor:
         logger.info("MT5 modify TP request prepared: symbol=%s ticket=%s tp=%s sl=%s", payload.broker_symbol, ticket, tp, sl)
         return self._send_single(request, volume=0.0, price=tp)
 
+    @_serialized_order_call
     def calculate_profit(self, payload: ProfitPreviewRequest) -> ProfitPreviewResponse:
         try:
             self.mt5_client.initialize()
@@ -326,7 +353,8 @@ class OrderExecutor:
         mt5 = self.mt5_client.mt5
         if mt5 is None or not hasattr(mt5, "symbol_info"):
             return None
-        symbol_info = mt5.symbol_info(broker_symbol)
+        getter = getattr(self.mt5_client, "get_symbol_info", None)
+        symbol_info = getter(broker_symbol) if callable(getter) else mt5.symbol_info(broker_symbol)
         if symbol_info is not None:
             self._symbol_info_cache[broker_symbol] = symbol_info
         return symbol_info
@@ -380,7 +408,7 @@ class OrderExecutor:
 
         for filling_mode in filling_modes:
             request = {**base_request, "type_filling": filling_mode}
-            logger.info("MT5 order_send request: %s", _json_safe(request))
+            logger.debug("MT5 order_send request: %s", _json_safe(request))
             result = mt5.order_send(request)
             response = _result_to_response(result, volume=volume, price=price, request=request, mt5=mt5)
             if result is None:
@@ -392,7 +420,7 @@ class OrderExecutor:
                     _json_safe(request),
                 )
             else:
-                logger.info("MT5 order_send result: %s", response.raw)
+                logger.debug("MT5 order_send result: %s", response.raw)
                 logger.info("MT5 order_send retcode=%s comment=%s", response.retcode, response.comment)
             if response.ok:
                 return response
@@ -403,7 +431,7 @@ class OrderExecutor:
     def _send_single(self, request: dict[str, Any], volume: float, price: float) -> BridgeOrderResponse:
         mt5 = self.mt5_client.mt5
         assert mt5 is not None
-        logger.info("MT5 order_send request: %s", _json_safe(request))
+        logger.debug("MT5 order_send request: %s", _json_safe(request))
         result = mt5.order_send(request)
         response = _result_to_response(result, volume=volume, price=price, request=request, mt5=mt5)
         if result is None:
@@ -415,7 +443,7 @@ class OrderExecutor:
                 _json_safe(request),
             )
         else:
-            logger.info("MT5 order_send result: %s", response.raw)
+            logger.debug("MT5 order_send result: %s", response.raw)
             logger.info("MT5 order_send retcode=%s comment=%s", response.retcode, response.comment)
         return response
 
@@ -455,6 +483,28 @@ class OrderExecutor:
         order: int | None,
         since_time: datetime,
     ) -> int | None:
+        snapshot = self.resolve_position_snapshot_after_market_order(
+            symbol=symbol,
+            side=side,
+            volume=volume,
+            magic=magic,
+            deal=deal,
+            order=order,
+            since_time=since_time,
+        )
+        return _int_or_none(snapshot.get("ticket") or snapshot.get("identifier")) if snapshot else None
+
+    def resolve_position_snapshot_after_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        volume: float,
+        magic: int | None,
+        deal: int | None,
+        order: int | None,
+        since_time: datetime,
+    ) -> dict[str, Any] | None:
         mt5 = self.mt5_client.mt5
         if mt5 is None or not hasattr(mt5, "positions_get"):
             return None
@@ -484,6 +534,11 @@ class OrderExecutor:
             position_volume = _float_or_none(payload.get("volume"))
             if position_volume is not None and abs(position_volume - float(volume)) > max(0.000001, float(volume) * 0.001):
                 continue
+            position_identifier = _int_or_none(payload.get("identifier"))
+            position_ticket = _int_or_none(payload.get("ticket"))
+            if deal is not None and deal in {position_identifier, position_ticket}:
+                logger.info("position_ticket_resolved_exact_deal symbol=%s deal=%s position=%s", symbol, deal, position_ticket or position_identifier)
+                return payload
             fallback_candidates.append(payload)
             opened_at = _int_or_none(payload.get("time"))
             if opened_at is None or opened_at >= since_timestamp:
@@ -494,9 +549,10 @@ class OrderExecutor:
             logger.warning("position_ticket_resolve_no_match symbol=%s order=%s deal=%s", symbol, order, deal)
             return None
         ordered = sorted(candidates, key=_position_sort_key)
-        ticket = _int_or_none(ordered[-1].get("ticket") or ordered[-1].get("identifier"))
+        snapshot = ordered[-1]
+        ticket = _int_or_none(snapshot.get("ticket") or snapshot.get("identifier"))
         logger.info("position_ticket_resolved symbol=%s order=%s deal=%s position=%s", symbol, order, deal, ticket)
-        return ticket
+        return snapshot
 
     def _normalize_volume(self, requested_volume: float, symbol_info: Any) -> float:
         min_volume = _float_or_none(getattr(symbol_info, "volume_min", None)) or 0.0
@@ -627,23 +683,37 @@ def _result_to_response(
     )
 
 
-def _load_recent_close_deal(mt5: Any, position_ticket: int, deal_ticket: int | None = None) -> dict[str, Any] | None:
+def _load_recent_position_deals(mt5: Any, position_ticket: int) -> list[dict[str, Any]]:
     if not hasattr(mt5, "history_deals_get"):
-        return None
-    date_to = datetime.now(UTC) + timedelta(minutes=1)
-    date_from = date_to - timedelta(days=3)
-    deals = mt5.history_deals_get(date_from, date_to)
+        return []
+    try:
+        deals = mt5.history_deals_get(position=position_ticket)
+    except TypeError:
+        date_to = datetime.now(UTC) + timedelta(minutes=1)
+        date_from = date_to - timedelta(days=90)
+        deals = mt5.history_deals_get(date_from, date_to)
     if deals is None:
         logger.warning("MT5 history_deals_get after close failed: %s", mt5.last_error() if hasattr(mt5, "last_error") else None)
-        return None
+        return []
     candidates = [_deal_to_payload(deal) for deal in deals if getattr(deal, "position_id", None) == position_ticket]
+    candidates.sort(key=_deal_sort_key)
+    return candidates
+
+
+def _select_recent_close_deal(
+    candidates: list[dict[str, Any]],
+    deal_ticket: int | None = None,
+) -> dict[str, Any] | None:
     if deal_ticket is not None:
         for deal in candidates:
             if _int_or_none(deal.get("ticket") or deal.get("deal")) == deal_ticket:
                 return deal
     close_candidates = [deal for deal in candidates if _is_close_deal(deal)]
-    ordered = sorted(close_candidates or candidates, key=_deal_sort_key)
-    return ordered[-1] if ordered else None
+    return close_candidates[-1] if close_candidates else None
+
+
+def _load_recent_close_deal(mt5: Any, position_ticket: int, deal_ticket: int | None = None) -> dict[str, Any] | None:
+    return _select_recent_close_deal(_load_recent_position_deals(mt5, position_ticket), deal_ticket)
 
 
 def _deal_to_payload(deal: Any) -> dict[str, Any]:
@@ -674,7 +744,7 @@ def _deal_to_payload(deal: Any) -> dict[str, Any]:
 
 def _is_close_deal(deal: dict[str, Any]) -> bool:
     entry = _int_or_none(deal.get("entry"))
-    return entry in {1, 2, 3} or entry is None
+    return entry in {1, 2, 3}
 
 
 def _deal_sort_key(deal: dict[str, Any]) -> tuple[int, int]:

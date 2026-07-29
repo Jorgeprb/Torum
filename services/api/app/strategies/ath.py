@@ -173,6 +173,31 @@ def ath_zone_for_price(ath_price: float | None, price: float | None) -> AthRiskZ
     return zones[0]
 
 
+def ath_zone_for_price_config(
+    ath_price: float | None,
+    price: float | None,
+    params: dict[str, object] | None = None,
+) -> AthRiskZone | None:
+    if not params:
+        return ath_zone_for_price(ath_price, price)
+    if ath_price is None or ath_price <= 0 or price is None or price <= 0:
+        return None
+    red = _float_or_none(params.get("ath_red_limit_pct")) or 2.5
+    orange = _float_or_none(params.get("ath_orange_limit_pct")) or 9.0
+    yellow = _float_or_none(params.get("ath_yellow_limit_pct")) or 15.0
+    green = _float_or_none(params.get("ath_green_limit_pct")) or 30.0
+    drop_pct = max(0.0, (ath_price - price) / ath_price * 100.0)
+    if drop_pct <= red:
+        return AthRiskZone("red", "ROJA", ath_price * (1 - red / 100), ath_price, "#ef4444", 0)
+    if drop_pct <= orange:
+        return AthRiskZone("orange", "NARANJA", ath_price * (1 - orange / 100), ath_price * (1 - red / 100), "#f59e0b", 1)
+    if drop_pct <= yellow:
+        return AthRiskZone("yellow", "AMARILLA", ath_price * (1 - yellow / 100), ath_price * (1 - orange / 100), "#eab308", 2)
+    if drop_pct <= green:
+        return AthRiskZone("green", "VERDE", ath_price * (1 - green / 100), ath_price * (1 - yellow / 100), "#32d074", 3)
+    return AthRiskZone("deep_green", f"VERDE -{green:.0f}%+", None, ath_price * (1 - green / 100), "#32d074", 3)
+
+
 def bot_open_positions(db: Session, symbol: str, user_id: int | None = None) -> list[Position]:
     stmt = (
         select(Position)
@@ -318,14 +343,16 @@ def plan_torum_v1_bot_exposure(
     balance: float | None,
     trading_settings: object,
     symbol_mapping: SymbolMapping | None,
+    strategy_params: dict[str, object] | None = None,
     exclude_order_id: int | None = None,
     exclude_signal_id: int | None = None,
 ) -> BotExposurePlan:
     normalized_symbol = symbol.upper()
     base_lot = _base_lot(balance, trading_settings)
     ath = get_or_update_symbol_ath(db, normalized_symbol)
-    zone = ath_zone_for_price(ath, current_price)
-    max_equivalents = zone.max_lot_equivalents if zone is not None else 1
+    zone = ath_zone_for_price_config(ath, current_price, strategy_params)
+    configured_max_equivalents = int(_float_or_none((strategy_params or {}).get("max_equivalent_positions")) or 3)
+    max_equivalents = min(zone.max_lot_equivalents if zone is not None else 1, configured_max_equivalents)
     if zone is not None and zone.max_lot_equivalents <= 0:
         return _blocked("ath_red_zone", ath, zone, max_equivalents, 0.0)
 
@@ -334,7 +361,8 @@ def plan_torum_v1_bot_exposure(
     pending_equiv = bot_pending_lot_equivalents(db, normalized_symbol, user_id, base_lot, exclude_order_id=exclude_order_id)
     reserved_equiv = bot_reserved_signal_lot_equivalents(db, normalized_symbol, user_id, base_lot, exclude_signal_id=exclude_signal_id)
     used_equiv = open_equiv + pending_equiv + reserved_equiv
-    max_multiplier = min(max(1, int(desired_multiplier)), 3)
+    max_multiplier = min(max(1, int(desired_multiplier)), configured_max_equivalents)
+    allow_degrade = bool((strategy_params or {}).get("support_degrade_enabled", True))
 
     if balance is None or balance <= 0:
         return _blocked("missing_account_balance", ath, zone, max_equivalents, open_equiv)
@@ -346,21 +374,42 @@ def plan_torum_v1_bot_exposure(
     snapshot = RiskSnapshotService(db).get_snapshot(normalized_symbol, source="STRATEGY")
     if snapshot.dirty or not snapshot.valid:
         snapshot = RiskSnapshotService(db).recompute(normalized_symbol, source="STRATEGY")
-    if not snapshot.valid or snapshot.current_loss is None or snapshot.stress_price is None:
+    if not snapshot.valid or snapshot.stress_price is None:
         return _blocked("missing_risk_snapshot", ath, zone, max_equivalents, used_equiv)
-    risk_limit = snapshot.risk_limit if snapshot.risk_limit is not None else balance * ATH_RISK_LIMIT_RATIO
+    stress_drop_pct = _float_or_none((strategy_params or {}).get("risk_stress_drop_from_ath_pct")) or (ATH_ADVERSE_MOVE_RATIO * 100.0)
+    stress_price = ath * (1.0 - stress_drop_pct / 100.0) if ath is not None else snapshot.stress_price
+    risk_limit_pct = _float_or_none((strategy_params or {}).get("risk_max_balance_pct")) or (ATH_RISK_LIMIT_RATIO * 100.0)
+    risk_limit = balance * risk_limit_pct / 100.0
+    from app.risk.snapshot import candidate_loss
+    current_loss = round(
+        sum(
+            candidate_loss(
+                side=item.side,
+                volume=float(item.volume),
+                price=float(item.open_price),
+                stress_price=stress_price,
+                contract_size=snapshot.contract_size,
+            )
+            for item in snapshot.positions
+        ),
+        2,
+    )
     reserved_loss = bot_reserved_potential_loss(
         db,
         normalized_symbol,
         user_id,
-        stress_price=snapshot.stress_price,
+        stress_price=stress_price,
         contract_size=snapshot.contract_size,
         fallback_price=current_price,
         exclude_order_id=exclude_order_id,
         exclude_signal_id=exclude_signal_id,
     )
-    current_loss = round((snapshot.current_loss or 0.0) + reserved_loss, 2)
-    for multiplier in range(max_multiplier, 0, -1):
+    current_loss = round(current_loss + reserved_loss, 2)
+    if not allow_degrade and used_equiv + max_multiplier > max_equivalents + 1e-9:
+        return _blocked("requested_multiplier_does_not_fit", ath, zone, max_equivalents, used_equiv)
+
+    multipliers = range(max_multiplier, 0, -1) if allow_degrade else (max_multiplier,)
+    for multiplier in multipliers:
         if used_equiv + multiplier > max_equivalents + 1e-9:
             continue
         volume = round(base_lot * multiplier, 8)
@@ -368,7 +417,7 @@ def plan_torum_v1_bot_exposure(
             side="BUY",
             volume=volume,
             price=current_price,
-            stress_price=snapshot.stress_price,
+            stress_price=stress_price,
             contract_size=snapshot.contract_size,
         )
         potential_loss = round(current_loss + added_loss, 2)
@@ -391,7 +440,7 @@ def plan_torum_v1_bot_exposure(
         allowed=False,
         multiplier=0,
         volume=0.0,
-        reason="risk_or_ath_capacity_exceeded",
+        reason="risk_or_ath_capacity_exceeded" if allow_degrade else "risk_limit_exceeded",
         ath_price=ath,
         ath_zone=zone.key if zone is not None else None,
         max_lot_equivalents=max_equivalents,

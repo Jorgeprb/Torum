@@ -17,6 +17,8 @@ DEFAULT_SYMBOL_MAPPINGS: tuple[dict[str, object], ...] = (
         "digits": 2,
         "point": 0.01,
         "contract_size": 100.0,
+        "profit_currency": "USD",
+        "risk_conversion_rate": 1.0,
     },
     {
         "internal_symbol": "XAUEUR",
@@ -29,6 +31,8 @@ DEFAULT_SYMBOL_MAPPINGS: tuple[dict[str, object], ...] = (
         "digits": 2,
         "point": 0.01,
         "contract_size": 100.0,
+        "profit_currency": "EUR",
+        "risk_conversion_rate": 1.0,
     },
     {
         "internal_symbol": "DXY",
@@ -41,6 +45,8 @@ DEFAULT_SYMBOL_MAPPINGS: tuple[dict[str, object], ...] = (
         "digits": 2,
         "point": 0.01,
         "contract_size": 1.0,
+        "profit_currency": "USD",
+        "risk_conversion_rate": 1.0,
     },
 )
 

@@ -1,7 +1,5 @@
-import { getAuthToken } from "../stores/authStore";
-import { resolveApiBaseUrl } from "./runtime";
+import { apiRequest } from "./apiClient";
 
-const API_BASE_URL = resolveApiBaseUrl();
 
 export type PriceAlertStatus = "ACTIVE" | "TRIGGERED" | "CANCELLED" | "EXPIRED";
 
@@ -56,69 +54,49 @@ export interface PushTestResponse {
   message: string;
 }
 
-interface RequestOptions extends RequestInit {
-  token?: string | null;
-}
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  const token = options.token ?? getAuthToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `HTTP ${response.status}`);
-  }
-  return (await response.json()) as T;
-}
-
 export function getPriceAlerts(symbol: string, status: PriceAlertStatus = "ACTIVE"): Promise<PriceAlertRead[]> {
   const params = new URLSearchParams({ symbol, status });
-  return request<PriceAlertRead[]>(`/api/alerts/price?${params.toString()}`);
+  return apiRequest<PriceAlertRead[]>(`/api/alerts/price?${params.toString()}`);
 }
 
 export function getPriceAlertHistory(symbol: string): Promise<PriceAlertRead[]> {
   const params = new URLSearchParams({ symbol });
-  return request<PriceAlertRead[]>(`/api/alerts/price/history?${params.toString()}`);
+  return apiRequest<PriceAlertRead[]>(`/api/alerts/price/history?${params.toString()}`);
 }
 
 export function createPriceAlert(payload: PriceAlertCreate): Promise<PriceAlertRead> {
-  return request<PriceAlertRead>("/api/alerts/price", {
+  return apiRequest<PriceAlertRead>("/api/alerts/price", {
     method: "POST",
     body: JSON.stringify({ ...payload, condition_type: "BELOW" })
   });
 }
 
 export function patchPriceAlert(id: string, payload: PriceAlertUpdate): Promise<PriceAlertRead> {
-  return request<PriceAlertRead>(`/api/alerts/price/${id}`, {
+  return apiRequest<PriceAlertRead>(`/api/alerts/price/${id}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
   });
 }
 
 export function cancelPriceAlert(id: string): Promise<void> {
-  return request<void>(`/api/alerts/price/${id}`, { method: "DELETE" });
+  return apiRequest<void>(`/api/alerts/price/${id}`, { method: "DELETE" });
 }
 
 export function getVapidPublicKey(): Promise<{ public_key: string | null }> {
-  return request<{ public_key: string | null }>("/api/push/vapid-public-key");
+  return apiRequest<{ public_key: string | null }>("/api/push/vapid-public-key");
 }
 
 export function subscribePush(payload: PushSubscriptionJSON & { user_agent?: string; device_name?: string }): Promise<PushSubscriptionRead> {
-  return request<PushSubscriptionRead>("/api/push/subscribe", {
+  return apiRequest<PushSubscriptionRead>("/api/push/subscribe", {
     method: "POST",
     body: JSON.stringify(payload)
   });
 }
 
 export function getPushSubscriptions(): Promise<PushSubscriptionRead[]> {
-  return request<PushSubscriptionRead[]>("/api/push/subscriptions");
+  return apiRequest<PushSubscriptionRead[]>("/api/push/subscriptions");
 }
 
 export function sendPushTest(): Promise<PushTestResponse> {
-  return request<PushTestResponse>("/api/push/test", { method: "POST" });
+  return apiRequest<PushTestResponse>("/api/push/test", { method: "POST" });
 }

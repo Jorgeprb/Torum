@@ -7,11 +7,24 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
 node_modules/
 dist/
+build/
 *.tsbuildinfo
 apps/web/vite.config.js
 apps/web/vite.config.d.ts
 *.log
+*.pid
+*.tmp
+*.bak
+.torum_mt5_deal_cursor.json
+.DS_Store
+Thumbs.db
+
+# Runtime diagnostics
+logs/
+*.jsonl

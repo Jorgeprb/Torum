@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 import httpx
 import psutil
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,7 +28,7 @@ class WatchdogSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     watchdog_admin_token: str | None = None
-    watchdog_host: str = "127.0.0.1"
+    watchdog_host: str = "0.0.0.0"
     watchdog_port: int = 9200
     torum_root: str = str(Path(__file__).resolve().parents[3])
     mt5_path: str | None = None
@@ -58,6 +59,14 @@ logger.addHandler(logging.StreamHandler())
 
 restart_lock = threading.Lock()
 actions: dict[str, dict[str, Any]] = {}
+docker_status_lock = threading.Lock()
+docker_status_cache: dict[str, Any] = {
+    "status": "UNKNOWN",
+    "message": "comprobando Docker",
+    "output": "",
+    "updated_monotonic": 0.0,
+}
+DOCKER_STATUS_CACHE_SECONDS = 15.0
 
 
 class StatusItem(BaseModel):
@@ -95,8 +104,10 @@ def require_token(
     if not token:
         token = x_watchdog_token
     if not expected_token:
+        logger.error("watchdog_auth_failed reason=token_not_configured")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Watchdog token not configured")
     if not token or token != expected_token:
+        logger.warning("watchdog_auth_failed reason=invalid_token")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid watchdog token")
 
 
@@ -199,6 +210,48 @@ def _docker_compose_args(*args: str) -> list[str]:
     return ["docker", "compose", "-f", str(compose_file), *args]
 
 
+def _refresh_docker_status_cache() -> None:
+    global docker_status_cache
+    if not docker_status_lock.acquire(blocking=False):
+        return
+    try:
+        try:
+            output = _run(_docker_compose_args("ps"), cwd=Path(settings.torum_root), timeout=15)
+            docker_status_cache = {
+                "status": "OK",
+                "message": "docker compose responde",
+                "output": output,
+                "updated_monotonic": time.monotonic(),
+            }
+        except Exception as exc:
+            logger.warning("docker_status_failed error=%s", exc)
+            docker_status_cache = {
+                "status": "FAIL",
+                "message": "docker compose falla",
+                "output": str(exc),
+                "updated_monotonic": time.monotonic(),
+            }
+    finally:
+        docker_status_lock.release()
+
+
+def _schedule_docker_status_refresh() -> None:
+    if docker_status_lock.locked():
+        return
+    threading.Thread(target=_refresh_docker_status_cache, name="watchdog-docker-status", daemon=True).start()
+
+
+def _docker_status_snapshot() -> tuple[ComponentStatus, str, str]:
+    age = time.monotonic() - float(docker_status_cache["updated_monotonic"])
+    if age > DOCKER_STATUS_CACHE_SECONDS:
+        _schedule_docker_status_refresh()
+    return (
+        docker_status_cache["status"],
+        str(docker_status_cache["message"]),
+        str(docker_status_cache["output"]),
+    )
+
+
 def _start_process(args: list[str], cwd: Path | None = None) -> None:
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     subprocess.Popen(args, cwd=str(cwd) if cwd else None, creationflags=creationflags)
@@ -217,6 +270,16 @@ def check_status() -> SystemStatus:
     last_tick_at: datetime | None = None
     last_tick_age_seconds: int | None = None
 
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="watchdog-http") as executor:
+        bridge_future = executor.submit(_http_json, settings.bridge_health_url)
+        api_future = executor.submit(_http_json, settings.api_health_url)
+        frontend_future = executor.submit(_http_json, settings.frontend_health_url)
+        mt5_api_future = executor.submit(_http_json, settings.api_mt5_status_url)
+        bridge_ok, bridge_payload, bridge_error = bridge_future.result()
+        api_ok, api_payload, api_error = api_future.result()
+        frontend_ok, _, frontend_error = frontend_future.result()
+        mt5_api_ok, mt5_payload, mt5_error = mt5_api_future.result()
+
     mt5_processes = _processes_by_name(settings.mt5_process_name)
     items.append(
         _item(
@@ -228,7 +291,6 @@ def check_status() -> SystemStatus:
         )
     )
 
-    bridge_ok, bridge_payload, bridge_error = _http_json(settings.bridge_health_url)
     bridge_processes = _bridge_processes()
     if bridge_ok:
         bridge_status: ComponentStatus = "OK" if bridge_payload and bridge_payload.get("connected_to_mt5", False) else "WARN"
@@ -249,20 +311,11 @@ def check_status() -> SystemStatus:
         )
     )
 
-    api_ok, api_payload, api_error = _http_json(settings.api_health_url)
     items.append(_item("api", "API/backend", "OK" if api_ok else "FAIL", "backend responde" if api_ok else api_error or "sin respuesta", api_payload or {}))
 
-    frontend_ok, _, frontend_error = _http_json(settings.frontend_health_url)
     items.append(_item("frontend", "frontend", "OK" if frontend_ok else "WARN", "frontend responde" if frontend_ok else frontend_error or "sin respuesta"))
 
-    try:
-        docker_output = _run(_docker_compose_args("ps"), cwd=Path(settings.torum_root), timeout=15)
-        docker_status: ComponentStatus = "OK"
-        docker_message = "docker compose responde"
-    except Exception as exc:
-        docker_output = str(exc)
-        docker_status = "FAIL"
-        docker_message = "docker compose falla"
+    docker_status, docker_message, docker_output = _docker_status_snapshot()
     items.append(_item("docker", "Docker", docker_status, docker_message, {"tail": docker_output[-1000:]}))
 
     db_status: ComponentStatus = "UNKNOWN"
@@ -278,7 +331,6 @@ def check_status() -> SystemStatus:
     items.append(_item("db", "DB", db_status, db_message))
     items.append(_item("redis", "Redis", redis_status, redis_message))
 
-    mt5_api_ok, mt5_payload, mt5_error = _http_json(settings.api_mt5_status_url)
     if mt5_api_ok and mt5_payload:
         account_mode = str(mt5_payload.get("account_trade_mode") or "UNKNOWN")
         raw_ticks = mt5_payload.get("last_tick_time_by_symbol") or {}
@@ -454,14 +506,35 @@ def run_restart(target: RestartTarget) -> dict[str, Any]:
 app = FastAPI(title="Torum Local Watchdog", version="0.1.0")
 
 
+@app.on_event("startup")
+def log_startup() -> None:
+    logger.info(
+        "watchdog_started configured_host=%s configured_port=%s torum_root=%s",
+        settings.watchdog_host,
+        settings.watchdog_port,
+        settings.torum_root,
+    )
+    _schedule_docker_status_refresh()
+
+
 @app.get("/health")
-def health(_: None = Depends(require_token)) -> dict[str, object]:
+def health(request: Request, _: None = Depends(require_token)) -> dict[str, object]:
+    logger.info("watchdog_health_ok client=%s", request.client.host if request.client else "unknown")
     return {"ok": True, "service": "torum-watchdog"}
 
 
 @app.get("/status", response_model=SystemStatus)
-def status_read(_: None = Depends(require_token)) -> SystemStatus:
-    return check_status()
+def status_read(request: Request, _: None = Depends(require_token)) -> SystemStatus:
+    started = time.perf_counter()
+    payload = check_status()
+    logger.info(
+        "watchdog_status_ok client=%s status=%s items=%s duration_ms=%.1f",
+        request.client.host if request.client else "unknown",
+        payload.status,
+        len(payload.items),
+        (time.perf_counter() - started) * 1000,
+    )
+    return payload
 
 
 @app.post("/restart/{target}")
@@ -469,4 +542,6 @@ def restart(target: RestartTarget, payload: RestartRequest, _: None = Depends(re
     expected = "REINICIAR PC" if target == "pc" else "REINICIAR"
     if payload.confirmation.strip().upper() != expected:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Confirmacion requerida: {expected}")
-    return run_restart(target)
+    action = run_restart(target)
+    logger.info("watchdog_restart_queued target=%s action_id=%s", target, action["action_id"])
+    return action

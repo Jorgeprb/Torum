@@ -9,7 +9,7 @@ from app.news.providers.base import BaseNewsProvider, RawNewsEvent
 from app.news.schemas import NewsEventCreate
 
 FINNHUB_URL = "https://finnhub.io/api/v1/calendar/economic"
-FINHUB_APIKEY = "d7p2inpr01qr68pbfq1gd7p2inpr01qr68pbfq20"
+FINHUB_APIKEY = ""
 SPAIN_TZ = ZoneInfo("Europe/Madrid")
 
 NOT_HIGH_PATTERNS = [

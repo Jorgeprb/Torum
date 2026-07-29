@@ -1,7 +1,5 @@
-import { getAuthToken } from "../stores/authStore";
-import { resolveApiBaseUrl } from "./runtime";
+import { apiRequest } from "./apiClient";
 
-const API_BASE_URL = resolveApiBaseUrl();
 
 export type TradingMode = "PAPER" | "DEMO" | "LIVE";
 export type OrderSide = "BUY" | "SELL";
@@ -55,6 +53,7 @@ export interface ManualOrderPayload {
     mode_acknowledged: TradingMode;
     live_text?: string | null;
     no_stop_loss_acknowledged?: boolean;
+    risk_acknowledged?: boolean;
   };
 }
 
@@ -119,6 +118,8 @@ export interface OrderRead {
 export interface PositionRead {
   id: number;
   order_id: number | null;
+  account_login?: number | null;
+  account_server?: string | null;
   internal_symbol: string;
   broker_symbol: string;
   mode: TradingMode;
@@ -132,11 +133,17 @@ export interface PositionRead {
   profit: number | null;
   swap: number | null;
   commission: number | null;
+  fee?: number | null;
   status: "OPEN" | "CLOSED";
   mt5_position_ticket: number | null;
+  mt5_position_identifier?: number | null;
   closing_deal_ticket: number | null;
   opened_at: string;
   closed_at: string | null;
+  open_time_msc?: number | null;
+  close_time_msc?: number | null;
+  enrichment_status?: string;
+  net_profit?: number | null;
   tp_percent: number | null;
 }
 
@@ -144,8 +151,13 @@ export interface TradeHistoryItem {
   id: number;
   position_id: number;
   order_id: number | null;
+  account_login?: number | null;
+  account_server?: string | null;
   opened_at: string;
   closed_at: string | null;
+  open_time_msc?: number | null;
+  close_time_msc?: number | null;
+  enrichment_status?: string;
   internal_symbol: string;
   broker_symbol: string;
   side: OrderSide;
@@ -157,6 +169,7 @@ export interface TradeHistoryItem {
   swap: number | null;
   commission: number | null;
   fee?: number | null;
+  net_profit?: number | null;
   mode: TradingMode;
   mt5_position_ticket: number | null;
   closing_deal_ticket: number | null;
@@ -174,73 +187,53 @@ export interface LotSizeResponse {
   source: string;
 }
 
-interface RequestOptions extends RequestInit {
-  token?: string | null;
-}
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  const token = options.token ?? getAuthToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `HTTP ${response.status}`);
-  }
-  return (await response.json()) as T;
-}
-
 export function getTradingSettings(): Promise<TradingSettings> {
-  return request<TradingSettings>("/api/trading/settings");
+  return apiRequest<TradingSettings>("/api/trading/settings");
 }
 
 export function patchTradingSettings(payload: Partial<TradingSettings>): Promise<TradingSettings> {
-  return request<TradingSettings>("/api/trading/settings", {
+  return apiRequest<TradingSettings>("/api/trading/settings", {
     method: "PATCH",
     body: JSON.stringify(payload)
   });
 }
 
 export function getMT5OrderExecutionSettings(): Promise<MT5OrderExecutionSettings> {
-  return request<MT5OrderExecutionSettings>("/api/trading/mt5-order-execution");
+  return apiRequest<MT5OrderExecutionSettings>("/api/trading/mt5-order-execution");
 }
 
 export function getLotSize(symbol: string, multiplier = 1): Promise<LotSizeResponse> {
   const params = new URLSearchParams({ symbol, multiplier: String(multiplier) });
-  return request<LotSizeResponse>(`/api/trading/lot-size?${params.toString()}`);
+  return apiRequest<LotSizeResponse>(`/api/trading/lot-size?${params.toString()}`);
 }
 
 export function submitManualOrder(payload: ManualOrderPayload): Promise<ManualOrderResponse> {
-  return request<ManualOrderResponse>("/api/orders/manual", {
+  return apiRequest<ManualOrderResponse>("/api/orders/manual", {
     method: "POST",
     body: JSON.stringify(payload)
   });
 }
 
 export function getManualRiskPreview(payload: { internal_symbol: string; side: OrderSide; volume: number; price?: number | null }): Promise<RiskPreviewResponse> {
-  return request<RiskPreviewResponse>("/api/trading/risk-preview", {
+  return apiRequest<RiskPreviewResponse>("/api/trading/risk-preview", {
     method: "POST",
     body: JSON.stringify(payload)
   });
 }
 
 export function getAthLevels(): Promise<AthLevel[]> {
-  return request<AthLevel[]>("/api/trading/ath-levels");
+  return apiRequest<AthLevel[]>("/api/trading/ath-levels");
 }
 
 export function patchAthLevel(symbol: string, payload: { mode: AthLevel["mode"]; ath_price?: number | null }): Promise<AthLevel> {
-  return request<AthLevel>(`/api/trading/ath-levels/${symbol}`, {
+  return apiRequest<AthLevel>(`/api/trading/ath-levels/${symbol}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
   });
 }
 
 export function getOrders(): Promise<OrderRead[]> {
-  return request<OrderRead[]>("/api/orders?limit=50");
+  return apiRequest<OrderRead[]>("/api/orders?limit=50");
 }
 
 export function getPositions(params: { status?: "OPEN" | "CLOSED"; symbol?: string; limit?: number } = {}): Promise<PositionRead[]> {
@@ -256,28 +249,36 @@ export function getPositions(params: { status?: "OPEN" | "CLOSED"; symbol?: stri
     query.set("symbol", params.symbol);
   }
 
-  return request(`/api/positions?${query.toString()}`);
+  return apiRequest<PositionRead[]>(`/api/positions?${query.toString()}`);
 }
 
 export function closePosition(id: number): Promise<PositionRead> {
-  return request<PositionRead>(`/api/positions/${id}/close`, {
+  return apiRequest<PositionRead>(`/api/positions/${id}/close`, {
     method: "POST",
     body: JSON.stringify({ client_confirmation: { confirmed: true }, fetch_close_deal: false })
   });
 }
 
 export function modifyPositionTp(id: number, tp: number): Promise<PositionRead> {
-  return request<PositionRead>(`/api/positions/${id}/tp`, {
+  return apiRequest<PositionRead>(`/api/positions/${id}/tp`, {
     method: "PATCH",
     body: JSON.stringify({ tp })
   });
 }
 
-export function getTradeHistory(params: { symbol?: string; status?: "OPEN" | "CLOSED"; mode?: TradingMode } = {}): Promise<TradeHistoryItem[]> {
+export function getTradeHistory(params: {
+  symbol?: string;
+  status?: "OPEN" | "CLOSED";
+  mode?: TradingMode;
+  accountLogin?: number | null;
+  accountServer?: string | null;
+} = {}): Promise<TradeHistoryItem[]> {
   const query = new URLSearchParams();
   if (params.symbol) query.set("symbol", params.symbol);
   if (params.status) query.set("status", params.status);
   if (params.mode) query.set("mode", params.mode);
+  if (typeof params.accountLogin === "number") query.set("account_login", String(params.accountLogin));
+  if (params.accountServer) query.set("account_server", params.accountServer);
   query.set("limit", "300");
-  return request<TradeHistoryItem[]>(`/api/trade-history?${query.toString()}`);
+  return apiRequest<TradeHistoryItem[]>(`/api/trade-history?${query.toString()}`);
 }

@@ -35,8 +35,29 @@ class StrategyConfig(Base):
     params_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     risk_profile_json: Mapped[dict | None] = mapped_column(JSON)
     schedule_json: Mapped[dict | None] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class StrategyConfigVersion(Base):
+    __tablename__ = "strategy_config_versions"
+    __table_args__ = (
+        UniqueConstraint("strategy_config_id", "revision", name="uq_strategy_config_versions_revision"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    strategy_config_id: Mapped[int] = mapped_column(ForeignKey("strategy_configs.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    params_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    risk_profile_json: Mapped[dict | None] = mapped_column(JSON)
+    schedule_json: Mapped[dict | None] = mapped_column(JSON)
+    change_note: Mapped[str | None] = mapped_column(String(240))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class StrategySignal(Base):

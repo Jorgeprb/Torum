@@ -19,8 +19,13 @@ class NoTradeZoneService:
             self.db.commit()
             return []
 
-        start_time = _as_utc(event.event_time) - timedelta(minutes=settings.minutes_before)
-        end_time = _as_utc(event.event_time) + timedelta(minutes=settings.minutes_after)
+        rule = news_rule_for_event(event, settings)
+        if not rule["enabled"]:
+            self.db.commit()
+            return []
+        start_time = _as_utc(event.event_time) - timedelta(minutes=rule["minutes_before"])
+        end_time = _as_utc(event.event_time) + timedelta(minutes=rule["minutes_after"])
+        blocks_trading = rule["action"] in {"BLOCK_BOT", "BLOCK_ALL"}
         zones: list[NoTradeZone] = []
         for symbol in settings.affected_symbols:
             zone = NoTradeZone(
@@ -31,8 +36,8 @@ class NoTradeZoneService:
                 start_time=start_time,
                 end_time=end_time,
                 enabled=True,
-                blocks_trading=settings.block_trading_during_news,
-                visual_only=not settings.block_trading_during_news,
+                blocks_trading=blocks_trading,
+                visual_only=not blocks_trading,
             )
             self.db.add(zone)
             zones.append(zone)
@@ -48,8 +53,12 @@ class NoTradeZoneService:
         for event in events:
             if not event_matches_settings(event, settings):
                 continue
-            start_time = _as_utc(event.event_time) - timedelta(minutes=settings.minutes_before)
-            end_time = _as_utc(event.event_time) + timedelta(minutes=settings.minutes_after)
+            rule = news_rule_for_event(event, settings)
+            if not rule["enabled"]:
+                continue
+            start_time = _as_utc(event.event_time) - timedelta(minutes=rule["minutes_before"])
+            end_time = _as_utc(event.event_time) + timedelta(minutes=rule["minutes_after"])
+            blocks_trading = rule["action"] in {"BLOCK_BOT", "BLOCK_ALL"}
             for symbol in settings.affected_symbols:
                 self.db.add(
                     NoTradeZone(
@@ -60,8 +69,8 @@ class NoTradeZoneService:
                         start_time=start_time,
                         end_time=end_time,
                         enabled=True,
-                        blocks_trading=settings.block_trading_during_news,
-                        visual_only=not settings.block_trading_during_news,
+                        blocks_trading=blocks_trading,
+                        visual_only=not blocks_trading,
                     )
                 )
                 count += 1
@@ -116,6 +125,24 @@ class NoTradeZoneService:
         active_zones = self.get_active_zones(symbol, at_time)
         blocking_zones = [zone for zone in active_zones if zone.blocks_trading]
         return bool(blocking_zones), blocking_zones
+
+
+def news_rule_for_event(event: NewsEvent, settings: NewsSettings) -> dict[str, object]:
+    rules = settings.impact_rules_json or {}
+    raw = rules.get(str(event.impact).upper()) if isinstance(rules, dict) else None
+    if not isinstance(raw, dict):
+        return {
+            "enabled": True,
+            "minutes_before": int(settings.minutes_before),
+            "minutes_after": int(settings.minutes_after),
+            "action": "BLOCK_BOT" if settings.block_trading_during_news else "DISPLAY",
+        }
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "minutes_before": max(0, int(raw.get("minutes_before", settings.minutes_before))),
+        "minutes_after": max(0, int(raw.get("minutes_after", settings.minutes_after))),
+        "action": str(raw.get("action") or "DISPLAY").upper(),
+    }
 
 
 def event_matches_settings(event: NewsEvent, settings: NewsSettings) -> bool:

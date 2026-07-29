@@ -321,7 +321,7 @@ Set-ProcessEnv "PUBLIC_HOST" ($PublicUrl -replace "^https?://", "")
 Set-ProcessEnv "API_BIND_HOST" "0.0.0.0"
 Set-ProcessEnv "API_PORT" "$ApiPort"
 Set-ProcessEnv "WATCHDOG_BASE_URL" "http://host.docker.internal:$WatchdogPort"
-Set-ProcessEnv "WATCHDOG_TIMEOUT_SECONDS" "5"
+Set-ProcessEnv "WATCHDOG_TIMEOUT_SECONDS" "15"
 
 # Importante para watchdog: si no, seguirá mirando 5173 por defecto.
 Set-ProcessEnv "FRONTEND_HEALTH_URL" "http://127.0.0.1:$FrontendPort"
@@ -392,7 +392,14 @@ if (-not $SkipWatchdog) {
     Write-Step "Watchdog"
     Stop-PortProcess -Port $WatchdogPort -Label "watchdog"
 
-    $watchdogPython = if ($env:WATCHDOG_PYTHON) { $env:WATCHDOG_PYTHON } else { $pythonPath }
+    $watchdogVenvPython = Join-Path $watchdogPath ".venv\Scripts\python.exe"
+    $watchdogPython = if ($env:WATCHDOG_PYTHON) {
+        $env:WATCHDOG_PYTHON
+    } elseif (Test-Path -LiteralPath $watchdogVenvPython) {
+        $watchdogVenvPython
+    } else {
+        $pythonPath
+    }
 
     # Para poder consultar desde el propio PC y desde la API via host.docker.internal.
     # Si quieres cerrarlo mas, usa 127.0.0.1; para diagnostico remoto, 0.0.0.0 va mejor.

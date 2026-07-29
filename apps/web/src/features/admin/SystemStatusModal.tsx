@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, Power, RefreshCw, ServerCrash, X } from "lucide-react";
 
 import {
@@ -69,6 +69,7 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
   const [action, setAction] = useState<SystemRestartAction | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
+  const refreshInFlightRef = useRef(false);
 
   const expectedConfirmation = useMemo(() => (pendingTarget ? confirmationText(pendingTarget) : ""), [pendingTarget]);
   const itemByKey = useMemo(() => new Map(status?.items.map((item) => [item.key, item]) ?? []), [status]);
@@ -90,14 +91,20 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
   );
 
   async function refreshStatus() {
+    if (refreshInFlightRef.current) {
+      return;
+    }
+    refreshInFlightRef.current = true;
     setRefreshing(true);
-    setError(null);
     try {
       setStatus(await getAdminSystemStatus());
+      setError(null);
       setLastRefreshedAt(Date.now());
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "No se pudo leer estado");
+      const detail = requestError instanceof Error ? requestError.message : "No se pudo leer estado";
+      setError(detail);
     } finally {
+      refreshInFlightRef.current = false;
       setRefreshing(false);
     }
   }
@@ -138,6 +145,9 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
     return null;
   }
 
+  const watchdogDisconnected = Boolean(error);
+  const summaryStatus = watchdogDisconnected ? "fail" : status?.status.toLowerCase();
+
   return (
     <div className="modal-backdrop system-modal-backdrop" role="presentation">
       <div className="confirm-modal system-status-modal" role="dialog" aria-modal="true" aria-label="Estado del sistema">
@@ -151,18 +161,30 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
           </button>
         </div>
 
-        <div className={status ? `system-status-summary system-status-summary--${status.status.toLowerCase()}` : "system-status-summary"}>
+        <div className={summaryStatus ? `system-status-summary system-status-summary--${summaryStatus}` : "system-status-summary"}>
           <Power size={18} />
-          <strong>{status?.message ?? "Leyendo estado"}</strong>
+          <strong>{watchdogDisconnected ? "Watchdog desconectado" : status?.message ?? "Leyendo estado"}</strong>
           <span>{status?.account_mode ?? "UNKNOWN"}</span>
           <small>{elapsedLabel(lastRefreshedAt, nowMs)}</small>
-          <button className="toolbar-action" type="button" onClick={() => void refreshStatus()}>
-            <RefreshCw size={16} />
+          <button aria-busy={refreshing} className="toolbar-action" type="button" onClick={() => void refreshStatus()}>
+            <RefreshCw className={refreshing ? "spin" : undefined} size={16} />
             Refrescar
           </button>
         </div>
 
-        {error ? <div className="compact-error">{error}</div> : null}
+        {error ? (
+          <div className="compact-error system-watchdog-error">
+            <ServerCrash size={18} />
+            <div>
+              <strong>Watchdog desconectado</strong>
+              <span>{error}</span>
+            </div>
+            <button className="toolbar-action" type="button" onClick={() => void refreshStatus()}>
+              <RefreshCw className={refreshing ? "spin" : undefined} size={16} />
+              Reintentar
+            </button>
+          </div>
+        ) : null}
 
         <div className="system-status-grid">
           {status ? (
@@ -185,6 +207,15 @@ export function SystemStatusModal({ open, onClose }: SystemStatusModalProps) {
                 <p>{card.message}</p>
               </button>
             ))
+          ) : error ? (
+            <article className="system-status-card system-status-card--fail">
+              <div>
+                <ServerCrash size={18} />
+                <strong>Watchdog</strong>
+                <span>FAIL</span>
+              </div>
+              <p>No responde. Usa Reintentar.</p>
+            </article>
           ) : (
             <div className="compact-warning">Cargando...</div>
           )}

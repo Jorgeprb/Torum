@@ -6,10 +6,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class BridgeSettings(BaseSettings):
     model_config = SettingsConfigDict(
-    env_file=("../../.env", ".env"),
-    env_file_encoding="utf-8",
-    extra="ignore",
-)
+        env_file=("../../.env", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     torum_api_base_url: str = "http://127.0.0.1:8000"
     torum_ticks_batch_endpoint: str = "/api/ticks/batch"
@@ -19,6 +19,7 @@ class BridgeSettings(BaseSettings):
     torum_mt5_positions_sync_endpoint: str = "/api/mt5/positions/sync"
     torum_http_timeout_seconds: float = 10.0
     torum_http_max_retries: int = 3
+    torum_service_token: SecretStr | None = None
 
     mt5_poll_interval_ms: int = 50
     mt5_batch_max_size: int = 500
@@ -47,10 +48,19 @@ class BridgeSettings(BaseSettings):
     mt5_default_deviation_points: int = 20
     mt5_order_comment_prefix: str = "Torum"
     mt5_diagnostic_log_interval_seconds: int = 5
-    mt5_position_sync_interval_seconds: int = 1
-    mt5_deals_history_lookback_days: int = 14
+    mt5_position_sync_interval_seconds: float = 0.5
+    mt5_deals_history_lookback_days: int = 365
+    mt5_startup_history_reconcile_enabled: bool = True
+    mt5_startup_history_reconcile_delay_seconds: int = 5
+    mt5_deals_sync_interval_seconds: int = 5
+    mt5_deal_cursor_overlap_seconds: int = 5
+    mt5_deal_cursor_file: str = ".torum_mt5_deal_cursor.json"
 
     log_level: str = "INFO"
+    mt5_log_to_file: bool = True
+    mt5_log_directory: str = ""
+    mt5_log_max_bytes: int = 10_000_000
+    mt5_log_backup_count: int = 20
 
     @property
     def api_base_url(self) -> str:

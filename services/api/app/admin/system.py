@@ -1,3 +1,5 @@
+import logging
+from time import perf_counter
 from typing import Literal
 
 import requests
@@ -9,6 +11,7 @@ from app.core.config import get_settings
 from app.users.models import User, UserRole
 
 router = APIRouter(prefix="/admin/system", tags=["admin-system"])
+logger = logging.getLogger(__name__)
 
 RestartTarget = Literal["mt5", "api", "frontend", "bridge", "all", "pc"]
 ALLOWED_TARGETS: set[str] = {"mt5", "api", "frontend", "bridge", "all", "pc"}
@@ -42,18 +45,38 @@ def watchdog_timeout() -> float:
     return get_settings().watchdog_timeout_seconds
 
 
-def proxy_error(exc: requests.RequestException) -> HTTPException:
+def proxy_error(path: str, exc: requests.RequestException, duration_ms: float) -> HTTPException:
+    logger.warning(
+        "watchdog_proxy_unreachable path=%s base_url=%s duration_ms=%.1f error=%s",
+        path,
+        get_settings().watchdog_base_url,
+        duration_ms,
+        exc,
+    )
     return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Watchdog unreachable: {exc}")
 
 
 @router.get("/status")
 def system_status(_: User = Depends(require_admin)) -> dict:
+    path = "/status"
+    url = watchdog_url(path)
+    timeout = watchdog_timeout()
+    started = perf_counter()
+    logger.info(
+        "watchdog_proxy_request method=GET path=%s base_url=%s timeout_seconds=%.1f",
+        path,
+        get_settings().watchdog_base_url,
+        timeout,
+    )
     try:
-        response = requests.get(watchdog_url("/status"), headers=watchdog_headers(), timeout=watchdog_timeout())
+        response = requests.get(url, headers=watchdog_headers(), timeout=timeout)
     except requests.RequestException as exc:
-        raise proxy_error(exc) from exc
+        raise proxy_error(path, exc, (perf_counter() - started) * 1000) from exc
+    duration_ms = (perf_counter() - started) * 1000
     if response.status_code >= 400:
+        logger.warning("watchdog_proxy_error path=%s status=%s duration_ms=%.1f", path, response.status_code, duration_ms)
         raise HTTPException(status_code=response.status_code, detail=response.text)
+    logger.info("watchdog_proxy_response path=%s status=%s duration_ms=%.1f", path, response.status_code, duration_ms)
     return response.json()
 
 
@@ -64,15 +87,23 @@ def restart_target(target: RestartTarget, payload: RestartRequest, _: User = Dep
     expected = "REINICIAR PC" if target == "pc" else "REINICIAR"
     if payload.confirmation.strip().upper() != expected:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Confirmacion requerida: {expected}")
+    path = f"/restart/{target}"
+    url = watchdog_url(path)
+    timeout = max(watchdog_timeout(), 30.0)
+    started = perf_counter()
+    logger.info("watchdog_proxy_request method=POST path=%s base_url=%s timeout_seconds=%.1f", path, get_settings().watchdog_base_url, timeout)
     try:
         response = requests.post(
-            watchdog_url(f"/restart/{target}"),
+            url,
             headers=watchdog_headers(),
             json={"confirmation": payload.confirmation},
-            timeout=max(watchdog_timeout(), 30.0),
+            timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise proxy_error(exc) from exc
+        raise proxy_error(path, exc, (perf_counter() - started) * 1000) from exc
+    duration_ms = (perf_counter() - started) * 1000
     if response.status_code >= 400:
+        logger.warning("watchdog_proxy_error path=%s status=%s duration_ms=%.1f", path, response.status_code, duration_ms)
         raise HTTPException(status_code=response.status_code, detail=response.text)
+    logger.info("watchdog_proxy_response path=%s status=%s duration_ms=%.1f", path, response.status_code, duration_ms)
     return response.json()

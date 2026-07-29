@@ -1,7 +1,8 @@
+import { apiRequest } from "./apiClient";
+import type { PositionRead } from "./trading";
 import { getAuthToken } from "../stores/authStore";
-import { resolveApiBaseUrl, resolveWsBaseUrl } from "./runtime";
+import { resolveWsBaseUrl } from "./runtime";
 
-const API_BASE_URL = resolveApiBaseUrl();
 const WS_BASE_URL = resolveWsBaseUrl();
 export type Timeframe = "M1" | "M5" | "H1" | "H2" | "H3" | "H4" | "D1" | "W1";
 
@@ -17,6 +18,8 @@ export interface SymbolMapping {
   digits: number;
   point: number;
   contract_size: number;
+  profit_currency?: string | null;
+  risk_conversion_rate?: number;
 }
 
 export interface Candle {
@@ -136,42 +139,17 @@ export type MarketMessage =
       symbol: string;
     }
   | {
-      type: "position_closed" | "position_updated";
+      type: "position_opened" | "position_closed" | "position_updated";
       position_id: number;
       symbol: string;
+      position?: PositionRead;
       closed_at?: string | null;
       close_price?: number | null;
       profit?: number | null;
     };
 
-interface RequestOptions extends RequestInit {
-  token?: string | null;
-}
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-
-  const token = options.token ?? getAuthToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers
-  });
-
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `HTTP ${response.status}`);
-  }
-
-  return (await response.json()) as T;
-}
-
 export function getSymbols(): Promise<SymbolMapping[]> {
-  return request<SymbolMapping[]>("/api/symbols");
+  return apiRequest<SymbolMapping[]>("/api/symbols");
 }
 
 export function getCandles(
@@ -187,39 +165,41 @@ export function getCandles(
   if (typeof options.before === "number" && Number.isFinite(options.before)) {
     params.set("before", String(Math.floor(options.before)));
   }
-  return request<Candle[]>(`/api/candles?${params.toString()}`, { signal: options.signal });
+  return apiRequest<Candle[]>(`/api/candles?${params.toString()}`, { signal: options.signal });
 }
 
 export function getTicks(symbol: string, limit = 1000): Promise<Tick[]> {
   const params = new URLSearchParams({ symbol, limit: String(limit) });
-  return request<Tick[]>(`/api/ticks?${params.toString()}`);
+  return apiRequest<Tick[]>(`/api/ticks?${params.toString()}`);
 }
 
 export function getLatestTick(symbol: string): Promise<LatestTickDiagnostic> {
   const params = new URLSearchParams({ symbol });
-  return request<LatestTickDiagnostic>(`/api/market/latest-tick?${params.toString()}`);
+  return apiRequest<LatestTickDiagnostic>(`/api/market/latest-tick?${params.toString()}`);
 }
 
 export function getMockMarketStatus(): Promise<MockMarketStatus> {
-  return request<MockMarketStatus>("/api/mock-market/status");
+  return apiRequest<MockMarketStatus>("/api/mock-market/status");
 }
 
 export function getMt5Status(): Promise<MT5Status> {
-  return request<MT5Status>("/api/mt5/status");
+  return apiRequest<MT5Status>("/api/mt5/status");
 }
 
 export function startMockMarket(): Promise<MockMarketStatus> {
-  return request<MockMarketStatus>("/api/mock-market/start", { method: "POST" });
+  return apiRequest<MockMarketStatus>("/api/mock-market/start", { method: "POST" });
 }
 
 export function stopMockMarket(): Promise<MockMarketStatus> {
-  return request<MockMarketStatus>("/api/mock-market/stop", { method: "POST" });
-}
-
-export function createMarketWebSocket(symbol: string, timeframe: Timeframe): WebSocket {
-  return new WebSocket(`${WS_BASE_URL}/ws/market/${symbol}/${timeframe}`);
+  return apiRequest<MockMarketStatus>("/api/mock-market/stop", { method: "POST" });
 }
 
 export function marketWebSocketUrl(symbol: string, timeframe: Timeframe): string {
-  return `${WS_BASE_URL}/ws/market/${symbol}/${timeframe}`;
+  const token = getAuthToken();
+  const suffix = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${WS_BASE_URL}/ws/market/${encodeURIComponent(symbol)}/${encodeURIComponent(timeframe)}${suffix}`;
+}
+
+export function createMarketWebSocket(symbol: string, timeframe: Timeframe): WebSocket {
+  return new WebSocket(marketWebSocketUrl(symbol, timeframe));
 }

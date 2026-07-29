@@ -41,7 +41,7 @@ export function PullbackDebugOverlayLayer({ overlays }: PullbackDebugOverlayProp
               }}
             />
 
-            {overlay.debug.label ? (
+            {overlay.debug.label && !overlay.compact ? (
               <span
                 className={
                   thresholdTouched

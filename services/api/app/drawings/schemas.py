@@ -40,6 +40,7 @@ class ChartDrawingCreate(BaseModel):
 
 
 class ChartDrawingUpdate(BaseModel):
+    expected_revision: int | None = Field(default=None, ge=1)
     name: str | None = Field(default=None, max_length=160)
     payload: dict[str, Any] | None = None
     style: dict[str, Any] | None = None
@@ -61,6 +62,7 @@ class ChartDrawingRead(BaseModel):
     locked: bool
     visible: bool
     source: str
+    revision: int = 1
     created_at: datetime
     updated_at: datetime
 

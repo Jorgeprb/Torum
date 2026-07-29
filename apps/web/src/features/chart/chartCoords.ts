@@ -5,19 +5,20 @@ import { timeToNumber, timeframeToSeconds, utcToBrokerChartTime } from "./chartT
 import { clampNumber } from "./chartStyle";
 
 // ── Constants ────────────────────────────────────────────────────────────────
-export const desiredCandleSpacingPx = 18;
-export const initialCandleBarSpacing = 18;
-export const minVisibleBars = 22;
+export const desiredCandleSpacingPx = 9;
+export const initialCandleBarSpacing = 9;
+export const minVisibleBars = 30;
 
 export const maxVisibleBarsByTimeframe: Record<string, number> = {
-  M1: 120,
-  M5: 110,
-  H1: 100,
-  H2: 95,
-  H3: 92,
-  H4: 90,
-  D1: 80,
-  W1: 70
+  M1: 800,
+  M5: 500,
+  M15: 400,
+  H1: 300,
+  H2: 280,
+  H3: 260,
+  H4: 250,
+  D1: 220,
+  W1: 160
 };
 
 // ── Pixel helpers ────────────────────────────────────────────────────────────
@@ -65,7 +66,13 @@ function lowerBound(values: number[], target: number): number {
   return low;
 }
 
-export function timeToChartX(chart: IChartApi, candles: CandlestickData[], time: number, fallback: number): number {
+export function timeToChartX(
+  chart: IChartApi,
+  candles: CandlestickData[],
+  time: number,
+  fallback: number,
+  allowOutsideRange = true
+): number {
   const direct = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
   if (direct !== null) {
     return direct;
@@ -74,6 +81,13 @@ export function timeToChartX(chart: IChartApi, candles: CandlestickData[], time:
   const times = candleTimeValues(candles);
   if (times.length < 2) {
     return fallback;
+  }
+
+  if (!allowOutsideRange) {
+    const typicalStep = times.length > 1 ? Math.max(1, times[times.length - 1] - times[times.length - 2]) : 1;
+    if (time < times[0] || time > times[times.length - 1] + typicalStep) {
+      return fallback;
+    }
   }
 
   const index = lowerBound(times, time);
@@ -90,6 +104,24 @@ export function timeToChartX(chart: IChartApi, candles: CandlestickData[], time:
 
   const ratio = (time - leftTime) / (rightTime - leftTime);
   return leftX + (rightX - leftX) * ratio;
+}
+
+
+export function containingCandleTime(
+  candles: CandlestickData[],
+  eventTime: number,
+  timeframe: string
+): number | null {
+  const times = candleTimeValues(candles);
+  if (times.length === 0 || !Number.isFinite(eventTime)) return null;
+  const step = Math.max(1, timeframeToSeconds(timeframe));
+  const bucket = Math.floor(eventTime / step) * step;
+  if (times.includes(bucket)) return bucket;
+
+  const index = lowerBound(times, eventTime);
+  const candidateIndex = Math.max(0, Math.min(times.length - 1, index > 0 ? index - 1 : index));
+  const candidate = times[candidateIndex];
+  return eventTime >= candidate && eventTime < candidate + step ? candidate : null;
 }
 
 export function chartXToTime(
@@ -172,14 +204,16 @@ export function barsWithCandleSpacing(baseBars: number, candleCount: number): nu
 export function calculateVisibleBarsForWidth(
   containerWidth: number,
   timeframe: string,
-  candleCount: number
+  candleCount: number,
+  preferredSpacingPx: number = desiredCandleSpacingPx
 ): number {
   if (candleCount <= 0) {
     return 0;
   }
 
   const safeWidth = Number.isFinite(containerWidth) && containerWidth > 0 ? containerWidth : 360;
-  const barsByPixelSpacing = Math.floor(safeWidth / desiredCandleSpacingPx);
+  const safeSpacing = Number.isFinite(preferredSpacingPx) && preferredSpacingPx > 0 ? preferredSpacingPx : desiredCandleSpacingPx;
+  const barsByPixelSpacing = Math.floor(safeWidth / safeSpacing);
   const maxBars = maxVisibleBarsByTimeframe[timeframe] ?? 90;
 
   return Math.min(

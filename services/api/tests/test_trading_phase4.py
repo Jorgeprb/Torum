@@ -22,6 +22,7 @@ from app.settings.trading_settings import TradingSettings
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.trade_history.routes import router as trade_history_router
+from app.trade_jobs.models import TradeJob
 from app.trading.schemas import ManualOrderRequest
 from app.users.models import User, UserRole
 
@@ -201,7 +202,12 @@ def test_order_manager_creates_paper_order_and_position() -> None:
     assert user is not None
 
     response = OrderManager(db).create_manual_order(
-        ManualOrderRequest(internal_symbol="XAUUSD", side="BUY", volume=0.01),
+        ManualOrderRequest(
+            internal_symbol="XAUUSD",
+            side="BUY",
+            volume=0.01,
+            client_confirmation={"confirmed": True, "risk_acknowledged": True},
+        ),
         user,
     )
 
@@ -233,17 +239,10 @@ def test_strategy_order_sends_push_when_bot_buys(monkeypatch) -> None:
     )
 
     assert response.ok is True
-    assert sent == [
-        {
-            "user_id": 1,
-            "symbol": "XAUUSD",
-            "side": "BUY",
-            "volume": 0.01,
-            "price": 2325.2,
-            "tp": pytest.approx(2327.29268),
-            "order_id": response.order_id,
-        }
-    ]
+    assert sent == []  # push delivery is durable and does not block order execution
+    job = db.query(TradeJob).filter(TradeJob.job_type == "NOTIFY_ORDER").one()
+    assert job.status == "PENDING"
+    assert job.payload_json["order_id"] == response.order_id
 
 
 def test_position_service_profit_uses_contract_size() -> None:
@@ -293,11 +292,36 @@ def test_orders_manual_endpoint_accepts_valid_paper_payload() -> None:
     client = TestClient(app)
     response = client.post(
         "/api/orders/manual",
-        json={"internal_symbol": "XAUUSD", "side": "BUY", "order_type": "MARKET", "volume": 0.01},
+        json={
+            "internal_symbol": "XAUUSD",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "volume": 0.01,
+            "client_confirmation": {"confirmed": True, "risk_acknowledged": True},
+        },
     )
 
     assert response.status_code == 201
     assert response.json()["status"] == "EXECUTED"
+
+
+def test_orders_manual_endpoint_rejects_missing_risk_acknowledgement() -> None:
+    db = _session()
+    user = db.get(User, 1)
+    assert user is not None
+    app = FastAPI()
+    app.include_router(orders_router, prefix="/api")
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    response = TestClient(app).post(
+        "/api/orders/manual",
+        json={"internal_symbol": "XAUUSD", "side": "BUY", "order_type": "MARKET", "volume": 0.01},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "REJECTED"
+    assert "risk acknowledgement" in " ".join(response.json()["reasons"]).lower()
 
 
 def test_position_service_modifies_paper_buy_tp_and_percent() -> None:
@@ -390,10 +414,13 @@ def test_mt5_position_sync_closes_missing_ticket() -> None:
     db.add(position)
     db.commit()
 
-    result = PositionService(db).sync_mt5_positions(
-        positions=[],
-        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
-    )
+    service = PositionService(db)
+    result = {}
+    for _ in range(3):
+        result = service.sync_mt5_positions(
+            positions=[],
+            account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+        )
 
     assert result["closed"] == 1
     assert db.get(Position, position.id).status == "CLOSED"
@@ -424,10 +451,13 @@ def test_mt5_position_sync_closes_missing_ticket_with_unknown_local_account() ->
     db.add(position)
     db.commit()
 
-    result = PositionService(db).sync_mt5_positions(
-        positions=[],
-        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
-    )
+    service = PositionService(db)
+    result = {}
+    for _ in range(3):
+        result = service.sync_mt5_positions(
+            positions=[],
+            account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+        )
 
     assert result["closed"] == 1
     assert db.get(Position, position.id).status == "CLOSED"
@@ -465,6 +495,7 @@ def test_mt5_position_sync_uses_history_deal_for_closed_position() -> None:
             {
                 "position_id": 789,
                 "ticket": 555,
+                "entry": 1,
                 "time_msc": int(closed_time.timestamp() * 1000),
                 "price": 99.5,
                 "profit": -12.3,
@@ -480,7 +511,8 @@ def test_mt5_position_sync_uses_history_deal_for_closed_position() -> None:
     assert result["closed"] == 1
     assert result["deals_received"] == 1
     assert saved.status == "CLOSED"
-    assert saved.closed_at == closed_time
+    assert saved.closed_at is not None
+    assert saved.closed_at.replace(tzinfo=UTC) == closed_time
     assert saved.close_price == 99.5
     assert saved.current_price == 99.5
     assert saved.profit == -12.3
@@ -488,6 +520,129 @@ def test_mt5_position_sync_uses_history_deal_for_closed_position() -> None:
     assert saved.commission == -0.2
     assert saved.closing_deal_ticket == 555
     assert saved.close_payload_json == {"ticket": 555, "position_id": 789}
+
+
+def test_mt5_position_sync_matches_close_deal_by_persistent_identifier() -> None:
+    db = _session()
+    closed_time = datetime(2026, 7, 27, 12, 30, tzinfo=UTC)
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=123456,
+        account_server="Broker-Demo",
+        side="BUY",
+        volume=0.03,
+        open_price=3592.58,
+        current_price=3597.97,
+        sl=None,
+        tp=3595.81,
+        profit=9.24,
+        status="OPEN",
+        mt5_position_ticket=111111,
+        mt5_position_identifier=None,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+        raw_payload_json={"resolved_position_snapshot": {"ticket": 111111, "identifier": 222222}},
+    )
+    db.add(position)
+    db.commit()
+
+    result = PositionService(db).sync_mt5_positions(
+        positions=[],
+        closed_deals=[
+            {
+                "position_id": 222222,
+                "ticket": 333333,
+                "entry": 1,
+                "time_msc": int(closed_time.timestamp() * 1000),
+                "price": 3597.97,
+                "profit": 9.24,
+                "swap": -0.1,
+            }
+        ],
+        account=SimpleNamespace(login=123456, server="Broker-Demo", trade_mode="DEMO"),  # type: ignore[arg-type]
+    )
+
+    saved = db.get(Position, position.id)
+    assert result["closed"] == 1
+    assert saved.status == "CLOSED"
+    assert saved.close_price == pytest.approx(3597.97)
+    assert saved.closing_deal_ticket == 333333
+    assert saved.sync_state == "CLOSED_CONFIRMED"
+
+
+def test_manual_close_reconciles_mt5_tp_race_instead_of_returning_invalid_request() -> None:
+    db = _session()
+    closed_time = datetime(2026, 7, 27, 12, 30, tzinfo=UTC)
+    position = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=123456,
+        account_server="Broker-Demo",
+        side="BUY",
+        volume=0.03,
+        open_price=3592.58,
+        current_price=3597.97,
+        sl=None,
+        tp=3595.81,
+        profit=9.24,
+        status="OPEN",
+        mt5_position_ticket=111111,
+        mt5_position_identifier=222222,
+        magic_number=260426,
+        opened_at=datetime.now(UTC),
+    )
+    db.add(position)
+    db.commit()
+
+    class RacingMT5Client:
+        def __init__(self) -> None:
+            self.position_reads = 0
+
+        def health(self) -> dict[str, object]:
+            return {"connected_to_mt5": True}
+
+        def get_positions(self) -> list[dict[str, object]]:
+            self.position_reads += 1
+            if self.position_reads == 1:
+                return [{"ticket": 111111, "identifier": 222222}]
+            return []
+
+        def close_position(self, ticket: int, payload: dict[str, object]) -> dict[str, object]:
+            assert ticket == 111111
+            return {"ok": False, "comment": "Invalid request"}
+
+        def get_close_deal(self, ticket: int, deal: int | None = None) -> dict[str, object]:
+            assert ticket == 222222
+            return {
+                "ok": True,
+                "close_deal": {
+                    "position_id": 222222,
+                    "ticket": 333333,
+                    "entry": 1,
+                    "time_msc": int(closed_time.timestamp() * 1000),
+                    "price": 3597.97,
+                    "profit": 9.24,
+                    "swap": -0.1,
+                },
+            }
+
+    ok, message, saved = PositionService(db, mt5_client=RacingMT5Client()).close_position(position.id)
+
+    assert ok is True
+    assert "already closed" in message
+    assert saved is not None
+    assert saved.status == "CLOSED"
+    assert saved.closed_at is not None
+    assert saved.closed_at.replace(tzinfo=UTC) == closed_time
+    assert saved.close_price == pytest.approx(3597.97)
+    assert saved.closing_deal_ticket == 333333
 
 
 def test_mt5_position_sync_links_pending_order_and_repairs_missing_tp() -> None:
@@ -546,13 +701,16 @@ def test_mt5_position_sync_links_pending_order_and_repairs_missing_tp() -> None:
     saved_order = db.get(Order, order.id)
     assert result["created"] == 1
     assert saved_position.order_id == order.id
+    assert saved_position.mt5_position_identifier == 152093533257
     assert saved_position.tp == pytest.approx(4519.89)
-    assert saved_position.raw_payload_json["tp_status"] == "UPDATED"
+    assert saved_position.raw_payload_json["tp_status"] == "PENDING"
     assert saved_order.status == "EXECUTED"
     assert saved_order.mt5_position_ticket == 152093533257
-    assert saved_order.response_payload_json["tp_status"] == "UPDATED"
-    assert fake_mt5.payloads[0]["ticket"] == 152093533257
-    assert fake_mt5.payloads[0]["tp"] == pytest.approx(4519.89)
+    assert saved_order.response_payload_json["tp_status"] == "PENDING"
+    assert fake_mt5.payloads == []  # APPLY_TP is executed by the durable trade-job worker
+    tp_job = db.query(TradeJob).filter(TradeJob.job_type == "APPLY_TP").one()
+    assert tp_job.payload_json["position_id"] == saved_position.id
+    assert tp_job.payload_json["final_tp"] == pytest.approx(4519.89)
 
 
 def test_mt5_position_sync_sends_push_when_tp_is_hit(monkeypatch) -> None:
@@ -591,6 +749,7 @@ def test_mt5_position_sync_sends_push_when_tp_is_hit(monkeypatch) -> None:
     payload = {
         "position_id": 789,
         "ticket": 555,
+        "entry": 1,
         "time_msc": int(closed_time.timestamp() * 1000),
         "price": 101.0,
         "profit": 4.0,
@@ -722,3 +881,116 @@ def test_trade_history_endpoint_lists_closed_positions() -> None:
 
     assert response.status_code == 200
     assert response.json()[0]["position_id"] == position.id
+
+
+def test_mt5_sync_overwrites_provisional_open_values_and_returns_incremental_payload() -> None:
+    from app.mt5.schemas import MT5AccountPayload
+
+    db = _session()
+    provisional = Position(
+        user_id=1,
+        order_id=None,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=12345,
+        account_server="MetaQuotes-Demo",
+        side="BUY",
+        volume=0.01,
+        open_price=1.0,
+        current_price=1.0,
+        sl=None,
+        tp=None,
+        profit=0.0,
+        status="OPEN",
+        mt5_position_ticket=999,
+        magic_number=260426,
+        opened_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    db.add(provisional)
+    db.commit()
+
+    official_time = 1_782_000_000
+    result = PositionService(db).sync_mt5_positions(
+        positions=[
+            {
+                "ticket": 999,
+                "identifier": 999,
+                "symbol": "XAUUSD",
+                "side": "BUY",
+                "type": 0,
+                "volume": 0.01,
+                "price_open": 4550.25,
+                "price_current": 4551.10,
+                "profit": 0.85,
+                "time": official_time,
+                "time_msc": official_time * 1000 + 321,
+                "magic": 260426,
+            }
+        ],
+        account=MT5AccountPayload(
+            login=12345,
+            server="MetaQuotes-Demo",
+            trade_mode="DEMO",
+            currency="EUR",
+            balance=10_000,
+        ),
+        closed_deals=[],
+    )
+
+    db.refresh(provisional)
+    assert provisional.open_price == 4550.25
+    assert provisional.current_price == 4551.10
+    assert provisional.open_time_msc == official_time * 1000 + 321
+    assert int(provisional.opened_at.timestamp()) == official_time
+    assert result["updated"] == 1
+    assert result["changed_positions"][0]["id"] == provisional.id
+    assert result["changed_positions"][0]["open_price"] == 4550.25
+
+
+def test_mt5_deal_aggregation_uses_weighted_prices_precise_times_and_fee() -> None:
+    from app.positions.service import _aggregate_position_deals
+
+    aggregate = _aggregate_position_deals(
+        [
+            {
+                "ticket": 1,
+                "position_id": 77,
+                "entry": 0,
+                "volume": 0.01,
+                "price": 4500.0,
+                "time_msc": 1_000,
+                "commission": -0.10,
+            },
+            {
+                "ticket": 2,
+                "position_id": 77,
+                "entry": 0,
+                "volume": 0.02,
+                "price": 4515.0,
+                "time_msc": 2_000,
+                "commission": -0.20,
+            },
+            {
+                "ticket": 3,
+                "position_id": 77,
+                "entry": 1,
+                "volume": 0.03,
+                "price": 4520.0,
+                "time_msc": 3_456,
+                "profit": 1.25,
+                "swap": -0.05,
+                "commission": -0.30,
+                "fee": -0.02,
+            },
+        ]
+    )
+
+    assert aggregate["entry_price"] == pytest.approx(4510.0)
+    assert aggregate["price"] == pytest.approx(4520.0)
+    assert aggregate["entry_time_msc"] == 1_000
+    assert aggregate["close_time_msc"] == 3_456
+    assert aggregate["profit"] == pytest.approx(1.25)
+    assert aggregate["swap"] == pytest.approx(-0.05)
+    assert aggregate["commission"] == pytest.approx(-0.60)
+    assert aggregate["fee"] == pytest.approx(-0.02)

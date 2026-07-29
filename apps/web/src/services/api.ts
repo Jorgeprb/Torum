@@ -1,6 +1,5 @@
-import { resolveApiBaseUrl } from "./runtime";
+import { apiRequest } from "./apiClient";
 
-const API_BASE_URL = resolveApiBaseUrl();
 
 export type UserRole = "admin" | "trader";
 
@@ -28,43 +27,18 @@ export interface SystemStatus {
   roles: UserRole[];
 }
 
-interface RequestOptions extends RequestInit {
-  token?: string | null;
-}
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-
-  if (options.token) {
-    headers.set("Authorization", `Bearer ${options.token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers
-  });
-
-  if (!response.ok) {
-    const fallbackMessage = `HTTP ${response.status}`;
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? fallbackMessage);
-  }
-
-  return (await response.json()) as T;
-}
-
 export function login(username: string, password: string): Promise<LoginResponse> {
-  return request<LoginResponse>("/api/v1/auth/login", {
+  return apiRequest<LoginResponse>("/api/v1/auth/login", {
     method: "POST",
+    token: null,
     body: JSON.stringify({ username, password })
   });
 }
 
 export function getMe(token: string): Promise<User> {
-  return request<User>("/api/v1/auth/me", { token });
+  return apiRequest<User>("/api/v1/auth/me", { token });
 }
 
 export function getSystemStatus(token?: string | null): Promise<SystemStatus> {
-  return request<SystemStatus>("/api/v1/system/status", { token });
+  return apiRequest<SystemStatus>("/api/v1/system/status", { token });
 }

@@ -80,6 +80,13 @@ class NewsEventRead(NewsEventBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class NewsImpactRule(BaseModel):
+    enabled: bool = True
+    minutes_before: int = Field(default=60, ge=0, le=1440)
+    minutes_after: int = Field(default=60, ge=0, le=1440)
+    action: str = Field(default="BLOCK_BOT", pattern="^(DISPLAY|WARN|BLOCK_BOT|BLOCK_ALL)$")
+
+
 class NewsSettingsRead(BaseModel):
     id: int
     user_id: int | None
@@ -100,6 +107,9 @@ class NewsSettingsRead(BaseModel):
     last_sync_at: datetime | None
     last_sync_status: str | None
     last_sync_error: str | None
+    impact_rules_json: dict[str, NewsImpactRule]
+    manual_trade_policy: str
+    revision: int
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -119,6 +129,9 @@ class NewsSettingsUpdate(BaseModel):
     auto_sync_enabled: bool | None = None
     sync_interval_minutes: int | None = Field(default=None, ge=15, le=10080)
     days_ahead: int | None = Field(default=None, ge=1, le=90)
+    impact_rules_json: dict[str, NewsImpactRule] | None = None
+    manual_trade_policy: str | None = Field(default=None, pattern="^(ALLOW|WARN|REQUIRE_ACCEPTANCE|BLOCK)$")
+    expected_revision: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def normalize_filters(self) -> "NewsSettingsUpdate":
@@ -174,6 +187,9 @@ class NewsProviderStatusRead(BaseModel):
     last_sync_at: datetime | None
     last_sync_status: str | None
     last_sync_error: str | None
+    impact_rules_json: dict[str, NewsImpactRule] = Field(default_factory=dict)
+    manual_trade_policy: str = "WARN"
+    revision: int = 1
     next_event: NewsEventRead | None = None
     imported_events: int
     generated_zones: int

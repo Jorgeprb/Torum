@@ -1,656 +1,162 @@
-import { useEffect, useState } from "react";
-import { Bell, Clock3, Eye, Gauge, LineChart, Save, ScanEye, Settings2, TrendingUp } from "lucide-react";
+import { Bell, Clock3, Eye, Gauge, LineChart, Save, Search, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
-  type MT5OrderExecutionSettings,
-  type TradingMode,
-  type TradingSettings,
   type AthLevel,
+  type MT5OrderExecutionSettings,
+  type TradingSettings,
   getAthLevels,
   getMT5OrderExecutionSettings,
   getTradingSettings,
   patchAthLevel,
-  patchTradingSettings
+  patchTradingSettings,
 } from "../../services/trading";
-import {
-  activatePushNotifications,
-  currentPushPermission,
-  getPushStatus,
-  sendTestPushNotification,
-  type PushStatus
-} from "../alerts/pushNotifications";
-import {
-  type StrategyConfig,
-  createStrategyConfig,
-  getStrategyConfigs,
-  getStrategySettings,
-  patchStrategyConfig
-} from "../../services/strategies";
-import {
-  readTradeExecutionMarkerSettings,
-  saveTradeExecutionMarkerSetting
-} from "../trading/tradeExecutionMarkerSettings";
+import { activatePushNotifications, currentPushPermission, getPushStatus, sendTestPushNotification, type PushStatus } from "../alerts/pushNotifications";
+import { readChartDensity, saveChartDensity, type ChartDensity } from "../chart/chartDensitySettings";
+import { readTradeExecutionMarkerSettings, saveTradeExecutionMarkerSetting } from "../trading/tradeExecutionMarkerSettings";
 
+interface TradingSettingsPageProps { onChanged?: () => void }
+type Category = "GENERAL" | "MANUAL" | "RISK" | "CHART" | "MT5" | "NOTIFICATIONS" | "ADVANCED";
+type DisplayMode = "SIMPLE" | "ADVANCED";
+
+const symbols = ["XAUEUR", "XAUUSD"];
+const categories: Array<{ id: Category; label: string }> = [
+  { id: "GENERAL", label: "General" },
+  { id: "MANUAL", label: "Operativa manual" },
+  { id: "RISK", label: "Riesgo y ATH" },
+  { id: "CHART", label: "Gráfico" },
+  { id: "MT5", label: "Datos y MT5" },
+  { id: "NOTIFICATIONS", label: "Notificaciones" },
+  { id: "ADVANCED", label: "Avanzado" },
+];
 const spyModeStorageKey = "torum.spyMode";
 const showFutureNewsZonesStorageKey = "torum.showFutureNewsZones";
 const autoExtendToFutureNewsStorageKey = "torum.autoExtendToFutureNews";
-const futureNewsVisualsChangedEvent = "torum-future-news-visuals-changed";
 const chartTimeModeStorageKey = "torum.chartTimeMode";
 const chartManualBrokerUtcOffsetStorageKey = "torum.chartManualBrokerUtcOffset";
 const chartManualLocalUtcOffsetStorageKey = "torum.chartManualLocalUtcOffset";
-const chartTimeSettingsChangedEvent = "torum-chart-time-settings-changed";
-const defaultChartBrokerTimeZone = "Etc/GMT-3";
-const chartDisplayTimeZone = "Europe/Madrid";
-const utcOffsetOptions = Array.from({ length: 27 }, (_, index) => index - 12);
-const torumV1Key = "torum_v1";
-const torumSymbols = ["XAUEUR", "XAUUSD"];
-type ChartTimeMode = "auto" | "manual";
 
-interface TradingSettingsPageProps {
-  onChanged?: () => void;
+function readBoolean(key: string, fallback: boolean) {
+  try { const value = localStorage.getItem(key); return value === null ? fallback : value === "1"; } catch { return fallback; }
 }
-
-function torumParams(symbol: string, current?: Record<string, unknown>, enabled = false, showPullbacks = false): Record<string, unknown> {
-  return {
-    enabled,
-    use_news: current?.use_news ?? true,
-    timeframe: "H2",
-    session_start: symbol === "XAUEUR" ? "09:00" : "15:30",
-    session_end: symbol === "XAUEUR" ? "15:00" : "21:00",
-    enable_operation_zones: current?.enable_operation_zones ?? true,
-    entry_timeframe: "M5",
-    pullback_enabled: current?.pullback_enabled ?? true,
-    pullback_max_count: current?.pullback_max_count ?? 10,
-    pullback_min_pct: current?.pullback_min_pct ?? 0,
-    pullback_threshold_pct: current?.pullback_threshold_pct ?? current?.pullback_min_pct ?? 0,
-    pullback_lookback_bars: current?.pullback_lookback_bars ?? 12,
-    pullback_recovery_pct: current?.pullback_recovery_pct ?? 0.10,
-    pullback_end_confirmation_bars: current?.pullback_end_confirmation_bars ?? 1,
-    pullback_min_bars_between: current?.pullback_min_bars_between ?? 0,
-    pullback_use_wicks: current?.pullback_use_wicks ?? true,
-    pullback_use_close_confirmation: current?.pullback_use_close_confirmation ?? true,
-    pullback_live_update_enabled: current?.pullback_live_update_enabled ?? true,
-    pullback_show_labels: current?.pullback_show_labels ?? true,
-    pullback_show_only_live: current?.pullback_show_only_live ?? false,
-    pullback_label_decimals: current?.pullback_label_decimals ?? 2,
-    pullback_line_width: current?.pullback_line_width ?? 2,
-    pullback_opacity: current?.pullback_opacity ?? 0.95,
-    show_pullback_debug: showPullbacks,
-    require_zone: current?.require_zone ?? true,
-    one_position_per_symbol: current?.one_position_per_symbol ?? true
-  };
+function writeBoolean(key: string, value: boolean, event?: string) {
+  localStorage.setItem(key, value ? "1" : "0");
+  if (event) window.dispatchEvent(new Event(event));
 }
-
-function readSpyModePreference(): boolean {
-  try {
-    return window.localStorage.getItem(spyModeStorageKey) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function readDefaultTruePreference(key: string): boolean {
-  try {
-    return window.localStorage.getItem(key) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-function readChartTimeMode(): ChartTimeMode {
-  try {
-    return window.localStorage.getItem(chartTimeModeStorageKey) === "manual" ? "manual" : "auto";
-  } catch {
-    return "auto";
-  }
-}
-
-function currentUtcOffsetHours(timeZone: string): number {
-  const value = new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    hour12: false,
-    hourCycle: "h23",
-    timeZone
-  }).format(new Date());
-  const utcHour = new Date().getUTCHours();
-  let offset = Number(value) - utcHour;
-
-  if (offset > 12) {
-    offset -= 24;
-  }
-
-  if (offset < -12) {
-    offset += 24;
-  }
-
-  return offset;
-}
-
-function readStoredUtcOffset(key: string, fallback: number): number {
-  try {
-    const parsed = Number(window.localStorage.getItem(key));
-    return Number.isInteger(parsed) && parsed >= -12 && parsed <= 14 ? parsed : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function formatUtcOffset(offset: number): string {
-  if (offset === 0) {
-    return "UTC+0";
-  }
-
-  return `UTC${offset > 0 ? "+" : ""}${offset}`;
-}
-
-function saveChartTimePreference(key: string, value: string) {
-  window.localStorage.setItem(key, value);
-  window.dispatchEvent(new Event(chartTimeSettingsChangedEvent));
-}
+function same(a: unknown, b: unknown) { return JSON.stringify(a) === JSON.stringify(b); }
 
 export function TradingSettingsPage({ onChanged }: TradingSettingsPageProps = {}) {
   const [settings, setSettings] = useState<TradingSettings | null>(null);
+  const [savedSettings, setSavedSettings] = useState<TradingSettings | null>(null);
+  const [category, setCategory] = useState<Category>("GENERAL");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("SIMPLE");
+  const [query, setQuery] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [mt5, setMt5] = useState<MT5OrderExecutionSettings | null>(null);
   const [pushStatus, setPushStatus] = useState<PushStatus>("permission-required");
-  const [mt5Execution, setMt5Execution] = useState<MT5OrderExecutionSettings | null>(null);
-  const [spyModeEnabled, setSpyModeEnabled] = useState(readSpyModePreference);
-  const [showFutureNewsZones, setShowFutureNewsZones] = useState(() => readDefaultTruePreference(showFutureNewsZonesStorageKey));
-  const [autoExtendToFutureNews, setAutoExtendToFutureNews] = useState(() => readDefaultTruePreference(autoExtendToFutureNewsStorageKey));
-  const [tradeExecutionMarkerSettings, setTradeExecutionMarkerSettings] = useState(readTradeExecutionMarkerSettings);
-  const [showPullbackDebug, setShowPullbackDebug] = useState(false);
   const [athLevels, setAthLevels] = useState<AthLevel[]>([]);
-  const [savingAthSymbol, setSavingAthSymbol] = useState<string | null>(null);
-  const [chartTimeMode, setChartTimeMode] = useState(readChartTimeMode);
-  const [chartBrokerUtcOffset, setChartBrokerUtcOffset] = useState(() =>
-    readStoredUtcOffset(chartManualBrokerUtcOffsetStorageKey, currentUtcOffsetHours(import.meta.env.VITE_CHART_BROKER_TIME_ZONE || defaultChartBrokerTimeZone))
-  );
-  const [chartLocalUtcOffset, setChartLocalUtcOffset] = useState(() =>
-    readStoredUtcOffset(chartManualLocalUtcOffsetStorageKey, currentUtcOffsetHours(chartDisplayTimeZone))
-  );
+  const [savingAth, setSavingAth] = useState<string | null>(null);
+  const [spyMode, setSpyMode] = useState(() => readBoolean(spyModeStorageKey, false));
+  const [futureNews, setFutureNews] = useState(() => readBoolean(showFutureNewsZonesStorageKey, true));
+  const [extendFutureNews, setExtendFutureNews] = useState(() => readBoolean(autoExtendToFutureNewsStorageKey, true));
+  const [density, setDensity] = useState<ChartDensity>(() => readChartDensity().density);
+  const [markers, setMarkers] = useState(readTradeExecutionMarkerSettings);
+  const [timeMode, setTimeMode] = useState(() => localStorage.getItem(chartTimeModeStorageKey) ?? "auto");
+  const [brokerOffset, setBrokerOffset] = useState(() => Number(localStorage.getItem(chartManualBrokerUtcOffsetStorageKey) ?? 3));
+  const [localOffset, setLocalOffset] = useState(() => Number(localStorage.getItem(chartManualLocalUtcOffsetStorageKey) ?? 2));
+
+  const dirty = Boolean(settings && savedSettings && !same(settings, savedSettings));
+  const q = query.trim().toLowerCase();
+  const show = (text: string) => !q || text.toLowerCase().includes(q);
 
   useEffect(() => {
-    void getTradingSettings().then(setSettings).catch((error: unknown) => {
-      setMessage(error instanceof Error ? error.message : "No se pudieron cargar los ajustes");
-    });
-    void refreshMt5Execution();
-    void getPushStatus().then(setPushStatus);
-    void refreshPullbackDebug();
-    void refreshAthLevels();
+    void Promise.all([getTradingSettings(), getMT5OrderExecutionSettings(), getAthLevels(), getPushStatus()])
+      .then(([next, mt5Status, ath, push]) => {
+        setSettings(next); setSavedSettings(structuredClone(next)); setMt5(mt5Status); setAthLevels(ath); setPushStatus(push);
+      })
+      .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "No se pudieron cargar los ajustes"));
   }, []);
 
   function update<K extends keyof TradingSettings>(key: K, value: TradingSettings[K]) {
-    setSettings((current) => (current ? { ...current, [key]: value } : current));
-  }
-
-  function updateSpyMode(enabled: boolean) {
-    setSpyModeEnabled(enabled);
-    try {
-      window.localStorage.setItem(spyModeStorageKey, enabled ? "1" : "0");
-      window.dispatchEvent(new Event("torum-spy-mode-changed"));
-    } catch {
-      setMessage("No se pudo guardar modo espia");
-    }
-  }
-
-  function updateFutureNewsVisual(key: string, enabled: boolean) {
-    if (key === showFutureNewsZonesStorageKey) {
-      setShowFutureNewsZones(enabled);
-    } else {
-      setAutoExtendToFutureNews(enabled);
-    }
-
-    try {
-      window.localStorage.setItem(key, enabled ? "1" : "0");
-      window.dispatchEvent(new Event(futureNewsVisualsChangedEvent));
-    } catch {
-      setMessage("No se pudo guardar visual de noticias");
-    }
-  }
-
-  function updateTradeExecutionMarkerSetting<K extends keyof typeof tradeExecutionMarkerSettings>(
-    key: K,
-    value: (typeof tradeExecutionMarkerSettings)[K]
-  ) {
-    setTradeExecutionMarkerSettings(saveTradeExecutionMarkerSetting(key, value));
-  }
-
-  function updateChartTimeMode(mode: ChartTimeMode) {
-    setChartTimeMode(mode);
-    try {
-      saveChartTimePreference(chartTimeModeStorageKey, mode);
-      setMessage("Horario de grafico guardado");
-    } catch {
-      setMessage("No se pudo guardar horario de grafico");
-    }
-  }
-
-  function updateChartUtcOffset(key: string, value: number) {
-    const safeValue = Math.max(-12, Math.min(14, Math.floor(value)));
-
-    if (key === chartManualBrokerUtcOffsetStorageKey) {
-      setChartBrokerUtcOffset(safeValue);
-    } else {
-      setChartLocalUtcOffset(safeValue);
-    }
-
-    try {
-      saveChartTimePreference(key, String(safeValue));
-      setMessage("Horario de grafico guardado");
-    } catch {
-      setMessage("No se pudo guardar horario de grafico");
-    }
-  }
-
-  async function refreshPullbackDebug() {
-    try {
-      const configs = await getStrategyConfigs();
-      setShowPullbackDebug(
-        configs.some((config) => config.strategy_key === torumV1Key && config.params_json?.show_pullback_debug === true)
-      );
-    } catch {
-      setShowPullbackDebug(false);
-    }
-  }
-
-  async function refreshAthLevels() {
-    try {
-      setAthLevels(await getAthLevels());
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudo cargar ATH");
-    }
-  }
-
-  function updateAth(symbol: string, patch: Partial<AthLevel>) {
-    setAthLevels((current) => {
-      if (current.some((level) => level.internal_symbol === symbol)) {
-        return current.map((level) => (level.internal_symbol === symbol ? { ...level, ...patch } : level));
-      }
-      return [
-        ...current,
-        {
-          internal_symbol: symbol,
-          ath_price: null,
-          mode: "auto",
-          source: "candles",
-          calculated_at: null,
-          updated_at: null,
-          ...patch
-        }
-      ];
-    });
-  }
-
-  async function saveAth(symbol: string) {
-    const level = athLevels.find((item) => item.internal_symbol === symbol);
-    if (!level) {
-      return;
-    }
-
-    setSavingAthSymbol(symbol);
-    setMessage(null);
-    try {
-      const next = await patchAthLevel(symbol, {
-        mode: level.mode,
-        ath_price: level.mode === "manual" ? level.ath_price : null
-      });
-      setAthLevels((current) => current.map((item) => (item.internal_symbol === symbol ? next : item)));
-      setMessage(`ATH ${symbol} guardado`);
-      onChanged?.();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudo guardar ATH");
-      void refreshAthLevels();
-    } finally {
-      setSavingAthSymbol(null);
-    }
-  }
-
-  async function ensureTorumConfig(symbol: string, configs: StrategyConfig[], showPullbacks: boolean): Promise<StrategyConfig> {
-    const existing = configs.find((config) => config.strategy_key === torumV1Key && config.internal_symbol === symbol);
-    if (existing) {
-      return patchStrategyConfig(existing.id, {
-        timeframe: "H2",
-        params_json: torumParams(symbol, existing.params_json, existing.enabled, showPullbacks)
-      });
-    }
-
-    const strategySettings = await getStrategySettings();
-    return createStrategyConfig({
-      strategy_key: torumV1Key,
-      internal_symbol: symbol,
-      timeframe: "H2",
-      enabled: false,
-      mode: strategySettings.default_mode,
-      params_json: torumParams(symbol, undefined, false, showPullbacks)
-    });
-  }
-
-  async function updatePullbackDebug(enabled: boolean) {
-    setShowPullbackDebug(enabled);
-    setMessage(null);
-    try {
-      const configs = await getStrategyConfigs();
-      await Promise.all(torumSymbols.map((symbol) => ensureTorumConfig(symbol, configs, enabled)));
-      setMessage(enabled ? "Pullbacks visibles" : "Pullbacks ocultos");
-      onChanged?.();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudo guardar pullbacks");
-      void refreshPullbackDebug();
-    }
-  }
-
-  async function activatePush() {
-    const status = await activatePushNotifications();
-    setPushStatus(status);
-    if (status === "missing-vapid") {
-      setMessage("Faltan VAPID keys en backend");
-    } else if (status === "subscribed") {
-      setMessage("Push activado en este dispositivo");
-    } else {
-      setMessage(`Estado push: ${status}`);
-    }
-  }
-
-  async function testPush() {
-    try {
-      const response = await sendTestPushNotification();
-      setMessage(`${response.message}. Enviadas: ${response.sent}, fallidas: ${response.failed}`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudo enviar la prueba push");
-    }
-  }
-
-  async function refreshMt5Execution() {
-    try {
-      setMt5Execution(await getMT5OrderExecutionSettings());
-    } catch {
-      setMt5Execution(null);
-    }
+    setSettings((current) => current ? { ...current, [key]: value } : current);
   }
 
   async function save() {
-    if (!settings) {
-      return;
-    }
+    if (!settings) return;
     setSaving(true);
-    setMessage(null);
     try {
-      const updated = await patchTradingSettings({
-        trading_mode: settings.trading_mode,
-        long_only: settings.long_only,
-        default_take_profit_percent: settings.default_take_profit_percent,
-        use_stop_loss: settings.use_stop_loss,
-        lot_per_equity_enabled: settings.lot_per_equity_enabled,
-        equity_per_0_01_lot: settings.equity_per_0_01_lot,
-        minimum_lot: settings.minimum_lot,
-        allow_manual_lot_adjustment: settings.allow_manual_lot_adjustment,
-        live_trading_enabled: settings.live_trading_enabled,
-        require_live_confirmation: settings.require_live_confirmation,
-        show_bid_line: settings.show_bid_line,
-        show_ask_line: settings.show_ask_line,
-        mt5_order_execution_enabled: settings.mt5_order_execution_enabled,
-        market_data_source: settings.market_data_source
-      });
-      setSettings(updated);
-      void refreshMt5Execution();
-      setMessage("Ajustes guardados");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudieron guardar los ajustes");
-    } finally {
-      setSaving(false);
-    }
+      const next = await patchTradingSettings(settings);
+      setSettings(next); setSavedSettings(structuredClone(next)); setMessage("Ajustes aplicados"); onChanged?.();
+      setMt5(await getMT5OrderExecutionSettings());
+    } catch (error) { setMessage(error instanceof Error ? error.message : "No se pudieron guardar"); }
+    finally { setSaving(false); }
   }
 
-  if (!settings) {
-    return <section className="panel mobile-settings-page">Cargando ajustes...</section>;
+  function updateAth(symbol: string, patch: Partial<AthLevel>) {
+    setAthLevels((current) => current.map((item) => item.internal_symbol === symbol ? { ...item, ...patch } : item));
   }
+  async function persistAth(symbol: string) {
+    const level = athLevels.find((item) => item.internal_symbol === symbol); if (!level) return;
+    setSavingAth(symbol);
+    try { const next = await patchAthLevel(symbol, { mode: level.mode, ath_price: level.ath_price }); updateAth(symbol, next); setMessage(`ATH ${symbol} guardado`); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "No se pudo guardar ATH"); }
+    finally { setSavingAth(null); }
+  }
+
+  const searchResults = useMemo(() => categories.filter((item) => show(item.label)), [query]);
+  if (!settings) return <section className="settings-page"><div className="strategy-empty-state">Cargando ajustes…</div></section>;
 
   return (
-    <section className="panel mobile-settings-page">
-      <div className="panel-title">
-        <Settings2 size={18} />
-        Ajustes de trading
-      </div>
-      <section className="settings-card">
-        <div className="settings-card__title">
-          <Gauge size={18} />
-          Modo y lotajes
-        </div>
-        <div className="settings-form-grid">
-          <label>
-            Modo
-            <select value={settings.trading_mode} onChange={(event) => update("trading_mode", event.target.value as TradingMode)}>
-              <option value="PAPER">PAPER</option>
-              <option value="DEMO">DEMO</option>
-              <option value="LIVE">LIVE</option>
-            </select>
-          </label>
-          <label>
-            Capital por 0.01 lote
-            <input min="1" step="100" type="number" value={settings.equity_per_0_01_lot} onChange={(event) => update("equity_per_0_01_lot", Number(event.target.value))} />
-          </label>
-          <label>
-            Lote minimo
-            <input min="0.01" step="0.01" type="number" value={settings.minimum_lot} onChange={(event) => update("minimum_lot", Number(event.target.value))} />
-          </label>
-          <label>
-            Take profit %
-            <input min="0.01" step="0.01" type="number" value={settings.default_take_profit_percent} onChange={(event) => update("default_take_profit_percent", Number(event.target.value))} />
-          </label>
-        </div>
-        <div className="settings-toggle-grid">
-          <label className="toggle-line">
-            <input checked={settings.long_only} type="checkbox" onChange={(event) => update("long_only", event.target.checked)} />
-            Solo compras
-          </label>
-          <label className="toggle-line">
-            <input checked={settings.lot_per_equity_enabled} type="checkbox" onChange={(event) => update("lot_per_equity_enabled", event.target.checked)} />
-            Lotaje por equity
-          </label>
-          <label className="toggle-line">
-            <input checked={settings.allow_manual_lot_adjustment} type="checkbox" onChange={(event) => update("allow_manual_lot_adjustment", event.target.checked)} />
-            Permitir + / -
-          </label>
-          <label className="toggle-line">
-            <input checked={settings.use_stop_loss} type="checkbox" onChange={(event) => update("use_stop_loss", event.target.checked)} />
-            Usar stop loss
-          </label>
-        </div>
-      </section>
+    <section className="settings-page settings-page--v2">
+      <header className="settings-hero">
+        <div><p className="eyebrow">Configuración</p><h2>Ajustes de Torum</h2><p>Los cambios de cuenta se publican juntos. Las preferencias de dispositivo se guardan al instante.</p></div>
+        <div className="segmented-control"><button className={displayMode === "SIMPLE" ? "segment segment--active" : "segment"} onClick={() => setDisplayMode("SIMPLE")} type="button">Sencillo</button><button className={displayMode === "ADVANCED" ? "segment segment--active" : "segment"} onClick={() => setDisplayMode("ADVANCED")} type="button">Avanzado</button></div>
+      </header>
+      <div className="settings-search"><Search size={17}/><input placeholder="Buscar: zoom, lotaje, TP, noticias…" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+      <nav className="settings-category-nav">{searchResults.map((item) => <button className={category === item.id ? "is-active" : ""} key={item.id} type="button" onClick={() => setCategory(item.id)}>{item.label}</button>)}</nav>
 
-      <section className="settings-card">
-        <div className="settings-card__title">
-          <Clock3 size={18} />
-          Horarios
-        </div>
-        <div className="settings-form-grid">
-          <label>
-            Rango horario
-            <select value={chartTimeMode} onChange={(event) => updateChartTimeMode(event.target.value as ChartTimeMode)}>
-              <option value="auto">Automatico</option>
-              <option value="manual">Manual</option>
-            </select>
-          </label>
-          <label>
-            Hora broker
-            <select disabled={chartTimeMode === "auto"} value={chartBrokerUtcOffset} onChange={(event) => updateChartUtcOffset(chartManualBrokerUtcOffsetStorageKey, Number(event.target.value))}>
-              {utcOffsetOptions.map((offset) => (
-                <option key={offset} value={offset}>{formatUtcOffset(offset)}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Mi hora
-            <select disabled={chartTimeMode === "auto"} value={chartLocalUtcOffset} onChange={(event) => updateChartUtcOffset(chartManualLocalUtcOffsetStorageKey, Number(event.target.value))}>
-              {utcOffsetOptions.map((offset) => (
-                <option key={offset} value={offset}>{formatUtcOffset(offset)}</option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <p className="notice-strip">Automatico mantiene la hora actual. Manual solo cambia la vista del grafico.</p>
-      </section>
+      {category === "GENERAL" ? <section className="settings-card"><div className="settings-card__title"><SlidersHorizontal size={18}/> General <span className="setting-scope-badge">CUENTA</span></div><div className="settings-form-grid">
+        <label>Modo<select value={settings.trading_mode} onChange={(e) => update("trading_mode", e.target.value as TradingSettings["trading_mode"])}><option>PAPER</option><option>DEMO</option><option>LIVE</option></select><small>Modo operativo de la cuenta.</small></label>
+        <label className="toggle-line"><input checked={settings.is_paused} type="checkbox" onChange={(e) => update("is_paused", e.target.checked)}/> Pausar nuevas órdenes</label>
+        <label className="toggle-line"><input checked={settings.allow_market_orders} type="checkbox" onChange={(e) => update("allow_market_orders", e.target.checked)}/> Permitir órdenes MARKET</label>
+      </div></section> : null}
 
-      <section className="settings-card">
-        <div className="settings-card__title">
-          <TrendingUp size={18} />
-          ATH activos
-        </div>
-        <div className="ath-settings-grid">
-          {torumSymbols.map((symbol) => {
-            const level = athLevels.find((item) => item.internal_symbol === symbol) ?? {
-              internal_symbol: symbol,
-              ath_price: null,
-              mode: "auto" as const,
-              source: "candles",
-              calculated_at: null,
-              updated_at: null
-            };
-            return (
-              <div className="ath-settings-row" key={symbol}>
-                <strong>{symbol}</strong>
-                <label>
-                  Modo
-                  <select value={level.mode} onChange={(event) => updateAth(symbol, { mode: event.target.value as AthLevel["mode"] })}>
-                    <option value="auto">Automatico</option>
-                    <option value="manual">Manual</option>
-                  </select>
-                </label>
-                <label>
-                  ATH
-                  <input
-                    disabled={level.mode === "auto"}
-                    min="1"
-                    step="0.01"
-                    type="number"
-                    value={level.ath_price ?? ""}
-                    onChange={(event) => updateAth(symbol, { ath_price: event.target.value === "" ? null : Number(event.target.value) })}
-                  />
-                </label>
-                <button className="toolbar-action" disabled={savingAthSymbol === symbol} type="button" onClick={() => void saveAth(symbol)}>
-                  Guardar
-                </button>
-              </div>
-            );
-          })}
-        </div>
-        <p className="notice-strip">Manual manda sobre velas MT5. Automatico recalcula con velas importadas.</p>
-      </section>
+      {category === "MANUAL" ? <section className="settings-card"><div className="settings-card__title"><Gauge size={18}/> Operativa manual <span className="setting-scope-badge">CUENTA</span></div><div className="settings-form-grid">
+        <label>Lotaje por defecto<input min="0.01" step="0.01" type="number" value={settings.default_volume} onChange={(e) => update("default_volume", Number(e.target.value))}/></label>
+        <label>Lotaje máximo<input min="0.01" step="0.01" type="number" value={settings.max_order_volume ?? ""} onChange={(e) => update("max_order_volume", e.target.value === "" ? null : Number(e.target.value))}/></label>
+        <label>TP automático<input min="0.001" step="0.001" type="number" value={settings.default_take_profit_percent} onChange={(e) => update("default_take_profit_percent", Number(e.target.value))}/><small>Porcentaje desde el precio real ejecutado.</small></label>
+        <label>Capital por 0,01 lotes<input min="1" step="1" type="number" value={settings.equity_per_0_01_lot} onChange={(e) => update("equity_per_0_01_lot", Number(e.target.value))}/></label>
+        <label className="toggle-line"><input checked={settings.lot_per_equity_enabled} type="checkbox" onChange={(e) => update("lot_per_equity_enabled", e.target.checked)}/> Lotaje por capital</label>
+        <label className="toggle-line"><input checked={settings.allow_manual_lot_adjustment} type="checkbox" onChange={(e) => update("allow_manual_lot_adjustment", e.target.checked)}/> Permitir ajuste +/-</label>
+        <label className="toggle-line"><input checked={settings.long_only} type="checkbox" onChange={(e) => update("long_only", e.target.checked)}/> Solo compras</label>
+        <label className="toggle-line"><input checked={settings.use_stop_loss} type="checkbox" onChange={(e) => update("use_stop_loss", e.target.checked)}/> Usar stop loss</label>
+      </div></section> : null}
 
-      <section className="settings-card">
-        <div className="settings-card__title">
-          <Eye size={18} />
-          Visual
-        </div>
-        <div className="settings-toggle-grid">
-          <label className="toggle-line">
-            <input checked={settings.show_bid_line} type="checkbox" onChange={(event) => update("show_bid_line", event.target.checked)} />
-            Mostrar linea BID
-          </label>
-          <label className="toggle-line">
-            <input checked={settings.show_ask_line} type="checkbox" onChange={(event) => update("show_ask_line", event.target.checked)} />
-            Mostrar linea ASK
-          </label>
-          <label className="toggle-line">
-            <input checked={spyModeEnabled} type="checkbox" onChange={(event) => updateSpyMode(event.target.checked)} />
-            <ScanEye size={16} />
-            Modo espia
-          </label>
-          <label className="toggle-line">
-            <input checked={showFutureNewsZones} type="checkbox" onChange={(event) => updateFutureNewsVisual(showFutureNewsZonesStorageKey, event.target.checked)} />
-            Zonas futuras
-          </label>
-          <label className="toggle-line">
-            <input checked={autoExtendToFutureNews} type="checkbox" onChange={(event) => updateFutureNewsVisual(autoExtendToFutureNewsStorageKey, event.target.checked)} />
-            Extender tiempo futuro
-          </label>
-          <label className="toggle-line">
-            <input checked={showPullbackDebug} type="checkbox" onChange={(event) => void updatePullbackDebug(event.target.checked)} />
-            Mostrar pullbacks M5
-          </label>
-          <label className="toggle-line">
-            <input
-              checked={tradeExecutionMarkerSettings.show_trade_execution_markers}
-              type="checkbox"
-              onChange={(event) => updateTradeExecutionMarkerSetting("show_trade_execution_markers", event.target.checked)}
-            />
-            Marcadores operaciones
-          </label>
-          <label className="toggle-line">
-            <input
-              checked={tradeExecutionMarkerSettings.trade_execution_markers_only_m5}
-              type="checkbox"
-              onChange={(event) => updateTradeExecutionMarkerSetting("trade_execution_markers_only_m5", event.target.checked)}
-            />
-            Marcadores solo M5
-          </label>
-        </div>
-      </section>
+      {category === "RISK" ? <section className="settings-card"><div className="settings-card__title"><TrendingUp size={18}/> ATH por activo <span className="setting-scope-badge">CUENTA</span></div><div className="ath-settings-grid">{symbols.map((symbol) => {
+        const level = athLevels.find((item) => item.internal_symbol === symbol) ?? { internal_symbol: symbol, ath_price: null, mode: "auto", source: "candles", calculated_at: null, updated_at: null } as AthLevel;
+        return <div className="ath-settings-row" key={symbol}><strong>{symbol}</strong><label>Modo<select value={level.mode} onChange={(e) => updateAth(symbol, { mode: e.target.value as AthLevel["mode"] })}><option value="auto">Automático</option><option value="manual">Manual</option></select></label><label>ATH<input disabled={level.mode === "auto"} min="1" step="0.01" type="number" value={level.ath_price ?? ""} onChange={(e) => updateAth(symbol, { ath_price: e.target.value ? Number(e.target.value) : null })}/></label><button disabled={savingAth === symbol} onClick={() => void persistAth(symbol)} type="button">Guardar</button></div>;
+      })}</div><p className="notice-strip">Las reglas de estrés y capacidad del bot se editan en Estrategia Torum.</p></section> : null}
 
-      <div className="danger-strip">Por defecto Torum compra sin stop loss y con TP automatico. LIVE sigue bloqueado si no activas sus protecciones.</div>
-      <section className="settings-card settings-mt5-box">
-        <div className="settings-card__title">
-          <LineChart size={18} />
-          Ejecucion MT5
-        </div>
-        <div className="settings-form-grid">
-          <label>
-            Fuente de mercado
-            <select value={settings.market_data_source} onChange={(event) => update("market_data_source", event.target.value as TradingSettings["market_data_source"])}>
-              <option value="MT5">MT5</option>
-              <option value="MOCK">MOCK</option>
-            </select>
-          </label>
-          <label className="toggle-line settings-toggle-inline">
-            <input checked={settings.mt5_order_execution_enabled} type="checkbox" onChange={(event) => update("mt5_order_execution_enabled", event.target.checked)} />
-            Habilitar ejecucion MT5
-          </label>
-        </div>
-        <p className="notice-strip">Enviar ordenes demo o reales a MetaTrader 5 segun cuenta y modo.</p>
-        <dl className="metric-list">
-          <div>
-            <dt>Torum</dt>
-            <dd>{settings.mt5_order_execution_enabled ? "enabled" : "disabled"}</dd>
-          </div>
-          <div>
-            <dt>Bridge</dt>
-            <dd>{mt5Execution?.bridge_connected ? (mt5Execution.bridge_enabled ? "enabled" : "disabled") : "desconectado"}</dd>
-          </div>
-          <div>
-            <dt>Estado</dt>
-            <dd>{mt5Execution?.bridge_message || "Sin estado del bridge"}</dd>
-          </div>
-        </dl>
-      </section>
-      <section className="settings-card">
-        <div className="settings-card__title">
-          <Bell size={18} />
-          Notificaciones
-        </div>
-        <dl className="metric-list">
-          <div>
-            <dt>Permiso</dt>
-            <dd>{currentPushPermission()}</dd>
-          </div>
-          <div>
-            <dt>Estado</dt>
-            <dd>{pushStatus}</dd>
-          </div>
-        </dl>
-        <div className="modal-actions">
-          <button className="toolbar-action" type="button" onClick={() => void activatePush()}>
-            Activar push
-          </button>
-          <button className="toolbar-action" type="button" onClick={() => void testPush()}>
-            Enviar prueba
-          </button>
-        </div>
-      </section>
+      {category === "CHART" ? <><section className="settings-card"><div className="settings-card__title"><Eye size={18}/> Apariencia <span className="setting-scope-badge">DISPOSITIVO</span></div><div className="settings-form-grid">
+        <label className="toggle-line"><input checked={settings.show_bid_line} type="checkbox" onChange={(e) => update("show_bid_line", e.target.checked)}/> Línea BID</label>
+        <label className="toggle-line"><input checked={settings.show_ask_line} type="checkbox" onChange={(e) => update("show_ask_line", e.target.checked)}/> Línea ASK</label>
+        <label>Densidad<select value={density} onChange={(e) => { const value = e.target.value as ChartDensity; setDensity(saveChartDensity(value).density); }}><option value="WIDE">Amplia</option><option value="NORMAL">Normal</option><option value="COMPACT">Compacta</option><option value="ULTRA">Muy compacta</option></select></label>
+        <label className="toggle-line"><input checked={spyMode} type="checkbox" onChange={(e) => { setSpyMode(e.target.checked); writeBoolean(spyModeStorageKey, e.target.checked, "torum-spy-mode-changed"); }}/> Modo espía</label>
+        <label className="toggle-line"><input checked={futureNews} type="checkbox" onChange={(e) => { setFutureNews(e.target.checked); writeBoolean(showFutureNewsZonesStorageKey, e.target.checked, "torum-future-news-visuals-changed"); }}/> Zonas futuras</label>
+        <label className="toggle-line"><input checked={extendFutureNews} type="checkbox" onChange={(e) => { setExtendFutureNews(e.target.checked); writeBoolean(autoExtendToFutureNewsStorageKey, e.target.checked, "torum-future-news-visuals-changed"); }}/> Extender futuro</label>
+        <label className="toggle-line"><input checked={markers.show_trade_execution_markers} type="checkbox" onChange={(e) => setMarkers(saveTradeExecutionMarkerSetting("show_trade_execution_markers", e.target.checked))}/> Marcadores de operaciones</label>
+        <label className="toggle-line"><input checked={markers.trade_execution_markers_only_m5} type="checkbox" onChange={(e) => setMarkers(saveTradeExecutionMarkerSetting("trade_execution_markers_only_m5", e.target.checked))}/> Marcadores solo M5</label>
+      </div></section><section className="settings-card"><div className="settings-card__title"><Clock3 size={18}/> Horario del gráfico <span className="setting-scope-badge">DISPOSITIVO</span></div><div className="settings-form-grid"><label>Modo<select value={timeMode} onChange={(e) => { setTimeMode(e.target.value); localStorage.setItem(chartTimeModeStorageKey, e.target.value); window.dispatchEvent(new Event("torum-chart-time-settings-changed")); }}><option value="auto">Automático</option><option value="manual">Manual</option></select></label><label>UTC broker<input disabled={timeMode === "auto"} min="-12" max="14" type="number" value={brokerOffset} onChange={(e) => { setBrokerOffset(Number(e.target.value)); localStorage.setItem(chartManualBrokerUtcOffsetStorageKey, e.target.value); }}/></label><label>Mi UTC<input disabled={timeMode === "auto"} min="-12" max="14" type="number" value={localOffset} onChange={(e) => { setLocalOffset(Number(e.target.value)); localStorage.setItem(chartManualLocalUtcOffsetStorageKey, e.target.value); }}/></label></div></section></> : null}
+
+      {category === "MT5" ? <section className="settings-card"><div className="settings-card__title"><LineChart size={18}/> Datos y MetaTrader <span className="setting-scope-badge">SISTEMA</span></div><div className="settings-form-grid"><label>Fuente<select value={settings.market_data_source} onChange={(e) => update("market_data_source", e.target.value as TradingSettings["market_data_source"])}><option value="MT5">MT5</option><option value="MOCK">MOCK</option></select></label><label className="toggle-line"><input checked={settings.mt5_order_execution_enabled} type="checkbox" onChange={(e) => update("mt5_order_execution_enabled", e.target.checked)}/> Habilitar ejecución MT5</label></div><dl className="metric-list"><div><dt>Torum</dt><dd>{settings.mt5_order_execution_enabled ? "Habilitado" : "Deshabilitado"}</dd></div><div><dt>Bridge</dt><dd>{mt5?.bridge_connected ? (mt5.bridge_enabled ? "Habilitado" : "Deshabilitado") : "Desconectado"}</dd></div><div><dt>Mensaje</dt><dd>{mt5?.bridge_message ?? "Sin estado"}</dd></div></dl></section> : null}
+
+      {category === "NOTIFICATIONS" ? <section className="settings-card"><div className="settings-card__title"><Bell size={18}/> Notificaciones <span className="setting-scope-badge">DISPOSITIVO</span></div><dl className="metric-list"><div><dt>Permiso</dt><dd>{currentPushPermission()}</dd></div><div><dt>Estado</dt><dd>{pushStatus}</dd></div></dl><div className="modal-actions"><button onClick={() => void activatePushNotifications().then(setPushStatus)} type="button">Activar push</button><button onClick={() => void sendTestPushNotification()} type="button">Enviar prueba</button></div></section> : null}
+
+      {category === "ADVANCED" || (displayMode === "ADVANCED" && category === "GENERAL") ? <section className="settings-card"><div className="settings-card__title"><ShieldCheck size={18}/> Protección avanzada <span className="setting-scope-badge">SISTEMA</span></div><div className="settings-form-grid"><label>Magic number<input type="number" value={settings.default_magic_number} onChange={(e) => update("default_magic_number", Number(e.target.value))}/></label><label>Desviación MT5<input min="0" type="number" value={settings.default_deviation_points} onChange={(e) => update("default_deviation_points", Number(e.target.value))}/></label><label className="toggle-line"><input checked={settings.live_trading_enabled} type="checkbox" onChange={(e) => update("live_trading_enabled", e.target.checked)}/> Permitir LIVE</label><label className="toggle-line"><input checked={settings.require_live_confirmation} type="checkbox" onChange={(e) => update("require_live_confirmation", e.target.checked)}/> Confirmación reforzada LIVE</label><label className="toggle-line"><input checked={settings.allow_pending_orders} type="checkbox" onChange={(e) => update("allow_pending_orders", e.target.checked)}/> Órdenes pendientes</label></div><div className="danger-strip">LIVE solo debe activarse tras validar DEMO, TP, cierres, riesgo y sincronización.</div></section> : null}
+
       {message ? <div className="notice-strip">{message}</div> : null}
-      <button className="primary-button" disabled={saving} type="button" onClick={() => void save()}>
-        <Save size={18} />
-        Guardar ajustes
-      </button>
+      {dirty ? <footer className="settings-save-bar"><div><SlidersHorizontal size={17}/><strong>Cambios de cuenta sin aplicar</strong><span>Las preferencias visuales ya se han guardado en este dispositivo.</span></div><button type="button" onClick={() => setSettings(structuredClone(savedSettings!))}>Descartar</button><button className="primary-button" disabled={saving} type="button" onClick={() => void save()}><Save size={17}/> {saving ? "Aplicando…" : "Aplicar cambios"}</button></footer> : null}
     </section>
   );
 }

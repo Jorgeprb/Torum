@@ -1,7 +1,7 @@
 from datetime import datetime
 from types import SimpleNamespace
 
-from bridge.position_syncer import _load_closed_deals
+from bridge.position_syncer import _load_closed_deals, _position_to_payload
 
 
 class FakeMT5:
@@ -30,3 +30,14 @@ def test_load_closed_deals_keeps_trade_deals_for_position_grouping() -> None:
     assert deals[0]["profit"] == 0.0
     assert deals[1]["swap"] == -0.1
     assert deals[1]["commission"] == -0.2
+
+
+def test_position_payload_preserves_ticket_and_identifier() -> None:
+    position = SimpleNamespace(ticket=111, identifier=222, type=0, symbol="XAUUSD")
+    mt5 = SimpleNamespace(POSITION_TYPE_BUY=0)
+
+    payload = _position_to_payload(position, mt5)
+
+    assert payload["position_ticket"] == 111
+    assert payload["position_identifier"] == 222
+    assert payload["side"] == "BUY"

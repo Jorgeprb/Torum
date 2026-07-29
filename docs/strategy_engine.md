@@ -1,10 +1,8 @@
 # Strategy Engine
 
-Fase 8 introduce la estructura base para estrategias automaticas.
-
 ## Regla principal
 
-Una estrategia nunca ejecuta ordenes directamente.
+Una estrategia nunca ejecuta órdenes directamente.
 
 ```text
 Strategy Plugin
@@ -16,91 +14,90 @@ Strategy Plugin
   -> MT5
 ```
 
-En esta fase las estrategias quedan desactivadas por defecto y el modo seguro es `PAPER`.
+Torum V1 se evalúa automáticamente al cerrar una nueva vela M5. La deduplicación por vela y el `HybridLock` por símbolo evitan ejecuciones simultáneas.
 
-## Strategy Plugin
+## Seguridad
 
-Un plugin vive en:
+- PAPER es el modo seguro inicial.
+- DEMO requiere MT5 conectado y ejecución habilitada.
+- LIVE exige `strategy_live_enabled` y las validaciones de trading real.
+- Cada señal pasa por DXY, zonas, soportes, ATH, snapshot de riesgo y OrderManager.
+- Las señales conservan `strategy_config_id` y `strategy_config_revision`.
 
-```text
-services/api/app/strategies/plugins/
-```
+## Configuración tipada
 
-Debe declarar `key`, `name`, `version`, `description`, `default_params`, `supported_symbols`, `supported_timeframes`, `required_indicators`, `required_context` y `generate_signal(context)`.
+`app.strategies.torum_v1_config.TorumV1Params` es la fuente única de verdad. El esquema UI se genera desde el backend y cubre todos los parámetros editables.
 
-## Signal
-
-Una signal normalizada contiene:
-
-```json
-{
-  "strategy_key": "example_manual_zone_strategy",
-  "internal_symbol": "XAUUSD",
-  "timeframe": "H1",
-  "side": "BUY",
-  "signal_type": "ENTRY",
-  "confidence": 0.5,
-  "entry_type": "MARKET",
-  "suggested_volume": 0.01,
-  "reason": "Example signal generated inside manual zone",
-  "metadata": {}
-}
-```
-
-Tipos: `ENTRY`, `EXIT`, `MODIFY`, `NONE`.
-
-## Modos
-
-- `PAPER`: simula mediante el `OrderManager`.
-- `DEMO`: preparado, requiere MT5 demo conectado y validaciones de riesgo.
-- `LIVE`: bloqueado por defecto.
-
-Flags de seguridad:
+La configuración se compone de:
 
 ```text
-strategy_settings.strategies_enabled = false
-strategy_settings.strategy_live_enabled = false
+base_params
+asset_overrides.XAUUSD
+asset_overrides.XAUEUR
+enabled_by_symbol
+mode_by_symbol
 ```
 
-## Endpoints
+La actualización de ambos activos es atómica y usa revisión optimista.
+
+## Flujo Torum V1
 
 ```text
-GET /api/strategies
-POST /api/strategies/register-defaults
-GET /api/strategy-configs
-POST /api/strategy-configs
-PATCH /api/strategy-configs/{id}
-DELETE /api/strategy-configs/{id}
-GET /api/strategy-settings
-PATCH /api/strategy-settings
-POST /api/strategies/run
-POST /api/strategies/run/{config_id}
-GET /api/strategy-signals
-GET /api/strategy-runs
+Motor y activo
+  -> Horario
+  -> Noticias
+  -> Desbloqueo H2/H3
+  -> Pullback M5
+  -> Mínimo dentro del rectángulo Torum
+  -> Confirmación cerrada
+  -> DXY
+  -> Soporte S1/S2/S3
+  -> Zona ATH y riesgo
+  -> Orden y TP
 ```
 
-## Estrategias de ejemplo
+## Simulación
 
-`example_sma_dxy_filter` lee DXY D1 y SMA30 calculado por backend. Devuelve `NONE` con metadata `STRONG`, `WEAK`, `NEUTRAL` o `UNKNOWN`.
+```text
+POST /api/strategies/torum-v1/simulate
+```
 
-`example_manual_zone_strategy` lee dibujos `manual_zone` visibles del usuario. Con `dry_run=true` devuelve `NONE`; con `dry_run=false` puede generar `ENTRY` en PAPER si el precio actual esta dentro de una zona BUY/SELL.
+Evalúa el estado actual y devuelve una traza estructurada. Nunca envía órdenes.
 
-## Contexto
+```text
+POST /api/strategies/torum-v1/simulate/history
+```
 
-`StrategyContext` puede incluir velas de Torum, ultimo tick/precio, DXY/SMA30, no_trade_zones activas, dibujos `manual_zone`, posiciones abiertas, parametros y modo.
+Ejecuta un replay técnico sobre velas M5. No reconstruye rentabilidad, balance/riesgo o DXY históricos.
 
-No usa datos del frontend ni velas de MT5.
+## Versiones
 
-## Crear una estrategia nueva
+Cada publicación crea `StrategyConfigVersion` con usuario, revisión, parámetros y nota. Una versión antigua puede restaurarse, creando una revisión nueva sin eliminar el historial.
 
-1. Crear plugin en `services/api/app/strategies/plugins/`.
-2. Implementar `generate_signal(context)`.
-3. Registrar el plugin en `strategy_registry`.
-4. Ejecutar `POST /api/strategies/register-defaults`.
-5. Crear una `strategy_config`.
-6. Activar `strategies_enabled`.
-7. Ejecutar manualmente con `POST /api/strategies/run/{config_id}`.
+## Endpoints principales
 
-## Automatizacion continua futura
+```text
+GET   /api/strategies
+GET   /api/strategies/torum-v1/status
+GET   /api/strategies/torum-v1/configuration/schema
+GET   /api/strategies/torum-v1/configuration
+PATCH /api/strategies/torum-v1/configuration
+POST  /api/strategies/torum-v1/simulate
+POST  /api/strategies/torum-v1/simulate/history
+GET   /api/strategies/torum-v1/pullbacks
+GET   /api/strategy-configs/{id}/versions
+POST  /api/strategy-configs/{id}/versions/{revision}/restore
+GET   /api/strategy-signals
+GET   /api/strategy-runs
+```
 
-Fase 8 solo ejecuta manualmente. Un scheduler futuro podria llamar `StrategyRunner` desde APScheduler, Celery/RQ con Redis o un worker dedicado.
+## Estado distribuido
+
+Redis es opcional y se usa para:
+
+- lease distribuido por símbolo;
+- caché de pullbacks;
+- réplica del estado MT5;
+- pub/sub de eventos WebSocket.
+
+El fallback local conserva la operativa. El modo single-worker continúa por defecto si los schedulers y el worker de jobs siguen dentro del proceso API.

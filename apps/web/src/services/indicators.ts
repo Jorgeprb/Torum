@@ -1,11 +1,9 @@
+import { apiRequest } from "./apiClient";
 import type { NoTradeZone } from "./news";
 import type { ChartDrawingRead } from "./drawings";
 import type { PriceAlertRead } from "./alerts";
 import type { PositionRead } from "./trading";
-import { getAuthToken } from "../stores/authStore";
-import { resolveApiBaseUrl } from "./runtime";
 
-const API_BASE_URL = resolveApiBaseUrl();
 
 export interface IndicatorPoint {
   time: number;
@@ -38,6 +36,15 @@ export interface StrategyPullbackDebug {
   label: string;
   line_width?: number;
   opacity?: number;
+}
+
+
+export interface PullbackOverlayResponse {
+  symbol: string;
+  timeframe: "M5";
+  pullbacks: StrategyPullbackDebug[];
+  cache_hit: boolean;
+  calculated_at: string | null;
 }
 
 export interface AthPriceZone {
@@ -84,41 +91,21 @@ export interface ChartOverlays {
   ath_zones: AthPriceZone[];
 }
 
-interface RequestOptions extends RequestInit {
-  token?: string | null;
-}
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  headers.set("Content-Type", "application/json");
-  const token = options.token ?? getAuthToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `HTTP ${response.status}`);
-  }
-  return (await response.json()) as T;
-}
-
 export function getIndicators(): Promise<IndicatorRead[]> {
-  return request<IndicatorRead[]>("/api/indicators");
+  return apiRequest<IndicatorRead[]>("/api/indicators");
 }
 
 export function registerDefaultIndicators(): Promise<IndicatorRead[]> {
-  return request<IndicatorRead[]>("/api/indicators/register-defaults", { method: "POST" });
+  return apiRequest<IndicatorRead[]>("/api/indicators/register-defaults", { method: "POST" });
 }
 
 export function getIndicatorConfigs(symbol: string, timeframe: string): Promise<IndicatorConfigRead[]> {
   const params = new URLSearchParams({ symbol, timeframe });
-  return request<IndicatorConfigRead[]>(`/api/indicator-configs?${params.toString()}`);
+  return apiRequest<IndicatorConfigRead[]>(`/api/indicator-configs?${params.toString()}`);
 }
 
 export function patchIndicatorConfig(id: number, payload: Partial<IndicatorConfigRead>): Promise<IndicatorConfigRead> {
-  return request<IndicatorConfigRead>(`/api/indicator-configs/${id}`, {
+  return apiRequest<IndicatorConfigRead>(`/api/indicator-configs/${id}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
   });
@@ -126,7 +113,14 @@ export function patchIndicatorConfig(id: number, payload: Partial<IndicatorConfi
 
 export function getChartOverlays(symbol: string, timeframe: string, from: string, to: string): Promise<ChartOverlays> {
   const params = new URLSearchParams({ symbol, timeframe, from, to });
-  return request<ChartOverlays>(`/api/chart/overlays?${params.toString()}`);
+  return apiRequest<ChartOverlays>(`/api/chart/overlays?${params.toString()}`);
+}
+
+export function getTorumV1Pullbacks(symbol: string, options: { force?: boolean; limit?: number } = {}): Promise<PullbackOverlayResponse> {
+  const params = new URLSearchParams({ symbol });
+  if (options.force) params.set("force", "true");
+  if (options.limit) params.set("limit", String(options.limit));
+  return apiRequest<PullbackOverlayResponse>(`/api/strategies/torum-v1/pullbacks?${params.toString()}`);
 }
 
 export function isLineOutput(output: IndicatorOutput): output is IndicatorLineOutput {

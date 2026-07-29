@@ -16,11 +16,8 @@ from app.no_trade_zones.schemas import NoTradeZoneRead
 from app.no_trade_zones.service import NoTradeZoneService
 from app.positions.schemas import PositionRead
 from app.positions.service import PositionService
-from app.candles.models import Candle
-from app.ticks.models import Tick
-from app.strategies.models import StrategyConfig
 from app.strategies.ath import ath_price_zones
-from app.strategies.torum_v1 import TORUM_V1_KEY, pullback_debug_payload
+from app.strategies.pullback_cache import get_cached_pullbacks
 from app.users.models import User
 
 router = APIRouter(prefix="/chart", tags=["chart"])
@@ -91,51 +88,12 @@ def chart_overlays(
     ]
     strategy_debug_pullbacks = []
     if current_user is not None:
-        config = (
-            db.query(StrategyConfig)
-            .filter(
-                StrategyConfig.user_id == current_user.id,
-                StrategyConfig.strategy_key == TORUM_V1_KEY,
-                StrategyConfig.internal_symbol == symbol.upper(),
-                StrategyConfig.enabled.is_(True),
-            )
-            .order_by(StrategyConfig.id)
-            .first()
+        # Pullbacks are cached by the latest M5 candle and strategy params.  The
+        # dedicated endpoint is used by the PB button; returning the cache here
+        # keeps backwards compatibility without recalculating the detector.
+        strategy_debug_pullbacks, _cache_hit, _calculated_at = get_cached_pullbacks(
+            db, user_id=current_user.id, symbol=symbol, force=False, candle_limit=600
         )
-        params = {"pullback_min_pct": 0.0, "pullback_max_count": 10, **(config.params_json if config is not None else {})}
-        if config is not None and bool(params.get("show_pullback_debug", False)) and bool(params.get("pullback_enabled", True)):
-            candles_m5 = list(
-                db.query(Candle)
-                .filter(
-                    Candle.internal_symbol == symbol.upper(),
-                    Candle.timeframe == "M5",
-                    Candle.time >= start,
-                    Candle.time <= end,
-                )
-                .order_by(Candle.time)
-            )
-
-            latest_tick = (
-                db.query(Tick)
-                .filter(Tick.internal_symbol == symbol.upper())
-                .order_by(Tick.time_msc.desc().nullslast(), Tick.time.desc())
-                .first()
-            )
-
-            live_price = None
-            live_time = None
-
-            if latest_tick is not None:
-                live_price = latest_tick.bid or latest_tick.last or latest_tick.ask
-                live_time = latest_tick.time
-
-            strategy_debug_pullbacks = pullback_debug_payload(
-                candles_m5,
-                params,
-                live_price=live_price,
-                live_time=live_time,
-                live_cache_key=f"user:{current_user.id}:{symbol.upper()}:M5:strategy_debug_pullbacks",
-            )
     return ChartOverlaysResponse(
         symbol=symbol.upper(),
         timeframe=timeframe,

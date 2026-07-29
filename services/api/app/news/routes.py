@@ -42,6 +42,8 @@ def patch_news_settings(
     try:
         settings, _regenerated = NewsService(db).update_settings(payload)
     except ValueError as exc:
+        if str(exc).startswith("news_settings_revision_conflict"):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return NewsSettingsRead.model_validate(settings)
 

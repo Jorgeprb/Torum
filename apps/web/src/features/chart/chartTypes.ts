@@ -9,6 +9,8 @@ import type { ChartDrawingCreate, ChartDrawingRead, ChartDrawingUpdate, DrawingT
 export interface MarketChartProps {
   candles: import("../../services/market").Candle[];
   loadingCandles?: boolean;
+  preferredBarSpacing?: number;
+  minimumBarSpacing?: number;
   symbolResetToken?: number;
   hardResetToken?: number;
   noTradeZones?: NoTradeZone[];
@@ -35,6 +37,8 @@ export interface MarketChartProps {
   onCancelPriceAlert?: (alertId: string) => void;
   bidPrice?: number | null;
   askPrice?: number | null;
+  /** Live market price used to update only the current candle imperatively. */
+  livePrice?: number | null;
   showBidLine?: boolean;
   showAskLine?: boolean;
   autoFollowEnabled?: boolean;
@@ -128,6 +132,7 @@ export interface PullbackDebugOverlay {
   y1: number;
   x2: number;
   y2: number;
+  compact?: boolean;
 }
 
 export interface AthPriceZoneOverlay {

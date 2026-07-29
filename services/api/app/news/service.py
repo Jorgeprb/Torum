@@ -32,6 +32,11 @@ DEFAULT_AFFECTED_SYMBOLS = ["XAUUSD", "XAUEUR"]
 DEFAULT_PROVIDER = "FINNHUB"
 DEFAULT_SYNC_INTERVAL_MINUTES = 1440
 DEFAULT_DAYS_AHEAD = 14
+DEFAULT_IMPACT_RULES = {
+    "HIGH": {"enabled": True, "minutes_before": 60, "minutes_after": 60, "action": "BLOCK_BOT"},
+    "MEDIUM": {"enabled": True, "minutes_before": 15, "minutes_after": 15, "action": "WARN"},
+    "LOW": {"enabled": True, "minutes_before": 0, "minutes_after": 0, "action": "DISPLAY"},
+}
 
 
 def _merge_default_affected_symbols(symbols: list[str] | None) -> list[str]:
@@ -54,6 +59,12 @@ def get_global_news_settings(db: Session) -> NewsSettings:
             settings.days_ahead = max(settings.days_ahead, DEFAULT_DAYS_AHEAD)
             settings.provider_enabled = True
             settings.auto_sync_enabled = True
+            changed = True
+        if not settings.impact_rules_json:
+            settings.impact_rules_json = DEFAULT_IMPACT_RULES
+            changed = True
+        if not settings.manual_trade_policy:
+            settings.manual_trade_policy = "WARN"
             changed = True
         affected_symbols = _merge_default_affected_symbols(settings.affected_symbols)
         if affected_symbols != settings.affected_symbols:
@@ -81,6 +92,9 @@ def get_global_news_settings(db: Session) -> NewsSettings:
         auto_sync_enabled=True,
         sync_interval_minutes=DEFAULT_SYNC_INTERVAL_MINUTES,
         days_ahead=DEFAULT_DAYS_AHEAD,
+        impact_rules_json=DEFAULT_IMPACT_RULES,
+        manual_trade_policy="WARN",
+        revision=1,
     )
     db.add(settings)
     db.commit()
@@ -151,6 +165,25 @@ class NewsService:
     def update_settings(self, payload: NewsSettingsUpdate) -> tuple[NewsSettings, int]:
         settings = get_global_news_settings(self.db)
         data = payload.model_dump(exclude_unset=True)
+        expected_revision = data.pop("expected_revision", None)
+        if expected_revision is not None and int(settings.revision or 1) != int(expected_revision):
+            raise ValueError(f"news_settings_revision_conflict:{settings.revision}")
+        if "impact_rules_json" in data:
+            data["impact_rules_json"] = {key.upper(): value.model_dump() if hasattr(value, "model_dump") else value for key, value in data["impact_rules_json"].items()}
+        elif "minutes_before" in data or "minutes_after" in data or "block_trading_during_news" in data:
+            # Backwards-compatible legacy controls: keep the HIGH-impact rule in
+            # sync when callers still edit the old global fields. The visual rule
+            # editor sends impact_rules_json explicitly and is not affected.
+            rules = {key.upper(): dict(value) for key, value in (settings.impact_rules_json or DEFAULT_IMPACT_RULES).items()}
+            high = dict(rules.get("HIGH") or DEFAULT_IMPACT_RULES["HIGH"])
+            if "minutes_before" in data:
+                high["minutes_before"] = int(data["minutes_before"])
+            if "minutes_after" in data:
+                high["minutes_after"] = int(data["minutes_after"])
+            if "block_trading_during_news" in data:
+                high["action"] = "BLOCK_BOT" if data["block_trading_during_news"] else "DISPLAY"
+            rules["HIGH"] = high
+            data["impact_rules_json"] = rules
         if "affected_symbols" in data:
             self._validate_symbols(data["affected_symbols"])
         if "provider" in data:
@@ -161,6 +194,7 @@ class NewsService:
                 data["provider"] = provider
         for field, value in data.items():
             setattr(settings, field, value)
+        settings.revision = int(settings.revision or 1) + 1
         self.db.commit()
         self.db.refresh(settings)
         regenerated = NoTradeZoneService(self.db).regenerate_zones(settings)
@@ -197,6 +231,9 @@ class NewsService:
             last_sync_at=settings.last_sync_at,
             last_sync_status=settings.last_sync_status,
             last_sync_error=settings.last_sync_error,
+            impact_rules_json=settings.impact_rules_json or DEFAULT_IMPACT_RULES,
+            manual_trade_policy=settings.manual_trade_policy or "WARN",
+            revision=int(settings.revision or 1),
             next_event=NewsEventRead.model_validate(next_event) if next_event is not None else None,
             imported_events=imported_events,
             generated_zones=generated_zones,
