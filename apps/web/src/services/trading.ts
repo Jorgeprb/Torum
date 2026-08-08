@@ -3,7 +3,7 @@ import { apiRequest } from "./apiClient";
 
 export type TradingMode = "PAPER" | "DEMO" | "LIVE";
 export type OrderSide = "BUY" | "SELL";
-export type OrderStatus = "CREATED" | "VALIDATING" | "REJECTED" | "SENT" | "EXECUTED" | "FAILED" | "CANCELLED" | "CLOSED";
+export type OrderStatus = "CREATED" | "VALIDATING" | "REJECTED" | "SENT" | "EXECUTED" | "FAILED" | "RECONCILING" | "CANCELLED" | "CLOSED";
 
 export interface TradingSettings {
   id: number;

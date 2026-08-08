@@ -18,8 +18,7 @@ const tools: Array<{ tool: DrawingTool; icon: JSX.Element }> = [
   { tool: "vertical_line", icon: <SeparatorVertical size={16} /> },
   { tool: "trend_line", icon: <TrendingUp size={16} /> },
   { tool: "rectangle", icon: <Square size={16} /> },
-  { tool: "text", icon: <Type size={16} /> },
-  { tool: "manual_zone", icon: <Square size={16} /> }
+  { tool: "text", icon: <Type size={16} /> }
 ];
 
 export function DrawingToolbar({
@@ -41,7 +40,6 @@ export function DrawingToolbar({
           onClick={() => onToolChange(tool)}
         >
           {icon}
-          {tool === "manual_zone" ? <span>Z</span> : null}
         </button>
       ))}
       <button className="icon-tool" title={drawingsVisible ? "Ocultar dibujos" : "Mostrar dibujos"} type="button" onClick={onToggleDrawings}>

@@ -15,8 +15,8 @@ from app.ticks.service import latest_tick_order_by
 from app.trading.schemas import ManualOrderRequest
 from app.trading.lot_sizing import calculate_lot_size
 from app.risk.schemas import RiskDecision
-from app.strategies.ath import get_or_update_symbol_ath, ath_zone_for_price, latest_executable_price, plan_torum_v1_bot_exposure
-from app.strategies.torum_v1 import TorumV1StatusService
+from app.strategies.ath import BotExposurePlan, latest_executable_price, plan_torum_v1_bot_exposure
+from app.strategies.torum_v1 import TorumV1AssetStatus, TorumV1StatusService
 from app.strategies.models import StrategyConfig
 
 
@@ -31,11 +31,12 @@ class RiskManager:
         symbol_mapping: SymbolMapping | None,
         mt5_status: MT5StatusRead,
         price_stale_after_seconds: int,
+        latest_tick_override: Tick | None = None,
     ) -> RiskDecision:
         reasons: list[str] = []
         warnings: list[str] = []
         mode = trading_settings.trading_mode
-        latest_tick = self.latest_tick(order.internal_symbol)
+        latest_tick = latest_tick_override or self.latest_tick(order.internal_symbol)
 
         if trading_settings.is_paused:
             reasons.append("Trading is paused")
@@ -117,6 +118,10 @@ class RiskManager:
         strategy_key: str | None = None,
         exclude_order_id: int | None = None,
         exclude_signal_id: int | None = None,
+        strategy_config: StrategyConfig | None = None,
+        prevalidated_bot_status: TorumV1AssetStatus | None = None,
+        precomputed_exposure_plan: BotExposurePlan | None = None,
+        latest_tick_override: Tick | None = None,
     ) -> RiskDecision:
         decision = self.evaluate(
             order=order,
@@ -124,6 +129,7 @@ class RiskManager:
             symbol_mapping=symbol_mapping,
             mt5_status=mt5_status,
             price_stale_after_seconds=price_stale_after_seconds,
+            latest_tick_override=latest_tick_override,
         )
         reasons = list(decision.reasons)
         warnings = list(decision.warnings)
@@ -138,15 +144,52 @@ class RiskManager:
                 reasons.append("Strategies are disabled")
             if trading_settings.trading_mode == "LIVE" and not getattr(strategy_settings, "strategy_live_enabled", False):
                 reasons.append("Strategy LIVE execution is disabled")
-        status_service = TorumV1StatusService(self.db)
-        bot_block_reasons = status_service.bot_block_reasons(order.internal_symbol, user_id)
-        reasons.extend(bot_block_reasons)
-        try:
-            bot_status = status_service.status_for_user(user_id).assets.get(order.internal_symbol.upper())
-        except Exception:  # noqa: BLE001 - risk result remains authoritative
-            bot_status = None
+        if strategy_key is None:
+            # Backward-compatible generic strategy validation used by existing
+            # callers/tests. The optimized Torum runner always supplies its
+            # exact config and prevalidated status, so this fallback is off the
+            # critical entry path.
+            bot_block_reasons = TorumV1StatusService(self.db).bot_block_reasons(
+                order.internal_symbol, user_id
+            )
+            reasons.extend(bot_block_reasons)
+
         if strategy_key == "torum_v1":
-            latest_tick = self.latest_tick(order.internal_symbol)
+            status_service = TorumV1StatusService(self.db)
+            if prevalidated_bot_status is not None:
+                bot_status = prevalidated_bot_status
+            else:
+                if strategy_config is None:
+                    strategy_config = self.db.scalar(
+                        select(StrategyConfig)
+                        .where(
+                            StrategyConfig.strategy_key == "torum_v1",
+                            StrategyConfig.user_id == user_id,
+                            StrategyConfig.internal_symbol == order.internal_symbol.upper(),
+                            StrategyConfig.enabled.is_(True),
+                        )
+                        .order_by(StrategyConfig.revision.desc(), StrategyConfig.id.desc())
+                        .limit(1)
+                    )
+                if strategy_config is not None:
+                    bot_status = status_service.asset_status(
+                        order.internal_symbol.upper(),
+                        strategy_config,
+                        bool(getattr(strategy_settings, "strategies_enabled", False)),
+                        datetime.now(UTC),
+                    )
+            if bot_status is None:
+                bot_block_reasons.append(f"BOT sin configuración/estado válido en {order.internal_symbol.upper()}")
+            elif bot_status.status != "UNLOCKED":
+                if bot_status.blocked_by_news:
+                    bot_block_reasons.append(f"BOT bloqueado por noticia activa en {order.internal_symbol.upper()}")
+                else:
+                    bot_block_reasons.append(
+                        f"BOT bloqueado por Torum V1 en {order.internal_symbol.upper()}: {bot_status.reason}"
+                    )
+            reasons.extend(bot_block_reasons)
+
+            latest_tick = latest_tick_override or self.latest_tick(order.internal_symbol)
             current_price = latest_executable_price(latest_tick, order.side)
             balance = getattr(getattr(mt5_status, "account", None), "balance", None)
             base_lot = calculate_lot_size(
@@ -157,15 +200,20 @@ class RiskManager:
                 enabled=getattr(trading_settings, "lot_per_equity_enabled", True),
             ).base_lot
             desired_multiplier = max(1, int(round(order.volume / base_lot))) if base_lot > 0 else 1
-            strategy_config = self.db.scalar(
-                select(StrategyConfig).where(
-                    StrategyConfig.strategy_key == "torum_v1",
-                    StrategyConfig.user_id == user_id,
-                    StrategyConfig.internal_symbol == order.internal_symbol.upper(),
-                ).order_by(StrategyConfig.enabled.desc(), StrategyConfig.id)
-            )
+            if strategy_config is None:
+                strategy_config = self.db.scalar(
+                    select(StrategyConfig)
+                    .where(
+                        StrategyConfig.strategy_key == "torum_v1",
+                        StrategyConfig.user_id == user_id,
+                        StrategyConfig.internal_symbol == order.internal_symbol.upper(),
+                        StrategyConfig.enabled.is_(True),
+                    )
+                    .order_by(StrategyConfig.revision.desc(), StrategyConfig.id.desc())
+                    .limit(1)
+                )
             strategy_params = dict(strategy_config.params_json or {}) if strategy_config is not None else {}
-            plan = plan_torum_v1_bot_exposure(
+            plan = precomputed_exposure_plan or plan_torum_v1_bot_exposure(
                 self.db,
                 symbol=order.internal_symbol,
                 user_id=user_id,
@@ -177,17 +225,14 @@ class RiskManager:
                 strategy_params=strategy_params,
                 exclude_order_id=exclude_order_id,
                 exclude_signal_id=exclude_signal_id,
+                account_login=getattr(getattr(mt5_status, "account", None), "login", None),
+                account_server=getattr(getattr(mt5_status, "account", None), "server", None),
             )
             exposure_plan = asdict(plan)
             if not plan.allowed and plan.reason == "ath_red_zone":
                 reasons.append(f"BOT bloqueado por zona ATH roja en {order.internal_symbol}")
             elif not plan.allowed:
                 reasons.append(f"BOT bloqueado por riesgo ATH/capital: {plan.reason}")
-            else:
-                ath = get_or_update_symbol_ath(self.db, order.internal_symbol)
-                zone = ath_zone_for_price(ath, current_price)
-                if zone is not None and zone.max_lot_equivalents == 0:
-                    reasons.append(f"BOT bloqueado por zona ATH roja en {order.internal_symbol}")
         final_decision = RiskDecision(allowed=not reasons, reasons=reasons, warnings=warnings)
         trace_event(
             "risk_manager",

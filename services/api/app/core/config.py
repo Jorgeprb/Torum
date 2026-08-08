@@ -38,7 +38,16 @@ class Settings(BaseSettings):
     )
     internal_auth_required: bool = True
     mt5_missing_position_confirmations: int = 3
+    mt5_order_request_timeout_seconds: float = 3.0
     strategy_run_on_candle_close_only: bool = True
+    torum_reservation_ttl_seconds: int = 120
+    torum_ambiguous_reservation_ttl_seconds: int = 86_400
+    torum_reconciliation_grace_seconds: int = 20
+    torum_reconciliation_absent_syncs: int = 3
+    torum_max_entry_delay_seconds: float = 60.0
+    strategy_symbol_lock_timeout_seconds: float = 1.0
+    strategy_pipeline_warn_ms: float = 1000.0
+    strategy_pipeline_hard_timeout_seconds: float = 4.0
     risk_recompute_debounce_seconds: float = 0.5
     risk_use_mt5_profit_calibration: bool = True
     risk_mt5_calibration_timeout_seconds: float = 2.0

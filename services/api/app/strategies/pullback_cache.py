@@ -20,6 +20,7 @@ from app.ticks.models import Tick
 @dataclass(slots=True)
 class _CacheEntry:
     candle_time: datetime | None
+    latest_tick_time_msc: int | None
     params_hash: str
     payload: list[dict[str, Any]]
     created_at: datetime
@@ -37,6 +38,7 @@ def _distributed_key(user_id: int, symbol: str) -> str:
 def _entry_to_json(entry: _CacheEntry) -> dict[str, Any]:
     return {
         "candle_time": entry.candle_time.isoformat() if entry.candle_time else None,
+        "latest_tick_time_msc": entry.latest_tick_time_msc,
         "params_hash": entry.params_hash,
         "payload": entry.payload,
         "created_at": entry.created_at.isoformat(),
@@ -59,7 +61,15 @@ def _entry_from_json(value: Any) -> _CacheEntry | None:
             candle_time = candle_time.replace(tzinfo=UTC)
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=UTC)
-        return _CacheEntry(candle_time, digest, [dict(item) for item in payload if isinstance(item, dict)], created_at)
+        tick_time_raw = value.get("latest_tick_time_msc")
+        tick_time_msc = int(tick_time_raw) if tick_time_raw is not None else None
+        return _CacheEntry(
+            candle_time,
+            tick_time_msc,
+            digest,
+            [dict(item) for item in payload if isinstance(item, dict)],
+            created_at,
+        )
     except (TypeError, ValueError):
         return None
 
@@ -105,6 +115,20 @@ def get_cached_pullbacks(
     digest = _params_hash(params)
     cache_key = (user_id, normalized_symbol)
 
+    # The current pullback low can change many times inside the same M5 candle.
+    # Include the latest tick identity in the cache version so an explicit
+    # refresh cannot return a stale body/close-based low and overwrite the wick
+    # low already seen by the live chart.
+    latest_tick = db.scalar(
+        select(Tick)
+        .where(Tick.internal_symbol == normalized_symbol)
+        .order_by(Tick.time_msc.desc().nullslast(), Tick.time.desc())
+        .limit(1)
+    )
+    latest_tick_time_msc = None
+    if latest_tick is not None:
+        latest_tick_time_msc = latest_tick.time_msc or int(latest_tick.time.timestamp() * 1000)
+
     with _LOCK:
         cached = _CACHE.get(cache_key)
     if not force and cached is None:
@@ -116,16 +140,10 @@ def get_cached_pullbacks(
         not force
         and cached is not None
         and cached.candle_time == latest_candle_time
+        and cached.latest_tick_time_msc == latest_tick_time_msc
         and cached.params_hash == digest
     ):
         return [dict(item) for item in cached.payload], True, cached.created_at
-
-    latest_tick = db.scalar(
-        select(Tick)
-        .where(Tick.internal_symbol == normalized_symbol)
-        .order_by(Tick.time_msc.desc().nullslast(), Tick.time.desc())
-        .limit(1)
-    )
     live_price = None
     live_time = None
     if latest_tick is not None:
@@ -140,7 +158,7 @@ def get_cached_pullbacks(
         live_cache_key=f"user:{user_id}:{normalized_symbol}:M5:pullbacks",
     )
     now = datetime.now(UTC)
-    entry = _CacheEntry(latest_candle_time, digest, [dict(item) for item in payload], now)
+    entry = _CacheEntry(latest_candle_time, latest_tick_time_msc, digest, [dict(item) for item in payload], now)
     with _LOCK:
         _CACHE[cache_key] = entry
     distributed_state.set_json(

@@ -88,11 +88,17 @@ class BackendClient:
         positions: list[dict[str, Any]],
         account: dict[str, Any] | None,
         closed_deals: list[dict[str, Any]] | None = None,
+        capital_flows: list[dict[str, Any]] | None = None,
+        *,
+        deals_checked: bool = False,
     ) -> dict[str, Any] | None:
         try:
             payload: dict[str, Any] = {"positions": positions}
             if closed_deals is not None:
                 payload["closed_deals"] = closed_deals
+            if capital_flows is not None:
+                payload["capital_flows"] = capital_flows
+            payload["deals_checked"] = bool(deals_checked)
             if account is not None:
                 payload["account"] = account
             return self._post_with_retries(self.settings.torum_mt5_positions_sync_endpoint, payload)

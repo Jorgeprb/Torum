@@ -231,6 +231,16 @@ def _dispatch_job(db: Session, job: TradeJob) -> None:
     if job.job_type == "NOTIFY_ORDER":
         _notify_order(db, job.payload_json)
         return
+    if job.job_type == "RUN_TORUM_STRATEGY":
+        from app.strategies.auto_runner import run_torum_v1_for_symbols
+
+        symbols = job.payload_json.get("symbols")
+        normalized = [str(symbol).upper() for symbol in symbols] if isinstance(symbols, list) else []
+        if not normalized:
+            raise RuntimeError("missing_symbols_for_torum_strategy_job")
+        if not run_torum_v1_for_symbols(normalized):
+            raise RuntimeError("torum_strategy_batch_incomplete")
+        return
     raise RuntimeError(f"Unknown trade job type: {job.job_type}")
 
 

@@ -13,6 +13,7 @@ interface ShellProps {
 
 const viewPaths: Record<MobileView, string> = {
   chart: "/chart",
+  performance: "/performance",
   history: "/history",
   news: "/news/calendar",
   strategies: "/strategy/torum",
@@ -25,6 +26,7 @@ function viewFromHash(): MobileView {
   const path = window.location.hash.replace(/^#/, "");
   if (path.startsWith("/strategy/simulator")) return "simulator";
   if (path.startsWith("/strategy")) return "strategies";
+  if (path.startsWith("/performance")) return "performance";
   if (path.startsWith("/history")) return "history";
   if (path.startsWith("/news")) return "news";
   if (path.startsWith("/indicators")) return "indicators";

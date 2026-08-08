@@ -4,6 +4,7 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 
 from sqlalchemy import func, select
@@ -36,6 +37,7 @@ from app.strategies.torum_v1 import (
     operation_zones_from_drawings,
     should_buy_torum_v1,
     support_zones_from_drawings,
+    update_torum_entry_price_ladder,
 )
 from app.strategies.torum_v1_config import TorumV1Params
 from app.symbols.models import SymbolMapping
@@ -128,6 +130,7 @@ class TorumV1BacktestEngine:
             "last_executed_entry_candle_time",
             "last_executed_entry_order_id",
             "executed_entry_cycle_boundaries",
+            "executed_entry_price_ladder",
         ):
             params.pop(runtime_key, None)
         params["use_news"] = bool(request.use_news and params.get("use_news", True))
@@ -520,9 +523,15 @@ class TorumV1BacktestEngine:
                                     ath_zone=ath_zone,
                                     active_from_index=entry_index if request.entry_model == "NEXT_OPEN" else index + 1,
                                 )
+                                prior_open_trades = list(open_trades)
                                 open_trades.append(trade)
                                 all_trades.append(trade)
-                                _record_backtest_entry_cycle(params, decision.metadata)
+                                _record_backtest_entry_cycle(
+                                    params,
+                                    decision.metadata,
+                                    entry_price=entry_price,
+                                    prior_open_trades=prior_open_trades,
+                                )
                                 self._debug(
                                     debug_events,
                                     request,
@@ -1330,6 +1339,9 @@ def _stage_for_reason(reason: str) -> str:
 def _record_backtest_entry_cycle(
     params: dict[str, Any],
     metadata: dict[str, Any],
+    *,
+    entry_price: float | None = None,
+    prior_open_trades: list[_OpenTrade] | None = None,
 ) -> None:
     confirmation_time = _int_or_none(metadata.get("confirmation_candle_time"))
     if confirmation_time is None or confirmation_time <= 0:
@@ -1345,6 +1357,22 @@ def _record_backtest_entry_cycle(
         }
     )[-100:]
     params["last_executed_entry_candle_time"] = confirmation_time
+    prior = list(prior_open_trades or [])
+    params["executed_entry_price_ladder"] = update_torum_entry_price_ladder(
+        params,
+        executed_price=entry_price,
+        order_id=None,
+        confirmation_candle_time=confirmation_time,
+        prior_open_positions=[
+            SimpleNamespace(
+                open_price=trade.entry_price,
+                order_id=None,
+                opened_at=trade.entry_time,
+            )
+            for trade in prior
+        ],
+        reset_campaign=not prior,
+    )
 
 def _reason_text(reason: str) -> str:
     labels = {
@@ -1356,6 +1384,7 @@ def _reason_text(reason: str) -> str:
         "missing_previous_candle": "Falta la vela H2/H3 anterior",
         "missing_unlock_day": "No hay cobertura histórica para el desbloqueo",
         "bullish_closed_candle": "Desbloqueado por vela alcista",
+        "doji_closed_candle": "Desbloqueado por vela doji",
         "held_previous_low": "Desbloqueado: dos bajistas sin perder el mínimo",
         "current_candle_not_bearish": "La vela de desbloqueo no cumple",
         "previous_candle_not_bearish": "La vela anterior no es bajista",
@@ -1367,6 +1396,7 @@ def _reason_text(reason: str) -> str:
         "pullback_low_outside_operation_zone": "El mínimo del pullback está fuera de la zona",
         "confirmation_time_outside_operation_zone": "La confirmación quedó fuera del intervalo temporal del rectángulo operativo",
         "confirmation_price_outside_operation_zone": "La confirmación o el precio de entrada está fuera del rango vertical del rectángulo operativo",
+        "third_entry_price_too_close": "Hay dos posiciones abiertas demasiado próximas y la nueva entrada sigue en la misma zona de precio",
         "entry_time_outside_operation_zone": "El momento real simulado de entrada quedó fuera del intervalo temporal del rectángulo",
         "entry_price_outside_operation_zone": "El precio real simulado de entrada quedó fuera del rango vertical del rectángulo",
         "duplicate_signal_pullback": "El pullback ya fue utilizado",

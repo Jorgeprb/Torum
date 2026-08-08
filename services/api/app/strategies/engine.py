@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from time import perf_counter
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -6,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.candles.models import Candle
 from app.core.config import get_settings
 from app.core.decision_log import trace_event
+from app.market_data.chart_clock import resolve_market_clock
 from app.drawings.models import ChartDrawing
 from app.indicators.engine import IndicatorEngine
 from app.no_trade_zones.service import NoTradeZoneService
@@ -22,16 +24,31 @@ class StrategyContextBuilder:
         self.db = db
 
     def build(self, config: StrategyConfig, *, limit: int = 300) -> StrategyContext:
+        started = perf_counter()
         params = config.params_json or {}
         entry_timeframe = str(params.get("entry_timeframe") or "M5").upper()
         candle_timeframe = entry_timeframe if config.strategy_key == "torum_v1" else config.timeframe
         candles = self._load_candles(config.internal_symbol, candle_timeframe, limit)
         latest_tick = self._latest_tick(config.internal_symbol)
-        indicators = self._load_indicators()
-        no_trade_zones = NoTradeZoneService(self.db).get_active_zones(config.internal_symbol)
+        real_now = datetime.now(UTC)
+        if config.strategy_key == "torum_v1":
+            now, market_clock_domain = resolve_market_clock(
+                real_now,
+                latest_tick.time if latest_tick is not None else None,
+            )
+        else:
+            now, market_clock_domain = real_now, "UTC"
+        # Torum V1 performs DXY/news checks through dedicated cached services.
+        # Loading 300 D1 candles and recalculating SMA/no-trade zones here put
+        # irrelevant database work on the sub-second entry path.
+        if config.strategy_key == "torum_v1":
+            indicators: dict[str, object] = {}
+            no_trade_zones: list[object] = []
+        else:
+            indicators = self._load_indicators()
+            no_trade_zones = NoTradeZoneService(self.db).get_active_zones(config.internal_symbol)
         manual_zones = self._manual_zones(config)
         open_positions = self._open_positions(config)
-        now = datetime.now(UTC)
         context = StrategyContext(
             strategy_key=config.strategy_key,
             config=config,
@@ -60,6 +77,8 @@ class StrategyContextBuilder:
             config_timeframe=config.timeframe,
             candle_timeframe=candle_timeframe,
             now=now,
+            real_now_utc=real_now,
+            market_clock_domain=market_clock_domain,
             candle_count=len(candles),
             first_candle_time=candles[0].time if candles else None,
             last_candle_time=candles[-1].time if candles else None,
@@ -106,6 +125,7 @@ class StrategyContextBuilder:
                 }
                 for zone in no_trade_zones
             ],
+            build_duration_ms=round((perf_counter() - started) * 1000.0, 3),
             open_positions=[
                 {
                     "id": position.id,
@@ -164,7 +184,26 @@ class StrategyContextBuilder:
         )
 
     def _open_positions(self, config: StrategyConfig) -> list[Position]:
-        stmt = select(Position).where(Position.internal_symbol == config.internal_symbol, Position.status == "OPEN")
+        stmt = select(Position).where(
+            Position.internal_symbol == config.internal_symbol,
+            Position.status == "OPEN",
+            Position.closed_at.is_(None),
+            Position.close_price.is_(None),
+            Position.mode == config.mode,
+        )
+        if config.user_id is not None:
+            stmt = stmt.where(Position.user_id == config.user_id)
         if config.strategy_key == "torum_v1":
-            stmt = stmt.join(Order, Position.order_id == Order.id).where(Order.source == "STRATEGY", Order.strategy_key == "torum_v1")
-        return list(self.db.scalars(stmt))
+            stmt = stmt.join(Order, Position.order_id == Order.id).where(
+                Order.source == "STRATEGY",
+                Order.strategy_key == "torum_v1",
+            )
+
+        positions = list(self.db.scalars(stmt))
+        return [
+            position
+            for position in positions
+            if position.mode == "PAPER"
+            or position.mt5_position_ticket is not None
+            or position.mt5_position_identifier is not None
+        ]

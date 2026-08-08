@@ -191,6 +191,7 @@ def test_order_executor_logs_last_error_when_order_send_returns_none() -> None:
     assert response.raw["last_error_code"] == 1
     assert response.raw["last_error_message"] == "fake mt5 error"
     assert response.raw["request"]["symbol"] == "XAUUSD"
+    assert len(client.mt5.sent_requests) == 1
 
 
 def test_order_executor_attempts_order_send_when_terminal_reports_trading_disabled() -> None:
@@ -212,6 +213,16 @@ def test_order_executor_sanitizes_long_mt5_comment() -> None:
     comment = str(client.mt5.sent_requests[0]["comment"])
     assert len(comment) <= 20
     assert comment.isascii()
+
+
+def test_order_executor_preserves_complete_compact_torum_comment() -> None:
+    client = FakeMT5Client()
+    order = _order("BUY").model_copy(update={"comment": "Torum s123456789"})
+
+    response = OrderExecutor(_settings(enabled=True), client).execute_market_order(order)
+
+    assert response.ok is True
+    assert client.mt5.sent_requests[0]["comment"] == "Torum s123456789"
 
 
 def test_order_executor_modifies_position_tp_with_sltp_action() -> None:
@@ -249,3 +260,48 @@ def test_order_executor_blocks_live_when_real_trading_disabled() -> None:
 
     assert response.ok is False
     assert response.comment == "Real trading is disabled in bridge config"
+
+
+def test_order_executor_treats_partial_fill_as_execution_to_be_reconciled() -> None:
+    client = FakeMT5Client()
+    client.mt5.next_result = SimpleNamespace(
+        retcode=10010,
+        comment="done partial",
+        order=123,
+        deal=456,
+        position=789,
+        price=2325.2,
+        volume=0.01,
+    )
+    order = _order("BUY").model_copy(update={"volume": 0.03})
+
+    response = OrderExecutor(_settings(enabled=True), client).execute_market_order(order)
+
+    assert response.ok is True
+    assert response.retcode == 10010
+    assert response.volume == 0.01
+
+
+def test_order_executor_retries_only_after_explicit_invalid_filling_mode() -> None:
+    client = FakeMT5Client()
+    results = [
+        SimpleNamespace(
+            retcode=10030, comment="unsupported filling mode", order=0, deal=0,
+            position=0, price=2325.2, volume=0.0,
+        ),
+        SimpleNamespace(
+            retcode=10009, comment="done", order=123, deal=456,
+            position=789, price=2325.2, volume=0.01,
+        ),
+    ]
+
+    def sequenced_order_send(request):  # type: ignore[no-untyped-def]
+        client.mt5.sent_requests.append(request)
+        return results.pop(0)
+
+    client.mt5.order_send = sequenced_order_send  # type: ignore[method-assign]
+    response = OrderExecutor(_settings(enabled=True), client).execute_market_order(_order("BUY"))
+
+    assert response.ok is True
+    assert len(client.mt5.sent_requests) == 2
+    assert client.mt5.sent_requests[0]["type_filling"] != client.mt5.sent_requests[1]["type_filling"]

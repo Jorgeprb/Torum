@@ -308,18 +308,42 @@ class TorumV1Simulator:
 
         supports = support_zones_from_drawings(context.manual_zones)
         matched_support = None
-        if last_pullback is not None:
-            candidates = [item for item in supports if item.enabled and item.lower_price <= last_pullback.pullback_low <= item.upper_price]
+        if executable_price is not None:
+            candidates = [
+                item
+                for item in supports
+                if item.enabled and item.lower_price <= executable_price <= item.upper_price
+            ]
             if candidates:
-                matched_support = sorted(candidates, key=lambda item: (-item.level, abs(item.price - last_pullback.pullback_low)))[0]
-        multiplier = int(params.get(f"support_s{matched_support.level}_multiplier", 1)) if matched_support else 1
+                matched_support = sorted(
+                    candidates,
+                    key=lambda item: (-item.level, abs(item.price - executable_price)),
+                )[0]
+        multiplier = (
+            int(params.get(f"support_s{matched_support.level}_multiplier", 1))
+            if matched_support
+            else matching_zone.default_multiplier
+            if matching_zone is not None
+            else 1
+        )
+        sizing_summary = (
+            f"S{matched_support.level}, objetivo x{multiplier}"
+            if matched_support
+            else "Zona Torum x2: entrada doble por defecto"
+            if matching_zone is not None and matching_zone.default_multiplier == 2
+            else "Sin soporte: entrada simple"
+        )
         steps.append(
             _step(
                 "support",
-                "Soporte S1/S2/S3",
-                "PASS" if matched_support else "SKIP",
-                f"S{matched_support.level}, objetivo x{multiplier}" if matched_support else "Sin soporte: entrada simple",
-                actual=matched_support.drawing_id if matched_support else None,
+                "Soporte y lotaje base",
+                "PASS" if matched_support or multiplier == 2 else "SKIP",
+                sizing_summary,
+                actual={
+                    "support_zone_id": matched_support.drawing_id if matched_support else None,
+                    "operation_zone_id": matching_zone.drawing_id if matching_zone else None,
+                    "multiplier": multiplier,
+                },
                 required=None,
             )
         )
@@ -418,6 +442,7 @@ class TorumV1Simulator:
             "last_executed_entry_candle_time",
             "last_executed_entry_order_id",
             "executed_entry_cycle_boundaries",
+            "executed_entry_price_ladder",
         ):
             params.pop(runtime_key, None)
         context = StrategyContextBuilder(self.db).build(config, limit=candle_limit)
@@ -600,6 +625,7 @@ def _reason_text(reason: str) -> str:
         "missing_current_candle": "Falta la vela actual",
         "missing_previous_candle": "Falta la vela anterior",
         "bullish_closed_candle": "Desbloqueado por vela alcista",
+        "doji_closed_candle": "Desbloqueado por vela doji",
         "held_previous_low": "Desbloqueado: dos bajistas sin perder el mínimo",
         "waiting_bullish_confirmation": "Esperando vela alcista M5",
         "missing_pullback": "Esperando pullback válido",
@@ -608,6 +634,7 @@ def _reason_text(reason: str) -> str:
         "pullback_low_outside_operation_zone": "El mínimo del pullback está fuera de la zona",
         "confirmation_time_outside_operation_zone": "La confirmación quedó fuera del intervalo temporal del rectángulo operativo",
         "confirmation_price_outside_operation_zone": "La confirmación o el precio de entrada está fuera del rango vertical del rectángulo operativo",
+        "third_entry_price_too_close": "Hay dos posiciones abiertas demasiado próximas y la nueva entrada sigue en la misma zona de precio",
         "usd_strength_strong": "Dólar fuerte: no se permite operar",
         "dxy_above_sma30": "DXY sobre SMA: dólar fuerte",
         "dxy_below_sma30": "DXY bajo SMA: dólar débil",

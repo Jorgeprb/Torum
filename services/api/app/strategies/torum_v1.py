@@ -57,7 +57,9 @@ DEFAULT_TORUM_V1_PARAMS: dict[str, object] = {
     "require_zone": True,
     "operation_zone_allow_confirmation_price_outside": False,
     "one_position_per_symbol": False,
-    "ath_green_prefer_x2_entries": True,
+    "third_entry_spacing_enabled": True,
+    "third_entry_min_distance_pct": 0.20,
+    "ath_green_prefer_x2_entries": False,
     "usd_strength_filter_enabled": True,
     "usd_strength_apply_to_symbols": ["XAUUSD", "XAUEUR"],
     "usd_strength_mode": "only_operate_when_weak",
@@ -118,6 +120,7 @@ class TorumV1OperationZone:
     price_min: float
     price_max: float
     direction: str = "BUY"
+    default_multiplier: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -605,7 +608,7 @@ def is_bullish_confirmation(candle: object, *, accept_doji_as_bullish: bool = Fa
 def operation_zones_from_drawings(drawings: list[ChartDrawing]) -> list[TorumV1OperationZone]:
     zones: list[TorumV1OperationZone] = []
     for drawing in drawings:
-        if drawing.drawing_type not in {"rectangle", "manual_zone"}:
+        if drawing.drawing_type != "rectangle":
             continue
         payload = drawing.payload_json or {}
         metadata = drawing.metadata_json or {}
@@ -766,6 +769,212 @@ def _executed_entry_cycle_boundaries(params: dict[str, Any]) -> list[int]:
     return sorted(boundaries)
 
 
+def torum_entry_price_ladder(
+    params: dict[str, Any],
+    open_positions: list[object] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the persisted entry ladder, enriched with currently open trades.
+
+    The ladder is intentionally stored in ``StrategyConfig.params_json``.  It
+    survives API/MT5 restarts and also remembers a fast TP that closed before
+    the next setup while another position from the same accumulation campaign
+    remains open.  Open positions are merged as a recovery path for configs
+    created before the ladder existed or for an execution reconciled after an
+    ambiguous bridge response.
+    """
+
+    raw_entries = params.get("executed_entry_price_ladder")
+    entries: list[dict[str, Any]] = []
+    if isinstance(raw_entries, list):
+        for raw in raw_entries:
+            normalized = _normalize_entry_ladder_item(raw)
+            if normalized is not None:
+                entries.append(normalized)
+
+    for position in open_positions or []:
+        price = _positive_float_or_none(getattr(position, "open_price", None))
+        if price is None:
+            continue
+        opened_at = getattr(position, "opened_at", None)
+        opened_at_int = int(_as_utc(opened_at).timestamp()) if isinstance(opened_at, datetime) else None
+        entries.append(
+            {
+                "order_id": _positive_int_or_none(getattr(position, "order_id", None)),
+                "confirmation_candle_time": opened_at_int,
+                "executed_price": price,
+            }
+        )
+
+    return _deduplicate_entry_ladder(entries)
+
+
+def update_torum_entry_price_ladder(
+    params: dict[str, Any],
+    *,
+    executed_price: float | None,
+    order_id: int | None,
+    confirmation_candle_time: int | None,
+    prior_open_positions: list[object] | None = None,
+    reset_campaign: bool = False,
+) -> list[dict[str, Any]]:
+    """Build the next persisted ladder after a confirmed Torum execution.
+
+    ``reset_campaign`` must be true when no Torum position was open before the
+    new order.  When a prior position exists, its broker open price is merged
+    before appending the new execution.  This backfills the first rung when the
+    feature is deployed during an already-open campaign.
+    """
+
+    entries: list[dict[str, Any]] = [] if reset_campaign else torum_entry_price_ladder(params)
+    if not reset_campaign:
+        entries = torum_entry_price_ladder(
+            {**params, "executed_entry_price_ladder": entries},
+            prior_open_positions,
+        )
+
+    price = _positive_float_or_none(executed_price)
+    if price is not None:
+        entries.append(
+            {
+                "order_id": _positive_int_or_none(order_id),
+                "confirmation_candle_time": _positive_int_or_none(confirmation_candle_time),
+                "executed_price": price,
+            }
+        )
+    return _deduplicate_entry_ladder(entries)[-20:]
+
+
+def _third_entry_spacing_check(
+    *,
+    params: dict[str, Any],
+    open_positions: list[object],
+    executable_price: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Avoid concentrating three simultaneous entries in the same price area.
+
+    Only *currently open* Torum positions participate in this guard. Historical
+    entries and positions already closed by TP must never reserve capacity. The
+    guard is applied only when at least two live entries are close to each other;
+    if either one closes, the next valid setup is immediately eligible again.
+    """
+
+    enabled = _bool(params.get("third_entry_spacing_enabled"), True)
+    required_pct = _nonnegative_float_param(params.get("third_entry_min_distance_pct"), 0.20)
+    open_prices = sorted(
+        price
+        for position in open_positions
+        if (price := _open_position_entry_price(position)) is not None
+    )
+    metadata: dict[str, Any] = {
+        "third_entry_spacing_enabled": enabled,
+        "third_entry_min_distance_pct": required_pct,
+        "third_entry_open_position_count": len(open_prices),
+        "third_entry_open_prices": open_prices,
+        # Retain the old diagnostic keys for log/backward compatibility while
+        # making it explicit that only live positions are counted now.
+        "entry_ladder_count": len(open_prices),
+        "entry_ladder_prices": open_prices,
+    }
+
+    if not enabled or required_pct <= 0 or len(open_prices) < 2:
+        metadata["third_entry_spacing_applied"] = False
+        return True, metadata
+
+    close_pairs: list[tuple[float, float, float]] = []
+    for index, first in enumerate(open_prices[:-1]):
+        for second in open_prices[index + 1:]:
+            reference = max(first, second)
+            distance_pct = abs(second - first) / reference * 100.0 if reference > 0 else float("inf")
+            if distance_pct <= required_pct + 1e-12:
+                close_pairs.append((distance_pct, first, second))
+
+    if not close_pairs:
+        metadata.update(
+            {
+                "third_entry_spacing_applied": False,
+                "third_entry_existing_pair_close": False,
+                "third_entry_spacing_allowed": True,
+            }
+        )
+        return True, metadata
+
+    pair_distance_pct, first_price, second_price = min(close_pairs, key=lambda item: item[0])
+    lowest_previous = min(first_price, second_price)
+    candidate = float(executable_price)
+    actual_drop_pct = (
+        (lowest_previous - candidate) / lowest_previous * 100.0
+        if lowest_previous > 0
+        else 0.0
+    )
+    required_max_price = lowest_previous * (1.0 - required_pct / 100.0)
+    allowed = candidate <= required_max_price + max(1e-9, abs(required_max_price) * 1e-12)
+    metadata.update(
+        {
+            "third_entry_spacing_applied": True,
+            "third_entry_existing_pair_close": True,
+            "third_entry_close_pair_prices": [first_price, second_price],
+            "third_entry_close_pair_distance_pct": pair_distance_pct,
+            "third_entry_reference_price": lowest_previous,
+            "third_entry_candidate_price": candidate,
+            "third_entry_actual_distance_pct": actual_drop_pct,
+            "third_entry_required_max_price": required_max_price,
+            "third_entry_spacing_allowed": allowed,
+        }
+    )
+    return allowed, metadata
+
+
+def _open_position_entry_price(position: object) -> float | None:
+    """Return the live entry price for Position and backtest trade objects."""
+
+    for field_name in ("open_price", "entry_price"):
+        price = _positive_float_or_none(getattr(position, field_name, None))
+        if price is not None:
+            return price
+    return None
+
+
+def _normalize_entry_ladder_item(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    price = _positive_float_or_none(raw.get("executed_price", raw.get("price")))
+    if price is None:
+        return None
+    return {
+        "order_id": _positive_int_or_none(raw.get("order_id")),
+        "confirmation_candle_time": _positive_int_or_none(
+            raw.get("confirmation_candle_time", raw.get("time"))
+        ),
+        "executed_price": price,
+    }
+
+
+def _deduplicate_entry_ladder(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[tuple[object, ...], dict[str, Any]] = {}
+    for raw in entries:
+        item = _normalize_entry_ladder_item(raw)
+        if item is None:
+            continue
+        order_id = item.get("order_id")
+        confirmation_time = item.get("confirmation_candle_time")
+        key: tuple[object, ...]
+        if order_id is not None:
+            key = ("order", order_id)
+        elif confirmation_time is not None:
+            key = ("confirmation", confirmation_time, round(float(item["executed_price"]), 8))
+        else:
+            key = ("price", round(float(item["executed_price"]), 8))
+        by_key[key] = item
+    return sorted(
+        by_key.values(),
+        key=lambda item: (
+            int(item.get("confirmation_candle_time") or 0),
+            int(item.get("order_id") or 0),
+            float(item["executed_price"]),
+        ),
+    )
+
+
 def _current_pullback_cycle_candles(
     candles: list[object],
     params: dict[str, Any],
@@ -845,7 +1054,11 @@ def should_buy_torum_v1(
     if not _bool(params.get("enabled"), True):
         return TorumV1BuyDecision(False, "strategy_disabled")
 
-    if _bool(params.get("one_position_per_symbol"), True) and open_positions:
+    # Torum supports accumulating up to the configured equivalent-position
+    # capacity.  Missing/legacy configuration must therefore default to
+    # allowing another setup instead of silently restoring the old
+    # one-position guard.
+    if _bool(params.get("one_position_per_symbol"), False) and open_positions:
         return TorumV1BuyDecision(False, "open_position_exists")
 
     checked_at = _as_utc(now or datetime.now(UTC))
@@ -1156,6 +1369,7 @@ def should_buy_torum_v1(
         matching_support.level if matching_support is not None else None,
         open_positions or [],
         params=params,
+        zone_default_multiplier=matching_zone.default_multiplier if matching_zone is not None else 1,
     )
 
     confirmation_time_inside_zone = confirmation_time_matching_zone is not None
@@ -1196,9 +1410,11 @@ def should_buy_torum_v1(
         "pullback_entry_min_pct": entry_threshold,
         "pullback_entry_recovery_pct": entry_recovery_pct,
         "operation_zone_id": matching_zone.drawing_id if matching_zone else None,
+        "operation_zone_drawing_type": matching_zone.drawing_type if matching_zone else None,
+        "operation_zone_default_multiplier": matching_zone.default_multiplier if matching_zone else 1,
         "support_zone_id": matching_support.drawing_id if matching_support else None,
         "support_level": matching_support.level if matching_support else None,
-        "support_reference": str(params.get("support_reference") or "PULLBACK_LOW").upper(),
+        "support_reference": "ENTRY_PRICE_VISUAL_ZONE",
         "support_reference_price": support_reference_price,
         "support_distance_pct": support_distance_pct,
         "desired_multiplier": desired_multiplier,
@@ -1213,6 +1429,22 @@ def should_buy_torum_v1(
             allow_confirmation_price_outside=allow_confirmation_price_outside,
         )
     )
+    spacing_allowed, spacing_metadata = _third_entry_spacing_check(
+        params=params,
+        open_positions=open_positions or [],
+        executable_price=executable_price,
+    )
+    metadata.update(spacing_metadata)
+    if not spacing_allowed:
+        return TorumV1BuyDecision(
+            False,
+            "third_entry_price_too_close",
+            confirmation_time,
+            pullback,
+            matching_zone,
+            matching_support,
+            metadata,
+        )
     reason = (
         "buy_pullback_inside_zone_confirmation_price_outside_allowed"
         if confirmation_price_outside_allowed
@@ -1459,6 +1691,8 @@ def _operation_zone_decision_metadata(
         "operation_zone_time2": zone.time2,
         "operation_zone_price_min": zone.price_min,
         "operation_zone_price_max": zone.price_max,
+        "operation_zone_drawing_type": zone.drawing_type,
+        "operation_zone_default_multiplier": zone.default_multiplier,
     }
 
 
@@ -1467,18 +1701,24 @@ def desired_multiplier_for_support(
     open_positions: list[object],
     *,
     params: dict[str, Any] | None = None,
+    zone_default_multiplier: int = 1,
 ) -> int:
-    # This function expresses the setup's requested multiplier. Capacity and
-    # risk degradation belong to plan_torum_v1_bot_exposure, where the accepted
-    # multiplier is recorded explicitly. Silently reducing S3 merely because a
-    # position exists made a valid triple setup appear as a simple/double one.
+    """Return the setup multiplier before capacity/risk degradation.
+
+    Visual support bands always take precedence. Outside every support the
+    strategy requests one simple entry, except when the selected Torum
+    rectangle explicitly enables its x2 flag.
+    """
+
     del open_positions
     config = params or {}
+    if level == 1:
+        return max(1, min(3, _int_param(config.get("support_s1_multiplier"), 1)))
     if level == 2:
         return max(1, min(3, _int_param(config.get("support_s2_multiplier"), 2)))
     if level == 3:
         return max(1, min(3, _int_param(config.get("support_s3_multiplier"), 3)))
-    return max(1, min(3, _int_param(config.get("support_s1_multiplier"), 1)))
+    return max(1, min(2, _int_param(zone_default_multiplier, 1)))
 
 
 def _matching_support_for_entry(
@@ -1488,30 +1728,30 @@ def _matching_support_for_entry(
     executable_price: float,
     params: dict[str, Any],
 ) -> tuple[TorumV1SupportZone | None, float, float | None]:
-    reference_mode = str(params.get("support_reference") or "PULLBACK_LOW").upper()
-    reference_price = float(executable_price) if reference_mode == "ENTRY_PRICE" else float(pullback.pullback_low)
-    max_distance_pct = _nonnegative_float_param(params.get("support_max_distance_pct"), 0.0)
+    """Match sizing exclusively against the visible support band.
 
-    matches: list[tuple[TorumV1SupportZone, float]] = []
-    for support in support_zones:
-        if not support.enabled:
-            continue
-        if support.lower_price <= reference_price <= support.upper_price:
-            distance_pct = 0.0
-        else:
-            nearest_boundary = support.lower_price if reference_price < support.lower_price else support.upper_price
-            distance_pct = abs(reference_price - nearest_boundary) / abs(reference_price) * 100.0 if reference_price else float("inf")
-            if max_distance_pct <= 0 or distance_pct > max_distance_pct:
-                continue
-        matches.append((support, distance_pct))
+    A strategy support is drawn as a centre line plus two visible boundary
+    lines.  The multiplier must therefore be determined by the real executable
+    entry price being between those boundaries.  The old configurable
+    reference/distance expansion could classify S2/S3 even when the ASK was
+    outside the band, which did not match what the trader saw on the chart.
+    """
 
+    del pullback, params  # retained in the signature for API compatibility
+    reference_price = float(executable_price)
+    matches = [
+        support
+        for support in support_zones
+        if support.enabled and support.lower_price <= reference_price <= support.upper_price
+    ]
     if not matches:
         return None, reference_price, None
-    support, distance_pct = sorted(
+
+    support = sorted(
         matches,
-        key=lambda item: (-item[0].level, item[1], abs(float(item[0].price) - reference_price)),
+        key=lambda item: (-item.level, abs(float(item.price) - reference_price)),
     )[0]
-    return support, reference_price, distance_pct
+    return support, reference_price, 0.0
 
 
 def _matching_support_for_pullback(pullback: TorumV1Pullback, support_zones: list[TorumV1SupportZone]) -> TorumV1SupportZone | None:
@@ -1792,7 +2032,7 @@ class TorumV1StatusService:
             self.db.scalars(
                 select(StrategyConfig)
                 .where(StrategyConfig.strategy_key == TORUM_V1_KEY, StrategyConfig.user_id == user_id)
-                .order_by(StrategyConfig.enabled.desc(), StrategyConfig.id)
+                .order_by(StrategyConfig.enabled.desc(), StrategyConfig.revision.desc(), StrategyConfig.id.desc())
             )
         )
         configs: dict[str, StrategyConfig] = {}
@@ -1835,8 +2075,17 @@ class TorumV1StatusService:
 
             min_body_pct = _nonnegative_float_param(params.get("unlock_min_body_pct"), 0.0)
             body_pct = abs(current.close - current.open) / current.open * 100.0 if current.open else 0.0
-            if _bool(params.get("unlock_bullish_close_enabled"), True) and current.close > current.open and body_pct >= min_body_pct:
-                return end_local.astimezone(UTC), "bullish_closed_candle"
+            current_doji = current.close == current.open
+            current_bullish = current.close > current.open
+            if _bool(params.get("unlock_bullish_close_enabled"), True):
+                # A doji is an explicit unlock confirmation too: it represents
+                # the same loss of bearish momentum we accept for M5 entry
+                # confirmation.  A configured minimum body still applies to
+                # genuinely bullish candles, but must never exclude a doji.
+                if current_doji:
+                    return end_local.astimezone(UTC), "doji_closed_candle"
+                if current_bullish and body_pct >= min_body_pct:
+                    return end_local.astimezone(UTC), "bullish_closed_candle"
             if previous is None:
                 last_reason = "missing_previous_candle"
                 continue
@@ -1981,6 +2230,11 @@ def _int_or_none(value: object) -> int | None:
         return None
 
 
+def _positive_int_or_none(value: object) -> int | None:
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
 def _sorted_candles(candles: list[object]) -> list[object]:
     return sorted(
         [
@@ -2015,12 +2269,10 @@ def _operation_zone_from_payload(
     raw_time2 = payload.get("time2")
     time2 = None if raw_time2 is None else _int_or_none(raw_time2)
 
-    if drawing_type == "rectangle":
-        price_a = _float_or_none(payload.get("price1"))
-        price_b = _float_or_none(payload.get("price2"))
-    else:
-        price_a = _float_or_none(payload.get("price_min"))
-        price_b = _float_or_none(payload.get("price_max"))
+    if drawing_type != "rectangle":
+        return None
+    price_a = _float_or_none(payload.get("price1"))
+    price_b = _float_or_none(payload.get("price2"))
 
     if time1 is None or price_a is None or price_b is None:
         return None
@@ -2029,6 +2281,16 @@ def _operation_zone_from_payload(
     if direction != "BUY":
         return None
 
+    double_entries = (
+        drawing_type == "rectangle"
+        and _bool(
+            metadata.get(
+                "torum_v1_default_double_enabled",
+                payload.get("torum_v1_default_double_enabled"),
+            ),
+            False,
+        )
+    )
     return TorumV1OperationZone(
         drawing_id=drawing_id,
         drawing_type=drawing_type,
@@ -2037,6 +2299,7 @@ def _operation_zone_from_payload(
         price_min=min(price_a, price_b),
         price_max=max(price_a, price_b),
         direction="BUY",
+        default_multiplier=2 if double_entries else 1,
     )
 
 
@@ -2045,7 +2308,12 @@ def _aggregated_candle_diagnostic_payload(candle: AggregatedCandle | None) -> di
         return None
     body_pct = abs(candle.close - candle.open) / candle.open * 100.0 if candle.open else 0.0
     return {
-        "time": candle.time,
+        # AggregatedCandle represents a window, not a single database Candle.
+        # It therefore has start_time/end_time instead of a ``time`` field.
+        # Keeping both explicit boundaries prevents diagnostics from crashing
+        # the automatic runner and makes the unlock evidence unambiguous.
+        "start_time": candle.start_time,
+        "end_time": candle.end_time,
         "open": candle.open,
         "high": candle.high,
         "low": candle.low,
@@ -2064,6 +2332,11 @@ def _float_or_none(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _positive_float_or_none(value: object) -> float | None:
+    parsed = _float_or_none(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _support_level(value: object) -> int | None:

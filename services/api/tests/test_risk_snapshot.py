@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +14,7 @@ from app.orders.models import Order
 from app.positions.models import Position
 from app.risk.snapshot import RiskSnapshotService, clear_risk_snapshot_cache
 from app.strategies.ath import plan_torum_v1_bot_exposure
+from app.strategies.models import StrategySignal
 from app.symbols.models import SymbolMapping
 from app.symbols.service import get_symbol_by_internal
 from app.users.models import User  # noqa: F401
@@ -433,3 +434,194 @@ def test_torum_v1_plan_blocks_when_pending_order_risk_exceeds_limit() -> None:
     assert plan.allowed is False
     assert plan.reason == "risk_or_ath_capacity_exceeded"
     assert plan.open_lot_equivalents == 2.0
+
+
+def test_torum_v1_plan_ignores_stale_pre_broker_orders_for_capacity() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    order = _pending_bot_order(db, volume=0.12, requested_price=3900.0, status="CREATED")
+    order.created_at = datetime.now(UTC) - timedelta(hours=2)
+    db.commit()
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=3,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 3
+    assert plan.open_lot_equivalents == 0.0
+
+
+def test_torum_v1_plan_ignores_stale_reserved_signals_for_capacity() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    signal = StrategySignal(
+        strategy_key="torum_v1",
+        user_id=1,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        signal_type="ENTRY",
+        side="BUY",
+        entry_type="MARKET",
+        confidence=0.8,
+        suggested_volume=0.12,
+        reason="test_stale_reservation",
+        metadata_json={"accepted_volume": 0.12, "accepted_multiplier": 3},
+        status="RISK_APPROVED",
+        created_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    db.add(signal)
+    db.commit()
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=3,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 3
+    assert plan.open_lot_equivalents == 0.0
+
+
+def test_torum_v1_plan_does_not_double_count_signal_and_its_pending_order() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    signal = StrategySignal(
+        strategy_key="torum_v1",
+        user_id=1,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        signal_type="ENTRY",
+        side="BUY",
+        entry_type="MARKET",
+        confidence=0.9,
+        suggested_volume=0.08,
+        reason="pending_order_same_reservation",
+        metadata_json={"accepted_volume": 0.08, "accepted_multiplier": 2},
+        status="SENT_TO_ORDER_MANAGER",
+    )
+    db.add(signal)
+    db.flush()
+    order = _pending_bot_order(db, volume=0.08, requested_price=3900.0)
+    order.strategy_signal_id = signal.id
+    signal.order_id = order.id
+    db.commit()
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=1,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=_trading_settings(),
+        symbol_mapping=mapping,
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 1
+    assert plan.open_lot_equivalents == 2.0
+
+
+def test_torum_v1_plan_conservatively_counts_open_position_with_missing_account_identity() -> None:
+    db = _session()
+    mapping = get_symbol_by_internal(db, "XAUUSD")
+    order = _bot_order(db, volume=0.08)
+    db.add(
+        Position(
+            user_id=1,
+            order_id=order.id,
+            internal_symbol="XAUUSD",
+            broker_symbol="XAUUSD",
+            mode="DEMO",
+            account_login=None,
+            account_server=None,
+            side="BUY",
+            volume=0.08,
+            open_price=3900.0,
+            current_price=3900.0,
+            sl=None,
+            tp=3903.51,
+            profit=0.0,
+            status="OPEN",
+            mt5_position_ticket=987654,
+            mt5_position_identifier=987654,
+            magic_number=260426,
+            opened_at=datetime.now(UTC),
+            raw_payload_json={},
+        )
+    )
+    db.commit()
+    scoped_settings = SimpleNamespace(
+        trading_mode="DEMO",
+        lot_per_equity_enabled=True,
+        equity_per_0_01_lot=2500.0,
+        minimum_lot=0.01,
+    )
+
+    plan = plan_torum_v1_bot_exposure(
+        db,
+        symbol="XAUUSD",
+        user_id=1,
+        desired_multiplier=2,
+        current_price=3900.0,
+        balance=10000.0,
+        trading_settings=scoped_settings,
+        symbol_mapping=mapping,
+        account_login=123456,
+        account_server="Broker-Demo",
+    )
+
+    assert plan.allowed is True
+    assert plan.multiplier == 1
+    assert plan.open_lot_equivalents == 2.0
+
+
+def test_ambiguous_broker_order_keeps_capacity_beyond_normal_pipeline_ttl() -> None:
+    from app.strategies.ath import _active_pending_orders
+
+    db = _session()
+    order = Order(
+        user_id=1,
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        mode="DEMO",
+        account_login=1,
+        account_server="test",
+        side="BUY",
+        order_type="MARKET",
+        volume=0.09,
+        requested_price=3500.0,
+        status="RECONCILING",
+        magic_number=260426,
+        comment="Torum s123",
+        source="STRATEGY",
+        strategy_key="torum_v1",
+        created_at=datetime.now(UTC) - timedelta(minutes=10),
+    )
+    db.add(order)
+    db.commit()
+
+    active = _active_pending_orders(
+        db,
+        "XAUUSD",
+        1,
+        mode="DEMO",
+        account_login=1,
+        account_server="test",
+    )
+
+    assert [item.id for item in active] == [order.id]

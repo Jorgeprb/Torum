@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -9,19 +10,48 @@ from app.core.decision_log import trace_event, trace_exception
 from app.core.service_auth import require_service_token
 from app.alerts.evaluator import PriceAlertEvaluator
 from app.alerts.push import PushNotificationService
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.mt5.status_store import mt5_status_store
 from app.market_data.tick_time import tick_time_msc_from_datetime
 from app.risk.snapshot import RiskSnapshotService
 from app.settings.trading_service import get_global_trading_settings
-from app.strategies.auto_runner import run_torum_v1_for_symbols
+from app.strategies.auto_runner import run_torum_v1_with_durable_fallback
+from app.strategies.ath import update_symbol_ath_from_candles
 from app.strategies.candle_trigger import symbols_with_newly_closed_m5
 from app.strategies.notifications import notify_torum_v1_unlocks_for_symbols
 from app.ticks.schemas import TickBatchRequest, TickBatchResponse, TickInput, TickRead
+from app.trade_jobs.service import enqueue_trade_job
 from app.ticks.service import TickIngestionError, get_recent_ticks, ingest_tick_batch
 from app.websockets.manager import market_ws_manager
 
 router = APIRouter(prefix="/ticks", tags=["ticks"])
+
+
+async def evaluate_and_dispatch_price_alerts(inserted_rows: list[dict[str, object]]) -> None:
+    """Evaluate and deliver alerts only after the trading task has finished.
+
+    FastAPI does not start any background task until the response body is ready.
+    Keeping alert SQL in the request handler therefore delayed the supposedly
+    first strategy task.  This helper owns its DB session and is queued after
+    the entry evaluation, including all push-network work.
+    """
+
+    with SessionLocal() as db:
+        events = PriceAlertEvaluator(db).evaluate_inserted_ticks(inserted_rows)
+    for event in events:
+        event_payload = event.model_dump(mode="json")
+        await market_ws_manager.broadcast_price_alert_triggered(event_payload)
+        with SessionLocal() as db:
+            PushNotificationService(db).send_price_alert(event)
+
+
+def mark_risk_snapshots_dirty(symbols: list[str]) -> None:
+    """Invalidate risk snapshots after entry processing, never before it."""
+
+    with SessionLocal() as db:
+        for symbol in sorted({item.upper() for item in symbols if item}):
+            RiskSnapshotService(db).mark_dirty(symbol)
+        db.commit()
 
 
 async def broadcast_candle_reads(candles: list[dict[str, object]]) -> None:
@@ -75,46 +105,94 @@ def ingest_ticks_batch(
         trace_exception("tick_ingestion", "batch_failed", exc, source=payload.source, received=len(payload.ticks))
         raise
 
+    ath_symbols_updated = update_symbol_ath_from_candles(db, candles)
+    if ath_symbols_updated:
+        trace_event("ath", "incremental_ath_updated", symbols=sorted(ath_symbols_updated))
+
     candle_payloads = [candle_to_read(candle).model_dump() for candle in candles]
+    inserted_symbols = sorted({str(row["internal_symbol"]) for row in inserted_rows}) if inserted_rows else []
+    settings = get_settings()
+    strategy_symbols = (
+        symbols_with_newly_closed_m5(candles)
+        if inserted_rows and settings.strategy_run_on_candle_close_only
+        else inserted_symbols
+    )
+    if strategy_symbols:
+        trace_event(
+            "strategy_trigger",
+            "auto_run_scheduled",
+            symbols=strategy_symbols,
+            trigger_mode="candle_close" if settings.strategy_run_on_candle_close_only else "tick",
+            source=payload.source,
+            received=received_ticks,
+            inserted=inserted_ticks,
+            inserted_symbols=inserted_symbols,
+            m5_candle_buckets=[
+                {
+                    "symbol": candle.internal_symbol,
+                    "time": candle.time,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                }
+                for candle in candles
+                if str(candle.timeframe).upper() == "M5"
+                and candle.internal_symbol in strategy_symbols
+            ],
+        )
+        # FastAPI background tasks are intentionally fast but not durable if the
+        # API process terminates after acknowledging this tick batch. Create a
+        # delayed, idempotent fallback per M5 bucket first; the immediate task
+        # retires it after a successful run. A crash therefore causes a safe
+        # retry instead of silently losing the candle-close entry.
+        latest_m5_bucket_by_symbol: dict[str, datetime] = {}
+        for candle in candles:
+            if str(candle.timeframe).upper() != "M5" or candle.internal_symbol not in strategy_symbols:
+                continue
+            current = latest_m5_bucket_by_symbol.get(candle.internal_symbol)
+            if current is None or candle.time > current:
+                latest_m5_bucket_by_symbol[candle.internal_symbol] = candle.time
+        fallback_job_ids: list[int] = []
+        try:
+            for symbol in strategy_symbols:
+                bucket = latest_m5_bucket_by_symbol.get(symbol)
+                bucket_epoch = int(bucket.timestamp()) if bucket is not None else int(datetime.now(UTC).timestamp())
+                job = enqueue_trade_job(
+                    db,
+                    job_type="RUN_TORUM_STRATEGY",
+                    idempotency_key=f"run-torum:{symbol}:{bucket_epoch}",
+                    payload={"symbols": [symbol], "m5_bucket_epoch": bucket_epoch},
+                    run_after=datetime.now(UTC) + timedelta(seconds=5),
+                    reactivate_completed=False,
+                )
+                fallback_job_ids.append(job.id)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - immediate path must still run
+            db.rollback()
+            fallback_job_ids = []
+            trace_exception(
+                "strategy_trigger",
+                "durable_fallback_enqueue_failed",
+                exc,
+                symbols=strategy_symbols,
+            )
+
+        # This remains the first background task. Push notifications, websocket
+        # fan-out and unlock diagnostics are non-critical and may perform slow
+        # network I/O; none of them may delay an entry after an M5 close.
+        background_tasks.add_task(
+            run_torum_v1_with_durable_fallback,
+            strategy_symbols,
+            fallback_job_ids,
+        )
+
     background_tasks.add_task(broadcast_candle_reads, candle_payloads)
     background_tasks.add_task(broadcast_tick_reads, inserted_rows)
-    alert_events = PriceAlertEvaluator(db, push_service=PushNotificationService(db)).evaluate_inserted_ticks(inserted_rows)
-    for event in alert_events:
-        background_tasks.add_task(market_ws_manager.broadcast_price_alert_triggered, event.model_dump(mode="json"))
     if inserted_rows:
-        inserted_symbols = sorted({str(row["internal_symbol"]) for row in inserted_rows})
+        background_tasks.add_task(evaluate_and_dispatch_price_alerts, inserted_rows)
+    if inserted_symbols:
         background_tasks.add_task(notify_torum_v1_unlocks_for_symbols, inserted_symbols)
-        settings = get_settings()
-        strategy_symbols = (
-            symbols_with_newly_closed_m5(candles)
-            if settings.strategy_run_on_candle_close_only
-            else inserted_symbols
-        )
-        if strategy_symbols:
-            trace_event(
-                "strategy_trigger",
-                "auto_run_scheduled",
-                symbols=strategy_symbols,
-                trigger_mode="candle_close" if settings.strategy_run_on_candle_close_only else "tick",
-                source=payload.source,
-                received=received_ticks,
-                inserted=inserted_ticks,
-                inserted_symbols=inserted_symbols,
-                m5_candle_buckets=[
-                    {
-                        "symbol": candle.internal_symbol,
-                        "time": candle.time,
-                        "open": candle.open,
-                        "high": candle.high,
-                        "low": candle.low,
-                        "close": candle.close,
-                    }
-                    for candle in candles
-                    if str(candle.timeframe).upper() == "M5"
-                    and candle.internal_symbol in strategy_symbols
-                ],
-            )
-            background_tasks.add_task(run_torum_v1_for_symbols, strategy_symbols)
 
     last_tick_time_by_symbol: dict[str, object] = {}
     for row in inserted_rows:
@@ -132,9 +210,7 @@ def ingest_ticks_batch(
     )
     next_balance = status_snapshot.account.balance if status_snapshot and status_snapshot.account else None
     if next_balance is not None and next_balance != previous_balance:
-        for symbol in ("XAUUSD", "XAUEUR"):
-            RiskSnapshotService(db).mark_dirty(symbol)
-        db.commit()
+        background_tasks.add_task(mark_risk_snapshots_dirty, ["XAUUSD", "XAUEUR"])
     if inserted_rows:
         last_tick_time = max(row["time"] for row in inserted_rows)
         background_tasks.add_task(market_ws_manager.broadcast_market_status, True, payload.source, last_tick_time)

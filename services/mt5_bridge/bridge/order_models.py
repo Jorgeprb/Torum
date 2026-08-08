@@ -16,6 +16,7 @@ class MarketOrderRequest(BaseModel):
     volume: float = Field(gt=0)
     sl: float | None = Field(default=None, gt=0)
     tp: float | None = Field(default=None, gt=0)
+    tp_percent: float | None = Field(default=None, gt=0)
     deviation_points: int = Field(default=20, ge=0)
     magic_number: int = 260426
     comment: str | None = None

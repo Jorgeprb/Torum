@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from threading import Lock
 from time import monotonic
 
+from app.core.config import get_settings
 from app.core.distributed_state import distributed_state
 from app.mt5.schemas import MT5StatusPayload, MT5StatusRead
 
@@ -22,7 +23,10 @@ class MT5StatusStore:
 
     def get(self) -> MT5StatusRead:
         now = monotonic()
-        should_refresh = now - self._last_remote_refresh >= _REMOTE_REFRESH_SECONDS
+        should_refresh = (
+            not get_settings().enforce_single_worker
+            and now - self._last_remote_refresh >= _REMOTE_REFRESH_SECONDS
+        )
         if should_refresh:
             self._last_remote_refresh = now
             remote = distributed_state.get_json(_DISTRIBUTED_KEY)
@@ -82,6 +86,8 @@ class MT5StatusStore:
 
     @staticmethod
     def _publish(snapshot: MT5StatusRead) -> None:
+        if get_settings().enforce_single_worker:
+            return
         distributed_state.set_json(
             _DISTRIBUTED_KEY,
             snapshot.model_dump(mode="json"),

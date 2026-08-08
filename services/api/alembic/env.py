@@ -15,6 +15,7 @@ from app.news.models import NewsEvent, NewsSettings  # noqa: F401
 from app.no_trade_zones.models import NoTradeZone  # noqa: F401
 from app.orders.models import Order  # noqa: F401
 from app.positions.models import Position  # noqa: F401
+from app.performance.models import CapitalMovement  # noqa: F401
 from app.risk.models import RiskSnapshotRecord  # noqa: F401
 from app.trade_jobs.models import TradeJob  # noqa: F401
 from app.settings.trading_settings import TradingSettings  # noqa: F401

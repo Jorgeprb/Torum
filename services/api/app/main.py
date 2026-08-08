@@ -31,6 +31,7 @@ from app.news.service import seed_global_news_settings
 from app.no_trade_zones.routes import router as no_trade_zones_router
 from app.orders.router import router as orders_router
 from app.positions.router import router as positions_router
+from app.performance.routes import router as performance_router
 from app.risk.router import router as risk_router
 from app.settings.router import router as settings_router
 from app.settings.trading_service import seed_global_trading_settings
@@ -156,6 +157,7 @@ def create_app() -> FastAPI:
     app.include_router(trading_router, prefix="/api")
     app.include_router(orders_router, prefix="/api")
     app.include_router(positions_router, prefix="/api")
+    app.include_router(performance_router, prefix="/api")
     app.include_router(trade_history_router, prefix="/api")
     app.include_router(websocket_router)
 

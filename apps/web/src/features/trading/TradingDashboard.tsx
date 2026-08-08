@@ -103,7 +103,7 @@ interface SplitChartSelection {
   symbol: string;
 }
 
-const mobileDrawingTools: DrawingTool[] = ["horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "manual_zone", "select"];
+const mobileDrawingTools: DrawingTool[] = ["horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "select"];
 const spyModeStorageKey = "torum.spyMode";
 const showFutureNewsZonesStorageKey = "torum.showFutureNewsZones";
 const autoExtendToFutureNewsStorageKey = "torum.autoExtendToFutureNews";
@@ -182,7 +182,6 @@ function drawingToolText(tool: DrawingTool): string {
     trend_line: "linea de tendencia",
     rectangle: "rectangulo",
     text: "texto",
-    manual_zone: "zona manual",
     select: "seleccionar"
   };
 
@@ -195,14 +194,6 @@ function drawingToolIcon(tool: DrawingTool) {
   if (tool === "trend_line") return <TrendingUp size={18} />;
   if (tool === "rectangle") return <Square size={18} />;
   if (tool === "text") return <Type size={18} />;
-  if (tool === "manual_zone") {
-    return (
-      <>
-        <Square size={18} />
-        <span>Z</span>
-      </>
-    );
-  }
   return <MousePointer size={18} />;
 }
 
@@ -246,28 +237,68 @@ function pullbackLabelDecimals(label: string): number {
 
 function updateLivePullbackDebug(
   pullbacks: StrategyPullbackDebug[],
-  price: number | null,
+  observedLow: number | null,
   timeMsc: number
 ): StrategyPullbackDebug[] {
-  if (price === null || !Number.isFinite(price) || pullbacks.length === 0) {
+  if (observedLow === null || !Number.isFinite(observedLow) || pullbacks.length === 0) {
     return pullbacks;
   }
 
   const lastIndex = pullbacks.length - 1;
   const last = pullbacks[lastIndex];
-  if (last.is_live !== true || price >= last.pullback_low || last.swing_high <= 0) {
+  if (last.is_live !== true || observedLow >= last.pullback_low || last.swing_high <= 0) {
     return pullbacks;
   }
 
-  const pullbackPct = ((last.swing_high - price) / last.swing_high) * 100;
+  const pullbackPct = ((last.swing_high - observedLow) / last.swing_high) * 100;
   const decimals = pullbackLabelDecimals(last.label);
   const next = [...pullbacks];
   next[lastIndex] = {
     ...last,
-    pullback_low: price,
+    pullback_low: observedLow,
     pullback_low_time: Math.floor(timeMsc / 1000),
     pullback_pct: pullbackPct,
     label: last.label ? `PB ${pullbackPct.toFixed(decimals)}%` : ""
+  };
+  return next;
+}
+
+function sameLivePullback(left: StrategyPullbackDebug, right: StrategyPullbackDebug): boolean {
+  return (
+    left.is_live === true &&
+    right.is_live === true &&
+    left.swing_high_time === right.swing_high_time &&
+    Math.abs(left.swing_high - right.swing_high) < 0.0000001
+  );
+}
+
+/**
+ * Merge a server recalculation without ever raising the low of the current live
+ * pullback. The current candle's wick is historical truth: a later tick or a
+ * stale cached response may move the price up, but it cannot erase that low.
+ */
+function mergePullbackSnapshot(
+  current: StrategyPullbackDebug[],
+  incoming: StrategyPullbackDebug[]
+): StrategyPullbackDebug[] {
+  const next = clonePullbacks(incoming);
+  if (current.length === 0 || next.length === 0) return next;
+
+  const currentLive = current[current.length - 1];
+  const incomingIndex = next.length - 1;
+  const incomingLive = next[incomingIndex];
+  if (!sameLivePullback(currentLive, incomingLive) || currentLive.pullback_low >= incomingLive.pullback_low) {
+    return next;
+  }
+
+  const pullbackPct = ((incomingLive.swing_high - currentLive.pullback_low) / incomingLive.swing_high) * 100;
+  const decimals = pullbackLabelDecimals(incomingLive.label || currentLive.label);
+  next[incomingIndex] = {
+    ...incomingLive,
+    pullback_low: currentLive.pullback_low,
+    pullback_low_time: currentLive.pullback_low_time,
+    pullback_pct: pullbackPct,
+    label: incomingLive.label ? `PB ${pullbackPct.toFixed(decimals)}%` : ""
   };
   return next;
 }
@@ -411,8 +442,7 @@ function drawingAffectsStrategy(drawing: Pick<ChartDrawingRead, "drawing_type" |
   return Boolean(
     metadata.torum_v1_zone_enabled ||
     metadata.support_enabled ||
-    metadata.supportLevel ||
-    drawing.drawing_type === "manual_zone"
+    metadata.supportLevel
   );
 }
 
@@ -808,8 +838,13 @@ function SplitMarketChart({
           void getTorumV1Pullbacks(symbol, { limit: 600 })
             .then((response) => {
               if (generation !== generationRef.current) return;
-              pullbackMemoryCache.set(pullbackCacheKey(symbol), clonePullbacks(response.pullbacks));
-              startTransition(() => setLocalStrategyDebugPullbacks(response.pullbacks));
+              startTransition(() => {
+                setLocalStrategyDebugPullbacks((current) => {
+                  const merged = mergePullbackSnapshot(current, response.pullbacks);
+                  pullbackMemoryCache.set(pullbackCacheKey(symbol), clonePullbacks(merged));
+                  return merged;
+                });
+              });
             })
             .catch(() => undefined);
         } else {
@@ -905,10 +940,31 @@ function SplitMarketChart({
         }
 
         if (message.type === "candle_update" && message.symbol === symbol && message.timeframe === timeframe) {
+          const previousLatestTime = candlesRef.current[candlesRef.current.length - 1]?.time ?? null;
+          const isNewM5Candle = timeframe === "M5" && previousLatestTime !== null && message.candle.time > previousLatestTime;
           setCandles((current) => {
             const next = upsertCandle(current, message.candle);
             return writeCachedCandles(symbol, timeframe, next);
           });
+          if (showPullbackOverlays && timeframe === "M5") {
+            setLocalStrategyDebugPullbacks((current) => {
+              const next = updateLivePullbackDebug(current, message.candle.low, message.candle.time * 1000);
+              pullbackMemoryCache.set(pullbackCacheKey(symbol), clonePullbacks(next));
+              return next;
+            });
+            if (isNewM5Candle) {
+              void getTorumV1Pullbacks(symbol, { force: true, limit: 600 })
+                .then((response) => {
+                  if (generation !== generationRef.current) return;
+                  setLocalStrategyDebugPullbacks((current) => {
+                    const merged = mergePullbackSnapshot(current, response.pullbacks);
+                    pullbackMemoryCache.set(pullbackCacheKey(symbol), clonePullbacks(merged));
+                    return merged;
+                  });
+                })
+                .catch(() => undefined);
+            }
+          }
           return;
         }
 
@@ -932,6 +988,14 @@ function SplitMarketChart({
               source: message.source ?? "UNKNOWN"
             };
           });
+          if (showPullbackOverlays) {
+            const liveLow = message.bid ?? message.last ?? message.ask ?? null;
+            setLocalStrategyDebugPullbacks((current) => {
+              const next = updateLivePullbackDebug(current, liveLow, messageTimeMsc);
+              pullbackMemoryCache.set(pullbackCacheKey(symbol), clonePullbacks(next));
+              return next;
+            });
+          }
           // MarketChart applies the live price directly with series.update().
         }
       },
@@ -1234,7 +1298,11 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
     // Persist candles only on candle events; rewriting thousands of cached bars on
     // every tick caused avoidable CPU and IndexedDB churn.
     if (showPullbackOverlays) {
-      setStrategyDebugPullbacks((current) => updateLivePullbackDebug(current, livePrice, tick.time_msc));
+      setStrategyDebugPullbacks((current) => {
+        const next = updateLivePullbackDebug(current, livePrice, tick.time_msc);
+        pullbackMemoryCache.set(pullbackCacheKey(selectedSymbol), clonePullbacks(next));
+        return next;
+      });
     }
     setStreamSource(tick.source ?? "UNKNOWN");
     setLastTickTime(tick.time);
@@ -1783,12 +1851,30 @@ useEffect(() => {
       return;
     }
 
+    const cachedMessageCandles = candleMemoryCache.get(messageKey);
+    const previousLatestTime = cachedMessageCandles?.length
+      ? cachedMessageCandles[cachedMessageCandles.length - 1].time
+      : null;
+    const isNewM5Candle =
+      message.timeframe === "M5" && previousLatestTime !== null && message.candle.time > previousLatestTime;
+
     setCandles((current) => {
       const next = upsertCandle(current, message.candle);
       return writeCachedCandles(message.symbol, message.timeframe, next);
     });
     setStreamSource(message.candle.source);
-    if (showPullbackOverlays) void refreshPullbacks(false);
+    if (showPullbackOverlays && message.timeframe === "M5") {
+      setStrategyDebugPullbacks((current) => {
+        const next = updateLivePullbackDebug(current, message.candle.low, message.candle.time * 1000);
+        pullbackMemoryCache.set(pullbackCacheKey(message.symbol), clonePullbacks(next));
+        return next;
+      });
+      // Recalculate the complete segment once per new M5 candle, never once per
+      // tick.  The previous implementation requested a cached snapshot on every
+      // candle_update broadcast (which itself occurs on every tick), allowing a
+      // stale response to raise the low from the wick back to the body/price.
+      if (isNewM5Candle) void refreshPullbacks(true, message.symbol);
+    }
     return;
   }
     if (message.type === "market_status") {
@@ -2065,14 +2151,21 @@ useEffect(() => {
     const key = pullbackCacheKey(symbol);
     const cached = pullbackMemoryCache.get(key);
     if (!force && cached && showPullbackOverlays) {
-      setStrategyDebugPullbacks(clonePullbacks(cached));
+      setStrategyDebugPullbacks((current) => mergePullbackSnapshot(current, cached));
     }
     try {
       const response = await getTorumV1Pullbacks(symbol, { force, limit: 600 });
       if (requestSeq !== pullbackRequestSeqRef.current || symbol !== selectedSymbol) return;
-      pullbackMemoryCache.set(key, clonePullbacks(response.pullbacks));
       if (showPullbackOverlays) {
-        startTransition(() => setStrategyDebugPullbacks(clonePullbacks(response.pullbacks)));
+        startTransition(() => {
+          setStrategyDebugPullbacks((current) => {
+            const merged = mergePullbackSnapshot(current, response.pullbacks);
+            pullbackMemoryCache.set(key, clonePullbacks(merged));
+            return merged;
+          });
+        });
+      } else {
+        pullbackMemoryCache.set(key, clonePullbacks(response.pullbacks));
       }
     } catch (requestError) {
       if (!cached && requestSeq === pullbackRequestSeqRef.current && symbol === selectedSymbol) {

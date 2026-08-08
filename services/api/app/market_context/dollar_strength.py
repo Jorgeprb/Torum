@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import prod
+from threading import RLock
+from time import monotonic
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -25,6 +27,10 @@ DXY_COMPONENTS: tuple[tuple[str, float], ...] = (
     ("USDSEK", 0.042),
     ("USDCHF", 0.036),
 )
+
+_LATEST_SNAPSHOT_CACHE: dict[int, tuple[DollarStrengthRead, float]] = {}
+_LATEST_SNAPSHOT_CACHE_LOCK = RLock()
+
 
 DEFAULT_USD_STRENGTH_PARAMS: dict[str, object] = {
     "usd_strength_filter_enabled": True,
@@ -58,10 +64,23 @@ class DollarStrengthService:
         return self.db.scalar(select(DollarStrengthSnapshot).order_by(DollarStrengthSnapshot.updated_at.desc(), DollarStrengthSnapshot.id.desc()).limit(1))
 
     def latest_snapshot_read(self) -> DollarStrengthRead:
+        cache_key = id(self.db.get_bind())
+        with _LATEST_SNAPSHOT_CACHE_LOCK:
+            cached = _LATEST_SNAPSHOT_CACHE.get(cache_key)
+        if cached is not None:
+            cached_read, cached_at = cached
+            now = datetime.now(UTC)
+            valid_until = cached_read.valid_until
+            if valid_until is not None and valid_until.tzinfo is None:
+                valid_until = valid_until.replace(tzinfo=UTC)
+            cache_ttl = 3600.0 if cached_read.updated_at is not None else 30.0
+            if monotonic() - cached_at < cache_ttl and (valid_until is None or valid_until > now):
+                return cached_read
         snapshot = self.latest_snapshot()
-        if snapshot is None:
-            return unknown_snapshot_read()
-        return DollarStrengthRead.model_validate(snapshot)
+        read = unknown_snapshot_read() if snapshot is None else DollarStrengthRead.model_validate(snapshot)
+        with _LATEST_SNAPSHOT_CACHE_LOCK:
+            _LATEST_SNAPSHOT_CACHE[cache_key] = (read, monotonic())
+        return read
 
     def recompute(self, *, params: dict[str, object] | None = None, count: int = 120) -> DollarStrengthRead:
         merged_params = merged_usd_strength_params(params)
@@ -159,7 +178,17 @@ class DollarStrengthService:
         self.db.add(snapshot)
         self.db.commit()
         self.db.refresh(snapshot)
-        return DollarStrengthRead.model_validate(snapshot)
+        read = DollarStrengthRead.model_validate(snapshot)
+        cache_key = id(self.db.get_bind())
+        with _LATEST_SNAPSHOT_CACHE_LOCK:
+            _LATEST_SNAPSHOT_CACHE[cache_key] = (read, monotonic())
+        return read
+
+
+def clear_dollar_strength_snapshot_cache() -> None:
+    """Clear all process-local DXY snapshot caches (tests/reloads)."""
+    with _LATEST_SNAPSHOT_CACHE_LOCK:
+        _LATEST_SNAPSHOT_CACHE.clear()
 
 
 def build_synthetic_dxy_candles(candles_by_symbol: dict[str, list[dict[str, object]]]) -> list[dict[str, object]]:

@@ -1,11 +1,36 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import atexit
 import logging
+from logging.handlers import QueueHandler, QueueListener
 import os
 from pathlib import Path
+from queue import Full, Queue
 from threading import RLock
 from typing import Any
+
+_LISTENER: QueueListener | None = None
+
+
+class NonBlockingQueueHandler(QueueHandler):
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except Full:
+            # MT5 orders always take precedence over diagnostics.
+            return
+
+
+def _stop_listener() -> None:
+    global _LISTENER
+    listener = _LISTENER
+    _LISTENER = None
+    if listener is not None:
+        try:
+            listener.stop()
+        except Exception:
+            pass
 
 
 class TimestampedSizeRotatingFileHandler(logging.Handler):
@@ -88,6 +113,8 @@ def configure_logging(
     max_bytes: int = 10_000_000,
     backup_count: int = 20,
 ) -> None:
+    global _LISTENER
+    _stop_listener()
     resolved_level = getattr(logging, level.upper(), logging.INFO)
     root = logging.getLogger()
     root.setLevel(resolved_level)
@@ -99,7 +126,7 @@ def configure_logging(
     console = logging.StreamHandler()
     console.setLevel(resolved_level)
     console.setFormatter(formatter)
-    root.addHandler(console)
+    sinks: list[logging.Handler] = [console]
 
     if log_to_file:
         default_directory = Path(__file__).resolve().parents[3] / "logs" / "mt5_bridge"
@@ -110,4 +137,12 @@ def configure_logging(
         )
         file_handler.setLevel(resolved_level)
         file_handler.setFormatter(formatter)
-        root.addHandler(file_handler)
+        sinks.append(file_handler)
+
+    queue: Queue[logging.LogRecord] = Queue(maxsize=20_000)
+    queue_handler = NonBlockingQueueHandler(queue)
+    queue_handler.setLevel(resolved_level)
+    root.addHandler(queue_handler)
+    _LISTENER = QueueListener(queue, *sinks, respect_handler_level=True)
+    _LISTENER.start()
+    atexit.register(_stop_listener)

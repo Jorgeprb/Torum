@@ -1,25 +1,31 @@
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
 
 from app.alerts.push import PushNotificationService
 from fastapi import BackgroundTasks
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.decision_log import trace_event, trace_exception
+from app.candles.models import Candle
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
 from app.mt5.status_store import mt5_status_store
+from app.market_data.chart_clock import resolve_market_clock
 from app.orders.models import Order
 from app.positions.models import Position
 from app.risk.manager import RiskManager
+from app.risk.schemas import RiskDecision
 from app.risk.snapshot import RiskSnapshotService
 from app.trade_jobs.service import enqueue_trade_job
 from app.settings.trading_service import get_global_trading_settings
+from app.strategies.models import StrategySignal
 from app.symbols.service import get_symbol_by_internal
 from app.ticks.models import Tick
+from app.ticks.service import latest_tick_order_by
 from app.trading.lot_sizing import calculate_buy_take_profit
 from app.trading.schemas import ManualOrderOrderRead, ManualOrderPositionRead, ManualOrderRequest, ManualOrderResponse
 from app.users.models import User
@@ -36,7 +42,9 @@ class OrderManager:
         background_tasks: BackgroundTasks | None = None,
     ) -> None:
         self.db = db
-        self.mt5_client = mt5_client or MT5BridgeClient()
+        self.mt5_client = mt5_client or MT5BridgeClient(
+            timeout=max(0.25, float(get_settings().mt5_order_request_timeout_seconds))
+        )
         self.background_tasks = background_tasks
 
     def create_manual_order(self, payload: ManualOrderRequest, user: User) -> ManualOrderResponse:
@@ -51,6 +59,8 @@ class OrderManager:
         strategy_signal_id: int,
         mode: str,
         strategy_settings: object | None = None,
+        prevalidated_risk_decision: RiskDecision | None = None,
+        latest_tick_override: Tick | None = None,
     ) -> ManualOrderResponse:
         return self._create_order(
             payload=payload,
@@ -60,6 +70,8 @@ class OrderManager:
             strategy_key=strategy_key,
             strategy_signal_id=strategy_signal_id,
             strategy_settings=strategy_settings,
+            prevalidated_risk_decision=prevalidated_risk_decision,
+            latest_tick_override=latest_tick_override,
         )
 
     def _create_order(
@@ -72,6 +84,8 @@ class OrderManager:
         strategy_key: str | None = None,
         strategy_signal_id: int | None = None,
         strategy_settings: object | None = None,
+        prevalidated_risk_decision: RiskDecision | None = None,
+        latest_tick_override: Tick | None = None,
     ) -> ManualOrderResponse:
         app_settings = get_settings()
         trading_settings = get_global_trading_settings(self.db)
@@ -81,7 +95,7 @@ class OrderManager:
         account = mt5_status.account
         broker_symbol = symbol_mapping.broker_symbol if symbol_mapping else ""
         mode = risk_settings.trading_mode
-        latest_tick = RiskManager(self.db).latest_tick(payload.internal_symbol)
+        latest_tick = latest_tick_override or RiskManager(self.db).latest_tick(payload.internal_symbol)
         requested_price = self._side_price(payload.side, latest_tick)
         effective_tp = payload.tp
         tp_percent = payload.tp_percent or getattr(trading_settings, "default_take_profit_percent", 0.09)
@@ -173,8 +187,29 @@ class OrderManager:
         )
 
         order.status = "VALIDATING"
+        if source == "STRATEGY" and strategy_key == "torum_v1" and prevalidated_risk_decision is None:
+            fresh, freshness_reason, freshness = self._validate_torum_confirmation(
+                strategy_signal_id=strategy_signal_id,
+                symbol=order.internal_symbol,
+            )
+            trace_event(
+                "order_manager",
+                "torum_confirmation_revalidated",
+                order_id=order.id,
+                strategy_signal_id=strategy_signal_id,
+                symbol=order.internal_symbol,
+                checkpoint="before_risk",
+                allowed=fresh,
+                reason=freshness_reason,
+                details=freshness,
+            )
+            if not fresh:
+                return self._reject_torum_confirmation(order, mode, freshness_reason, freshness)
+
         risk_manager = RiskManager(self.db)
-        if source == "STRATEGY":
+        if source == "STRATEGY" and prevalidated_risk_decision is not None:
+            risk_decision = prevalidated_risk_decision
+        elif source == "STRATEGY":
             risk_decision = risk_manager.evaluate_strategy_order(
                 order=payload,
                 trading_settings=risk_settings,
@@ -186,6 +221,7 @@ class OrderManager:
                 strategy_key=strategy_key,
                 exclude_order_id=order.id,
                 exclude_signal_id=strategy_signal_id,
+                latest_tick_override=latest_tick,
             )
         else:
             risk_decision = risk_manager.evaluate(
@@ -194,6 +230,7 @@ class OrderManager:
                 symbol_mapping=symbol_mapping,
                 mt5_status=mt5_status,
                 price_stale_after_seconds=app_settings.price_stale_after_seconds,
+                latest_tick_override=latest_tick,
             )
             confirmation = payload.client_confirmation
             if confirmation is None or not confirmation.confirmed or not confirmation.risk_acknowledged:
@@ -227,6 +264,25 @@ class OrderManager:
                 warnings=risk_decision.warnings,
             )
 
+        if source == "STRATEGY" and strategy_key == "torum_v1":
+            fresh, freshness_reason, freshness = self._validate_torum_confirmation(
+                strategy_signal_id=strategy_signal_id,
+                symbol=order.internal_symbol,
+            )
+            trace_event(
+                "order_manager",
+                "torum_confirmation_revalidated",
+                order_id=order.id,
+                strategy_signal_id=strategy_signal_id,
+                symbol=order.internal_symbol,
+                checkpoint="before_execution",
+                allowed=fresh,
+                reason=freshness_reason,
+                details=freshness,
+            )
+            if not fresh:
+                return self._reject_torum_confirmation(order, mode, freshness_reason, freshness)
+
         if mode == "PAPER":
             return self._execute_paper(order, payload, latest_tick, risk_decision.warnings)
 
@@ -236,6 +292,134 @@ class OrderManager:
             warnings=risk_decision.warnings,
             magic_number=magic_number,
             deviation_points=deviation_points,
+        )
+
+    def _validate_torum_confirmation(
+        self,
+        *,
+        strategy_signal_id: int | None,
+        symbol: str,
+        checked_at: datetime | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Ensure a Torum order still belongs to the latest closed M5 candle.
+
+        Strategy evaluation and risk checks can be delayed by database load.  A
+        valid bullish setup must never be sent after a newer M5 candle has
+        already closed, especially when that newer candle is bearish.
+        """
+
+        real_now = checked_at or datetime.now(UTC)
+        if real_now.tzinfo is None:
+            real_now = real_now.replace(tzinfo=UTC)
+        else:
+            real_now = real_now.astimezone(UTC)
+        latest_tick = self.db.scalar(
+            select(Tick)
+            .where(Tick.internal_symbol == symbol.upper())
+            .order_by(*latest_tick_order_by())
+            .limit(1)
+        )
+        now, market_clock_domain = resolve_market_clock(
+            real_now,
+            latest_tick.time if latest_tick is not None else None,
+        )
+        details: dict[str, Any] = {
+            "checked_at": now.isoformat(),
+            "checked_at_utc": real_now.isoformat(),
+            "market_clock_domain": market_clock_domain,
+            "latest_tick_time": latest_tick.time.isoformat() if latest_tick is not None else None,
+        }
+        if strategy_signal_id is None:
+            return False, "missing_torum_strategy_signal", details
+
+        signal = self.db.get(StrategySignal, strategy_signal_id)
+        if signal is None or signal.strategy_key != "torum_v1":
+            details["strategy_signal_id"] = strategy_signal_id
+            return False, "missing_torum_strategy_signal", details
+
+        metadata = signal.metadata_json or {}
+        expected_epoch = _int_or_none(metadata.get("confirmation_candle_time"))
+        details.update(
+            {
+                "strategy_signal_id": signal.id,
+                "expected_confirmation_candle_time": expected_epoch,
+            }
+        )
+        if expected_epoch is None:
+            return False, "missing_torum_confirmation_time", details
+
+        confirmation_age_seconds = now.timestamp() - (expected_epoch + 300)
+        details["confirmation_age_seconds"] = round(confirmation_age_seconds, 3)
+        maximum_execution_age_seconds = max(
+            1.0,
+            min(299.0, float(get_settings().torum_max_entry_delay_seconds)),
+        )
+        details["maximum_execution_age_seconds"] = maximum_execution_age_seconds
+        # The signal is executable only during the immediately following M5
+        # candle.  This also protects against a market-data gap in which the DB
+        # has not yet received a newer candle to compare against.
+        if confirmation_age_seconds > maximum_execution_age_seconds:
+            return False, "stale_torum_confirmation_candle", details
+
+        # M5 candle timestamps represent candle starts.  At `now`, only starts
+        # at least five minutes old are closed and eligible for execution.
+        latest_closed_cutoff = now - timedelta(minutes=5)
+        latest = self.db.scalar(
+            select(Candle)
+            .where(
+                Candle.internal_symbol == symbol.upper(),
+                Candle.timeframe == "M5",
+                Candle.time <= latest_closed_cutoff,
+            )
+            .order_by(Candle.time.desc())
+            .limit(1)
+        )
+        if latest is None:
+            return False, "missing_latest_closed_m5_candle", details
+
+        latest_time = latest.time
+        if latest_time.tzinfo is None:
+            latest_time = latest_time.replace(tzinfo=UTC)
+        else:
+            latest_time = latest_time.astimezone(UTC)
+        latest_epoch = int(latest_time.timestamp())
+        params = metadata.get("params") if isinstance(metadata.get("params"), dict) else {}
+        accept_doji = _bool_setting(params.get("confirmation_ignore_doji"), True)
+        bullish = float(latest.close) >= float(latest.open) if accept_doji else float(latest.close) > float(latest.open)
+        details.update(
+            {
+                "latest_closed_candle_time": latest_epoch,
+                "latest_closed_candle_open": float(latest.open),
+                "latest_closed_candle_close": float(latest.close),
+                "latest_closed_candle_bullish": bullish,
+                "accept_doji_as_bullish": accept_doji,
+            }
+        )
+        if latest_epoch != expected_epoch:
+            return False, "stale_torum_confirmation_candle", details
+        if not bullish:
+            return False, "torum_confirmation_candle_not_bullish", details
+        return True, "torum_confirmation_current", details
+
+    def _reject_torum_confirmation(
+        self,
+        order: Order,
+        mode: str,
+        reason: str,
+        details: dict[str, Any],
+    ) -> ManualOrderResponse:
+        order.status = "REJECTED"
+        order.rejection_reason = reason
+        order.response_payload_json = {"confirmation_revalidation": details, "reason": reason}
+        self.db.commit()
+        return ManualOrderResponse(
+            ok=False,
+            order_id=order.id,
+            status="REJECTED",
+            mode=mode,
+            message="Torum signal expired before execution",
+            reasons=[reason],
+            warnings=[],
         )
 
     def _execute_paper(
@@ -342,7 +526,11 @@ class OrderManager:
             "order_type": order.order_type,
             "volume": order.volume,
             "sl": order.sl,
-            "tp": None,
+            # The bridge derives the first protective TP from its own live
+            # execution tick. The asynchronous reconciliation may refine it
+            # after the fill, but the position is never left unprotected.
+            "tp": payload.tp,
+            "tp_percent": payload.tp_percent,
             "deviation_points": deviation_points,
             "magic_number": magic_number,
             "comment": order.comment,
@@ -370,16 +558,25 @@ class OrderManager:
                 symbol=order.internal_symbol,
                 bridge_payload=bridge_payload,
             )
-            order.status = "FAILED"
+            # A POST timeout/disconnect is ambiguous: MT5 may have accepted
+            # the trade before the HTTP response was lost. Keep a short
+            # reservation and let position sync reconcile by the unique Torum
+            # comment instead of freeing capacity and risking a duplicate buy.
+            order.status = "RECONCILING"
             order.rejection_reason = str(exc)
-            order.response_payload_json = {"ok": False, "error": str(exc)}
+            order.response_payload_json = {
+                "ok": False,
+                "error": str(exc),
+                "reconciliation_required": True,
+                "ambiguous_mt5_execution": True,
+            }
             self.db.commit()
             return ManualOrderResponse(
                 ok=False,
                 order_id=order.id,
-                status="FAILED",
+                status="RECONCILING",
                 mode=order.mode,  # type: ignore[arg-type]
-                message="MT5 bridge request failed",
+                message="MT5 response lost; execution is being reconciled",
                 reasons=[str(exc)],
                 warnings=warnings,
             )
@@ -394,15 +591,34 @@ class OrderManager:
             response=response,
         )
         if not response.get("ok"):
-            order.status = "FAILED"
+            raw_failure = response.get("raw") if isinstance(response.get("raw"), dict) else {}
+            attempted_request = raw_failure.get("request") if isinstance(raw_failure, dict) else None
+            retcode = _int_or_none(response.get("retcode"))
+            ambiguous_vendor_result = (
+                order.strategy_key == "torum_v1"
+                and isinstance(attempted_request, dict)
+                and bool(attempted_request)
+                and (retcode is None or retcode == 0)
+            )
+            order.status = "RECONCILING" if ambiguous_vendor_result else "FAILED"
             order.rejection_reason = str(response.get("comment") or "MT5 order rejected")
+            if ambiguous_vendor_result:
+                order.response_payload_json = {
+                    **response,
+                    "reconciliation_required": True,
+                    "ambiguous_mt5_execution": True,
+                }
             self.db.commit()
             return ManualOrderResponse(
                 ok=False,
                 order_id=order.id,
-                status="FAILED",
+                status=order.status,
                 mode=order.mode,  # type: ignore[arg-type]
-                message="MT5 order rejected",
+                message=(
+                    "MT5 result is ambiguous; execution is being reconciled"
+                    if ambiguous_vendor_result
+                    else "MT5 order rejected"
+                ),
                 reasons=[order.rejection_reason],
                 warnings=warnings,
             )
@@ -423,18 +639,44 @@ class OrderManager:
         if order.executed_price is None and resolved is not None:
             order.executed_price = _float_or_none(resolved.get("price_open") or resolved.get("open_price"))
 
-        # Some MT5 builds return success before filling price/position in the
-        # immediate result. Resolve once from positions_get only when needed;
-        # never persist a live position with open_price=0.
-        if not order.executed_price or not order.mt5_position_ticket:
-            resolved = resolved or self._resolve_executed_position(order, now)
-            if resolved is not None:
-                order.executed_price = order.executed_price or _float_or_none(
-                    resolved.get("price_open") or resolved.get("open_price")
-                )
-                order.mt5_position_ticket = order.mt5_position_ticket or _int_or_none(
-                    resolved.get("ticket") or resolved.get("identifier")
-                )
+        retcode = _int_or_none(response.get("retcode"))
+        executed_volume = _float_or_none(response.get("volume"))
+        resolved_volume = _float_or_none(resolved.get("volume")) if isinstance(resolved, dict) else None
+        authoritative_volume = resolved_volume or executed_volume
+        if authoritative_volume is not None and authoritative_volume > 0:
+            requested_volume = float(order.volume)
+            order.volume = authoritative_volume
+            if retcode == 10010 or abs(authoritative_volume - requested_volume) > max(0.000001, requested_volume * 0.001):
+                warnings = [*warnings, "mt5_partial_fill"] if "mt5_partial_fill" not in warnings else warnings
+
+        # TRADE_RETCODE_PLACED confirms acceptance, not a completed market fill.
+        # If MT5 has not supplied a deal or an authoritative position snapshot,
+        # do not fabricate an OPEN position from the requested price. Continuous
+        # sync will attach the fill or close-deal round trip moments later.
+        if retcode == 10008 and order.mt5_deal_ticket is None and order.mt5_position_ticket is None and resolved is None:
+            order.status = "RECONCILING"
+            order.rejection_reason = "MT5 accepted the request but the market fill is still pending"
+            order.response_payload_json = {
+                **response,
+                "reconciliation_required": True,
+                "pending_market_fill": True,
+            }
+            self.db.commit()
+            return ManualOrderResponse(
+                ok=False,
+                order_id=order.id,
+                status="RECONCILING",
+                mode=order.mode,  # type: ignore[arg-type]
+                message="MT5 accepted the order; fill is being reconciled",
+                reasons=[order.rejection_reason],
+                warnings=warnings,
+            )
+
+        # The bridge already performs one in-process positions_get immediately
+        # after a successful order_send. Do not add a second HTTP round trip on
+        # the entry path. If MT5 has not exposed the fill yet, preserve the
+        # ambiguous order as RECONCILING and let the continuous position sync
+        # attach the authoritative ticket/price moments later.
 
         authoritative_opened_at = now
         authoritative_open_time_msc: int | None = None
@@ -459,7 +701,7 @@ class OrderManager:
                 resolved_position_snapshot=resolved,
                 mt5_position_ticket=order.mt5_position_ticket,
             )
-            order.status = "FAILED"
+            order.status = "RECONCILING"
             order.rejection_reason = "MT5 confirmed the order but no valid execution price could be resolved"
             order.response_payload_json = {
                 **response,
@@ -470,7 +712,7 @@ class OrderManager:
             return ManualOrderResponse(
                 ok=False,
                 order_id=order.id,
-                status="FAILED",
+                status="RECONCILING",
                 mode=order.mode,  # type: ignore[arg-type]
                 message="MT5 execution requires reconciliation",
                 reasons=[order.rejection_reason],
@@ -693,6 +935,16 @@ class OrderManager:
                 self.db.commit()
         except Exception:  # noqa: BLE001
             logger.exception("bot_order_push_failed order_id=%s", order.id)
+
+
+def _bool_setting(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _float_or_none(value: Any) -> float | None:

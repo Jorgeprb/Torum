@@ -74,6 +74,8 @@ class TorumV1Params(BaseModel):
     confirmation_ignore_doji: bool = True
 
     one_position_per_symbol: bool = False
+    third_entry_spacing_enabled: bool = True
+    third_entry_min_distance_pct: float = Field(0.20, ge=0.0, le=20.0)
     max_equivalent_positions: int = Field(3, ge=1, le=10)
     support_s1_multiplier: int = Field(1, ge=1, le=3)
     support_s2_multiplier: int = Field(2, ge=1, le=3)
@@ -82,7 +84,7 @@ class TorumV1Params(BaseModel):
     support_reference: Literal["PULLBACK_LOW", "ENTRY_PRICE"] = "PULLBACK_LOW"
     support_degrade_enabled: bool = True
 
-    ath_green_prefer_x2_entries: bool = True
+    ath_green_prefer_x2_entries: bool = False
     ath_red_limit_pct: float = Field(2.5, ge=0.0, le=100.0)
     ath_orange_limit_pct: float = Field(9.0, ge=0.0, le=100.0)
     ath_yellow_limit_pct: float = Field(15.0, ge=0.0, le=100.0)
@@ -224,7 +226,7 @@ FIELDS = [
 
     _field("timeframe", "Desbloqueo preferido", "unlock", "select", "Temporalidad preferida para desbloquear.", options=[{"value": "H2", "label": "2 horas"}, {"value": "H3", "label": "3 horas"}]),
     _field("unlock_timeframe_mode", "Ventanas de desbloqueo", "unlock", "select", "Evalúa H2 y H3 o limita la regla a una sola temporalidad.", options=[{"value": "BOTH", "label": "H2 y H3"}, {"value": "H2", "label": "Solo H2"}, {"value": "H3", "label": "Solo H3"}]),
-    _field("unlock_bullish_close_enabled", "Vela alcista", "unlock", "boolean", "Desbloquea con cierre alcista."),
+    _field("unlock_bullish_close_enabled", "Vela alcista o doji", "unlock", "boolean", "Desbloquea con cierre alcista o doji en H2/H3."),
     _field("unlock_two_bearish_hold_low_enabled", "Dos bajistas sin perder mínimo", "unlock", "boolean", "Desbloquea cuando dos velas bajistas mantienen el mínimo."),
     _field("unlock_min_body_pct", "Cuerpo mínimo", "unlock", "number", "Cuerpo mínimo de la vela de desbloqueo respecto a su precio.", unit="%", minimum=0, maximum=20, step=0.01, advanced=True),
 
@@ -289,6 +291,24 @@ FIELDS = [
     _field("usd_strength_strict", "Bloquear si no hay DXY", "context", "boolean", "Impide entradas si el snapshot DXY no está disponible.", advanced=True),
 
     _field("one_position_per_symbol", "Una posición por activo", "support", "boolean", "Impide una segunda entrada aunque el resto de límites la permitiera.", advanced=True),
+    _field(
+        "third_entry_spacing_enabled",
+        "Reservar la tercera entrada",
+        "support",
+        "boolean",
+        "Solo bloquea una tercera entrada cercana mientras existan dos posiciones abiertas a precios próximos. Al cerrar cualquiera de ellas, la siguiente entrada vuelve a quedar disponible.",
+    ),
+    _field(
+        "third_entry_min_distance_pct",
+        "Separación mínima de la tercera",
+        "support",
+        "number",
+        "Define cuándo dos posiciones abiertas están demasiado próximas y cuánto debe mejorar el ASK para permitir una tercera en esa misma zona de precio.",
+        unit="%",
+        minimum=0,
+        maximum=20,
+        step=0.01,
+    ),
     _field("support_s1_multiplier", "S1", "support", "number", "Entradas equivalentes en soporte S1.", minimum=1, maximum=3, step=1),
     _field("support_s2_multiplier", "S2", "support", "number", "Entradas equivalentes en soporte S2.", minimum=1, maximum=3, step=1),
     _field("support_s3_multiplier", "S3", "support", "number", "Entradas equivalentes en soporte S3.", minimum=1, maximum=3, step=1),
@@ -301,7 +321,6 @@ FIELDS = [
     _field("ath_orange_limit_pct", "Límite naranja", "risk", "number", "Fin de la zona de una entrada equivalente.", unit="%", minimum=0, maximum=100, step=0.1),
     _field("ath_yellow_limit_pct", "Límite amarillo", "risk", "number", "Fin de la zona de dos entradas equivalentes.", unit="%", minimum=0, maximum=100, step=0.1),
     _field("ath_green_limit_pct", "Límite verde", "risk", "number", "Fin de la zona de tres entradas equivalentes.", unit="%", minimum=0, maximum=100, step=0.1),
-    _field("ath_green_prefer_x2_entries", "Preferir doble en verde", "risk", "boolean", "En zona verde intenta agrupar dos equivalentes cuando sea posible.", advanced=True),
     _field("risk_stress_drop_from_ath_pct", "Caída de estrés desde ATH", "risk", "number", "Escenario adverso usado para el cálculo.", unit="%", minimum=1, maximum=99, step=0.1),
     _field("risk_max_balance_pct", "Riesgo máximo", "risk", "number", "Pérdida potencial máxima sobre el balance.", unit="% balance", minimum=1, maximum=100, step=0.1),
     _field("risk_missing_snapshot_policy", "Si falta snapshot", "risk", "select", "Comportamiento si el riesgo no está precalculado.", options=[{"value": "BLOCK", "label": "Bloquear"}, {"value": "USE_LAST_VALID", "label": "Usar último válido"}, {"value": "RECOMPUTE", "label": "Recalcular"}], advanced=True),
@@ -325,6 +344,6 @@ def ui_schema() -> dict[str, Any]:
     return {
         "groups": [item.model_dump() for item in GROUPS],
         "fields": [item.model_dump() for item in FIELDS],
-        "hidden_fields": ["pullback_threshold_pct"],
+        "hidden_fields": ["pullback_threshold_pct", "ath_green_prefer_x2_entries"],
         "defaults": {symbol: TorumV1Params.defaults_for_symbol(symbol).model_dump() for symbol in TORUM_SYMBOLS},
     }

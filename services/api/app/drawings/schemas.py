@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.drawings.validators import DRAWING_SOURCES, DRAWING_TYPES, normalize_style, validate_drawing_payload
 
-DrawingType = Literal["horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "manual_zone"]
+DrawingType = Literal["horizontal_line", "vertical_line", "trend_line", "rectangle", "text"]
 DrawingSource = Literal["MANUAL", "INDICATOR", "NEWS", "STRATEGY", "IMPORT"]
 
 

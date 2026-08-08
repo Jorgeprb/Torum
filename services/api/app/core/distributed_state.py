@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.config import get_settings
@@ -191,17 +191,26 @@ _LOCAL_LOCKS: dict[str, threading.Lock] = {}
 
 @dataclass
 class HybridLock:
-    """Thread lock plus Redis lease, preserving the standard acquire/release API."""
+    """Thread lock plus Redis lease with ownership isolated per caller thread.
+
+    A HybridLock may be shared by several strategy workers. Acquisition state
+    therefore must never live in ordinary instance attributes: a waiting worker
+    could overwrite the active owner's local lock/token and leave the lock held
+    forever. Thread-local ownership keeps each successful acquire paired with
+    exactly one release, while the keyed lock in ``_LOCAL_LOCKS`` still provides
+    mutual exclusion across all handles for the same key.
+    """
 
     key: str
     lease_seconds: int = 120
-    _token: str | None = None
-    _local: threading.Lock | None = None
+    _ownership: threading.local = field(default_factory=threading.local, init=False, repr=False)
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if getattr(self._ownership, "acquired", False):
+            raise RuntimeError(f"HybridLock is not re-entrant: {self.key}")
+
         with _LOCAL_LOCK_GUARD:
             local = _LOCAL_LOCKS.setdefault(self.key, threading.Lock())
-        self._local = local
         if timeout is None or timeout < 0:
             local_acquired = local.acquire(blocking)
             deadline = None
@@ -211,20 +220,41 @@ class HybridLock:
         if not local_acquired:
             return False
 
-        token = uuid.uuid4().hex
-        while not distributed_state.acquire_lock(self.key, token, self.lease_seconds):
-            if not blocking or (deadline is not None and time.monotonic() >= deadline):
-                local.release()
-                self._local = None
-                return False
-            time.sleep(0.05)
-        self._token = token
-        return True
+        token: str | None = None
+        try:
+            # The API defaults to exactly one worker, so the process-local lock
+            # is authoritative and Redis must not add latency to an entry.
+            if not get_settings().enforce_single_worker:
+                token = uuid.uuid4().hex
+                while not distributed_state.acquire_lock(self.key, token, self.lease_seconds):
+                    if not blocking or (deadline is not None and time.monotonic() >= deadline):
+                        local.release()
+                        return False
+                    time.sleep(0.05)
+
+            self._ownership.local = local
+            self._ownership.token = token
+            self._ownership.acquired = True
+            return True
+        except Exception:
+            # Never strand the process-local lock when Redis/configuration
+            # fails before ownership has been fully recorded.
+            local.release()
+            raise
 
     def release(self) -> None:
-        if self._token is not None:
-            distributed_state.release_lock(self.key, self._token)
-            self._token = None
-        if self._local is not None:
-            self._local.release()
-            self._local = None
+        if not getattr(self._ownership, "acquired", False):
+            return
+
+        token = getattr(self._ownership, "token", None)
+        local = getattr(self._ownership, "local", None)
+        # Clear ownership before releasing. A newly awakened waiter can then
+        # acquire independently without its state being erased by this owner.
+        self._ownership.acquired = False
+        self._ownership.token = None
+        self._ownership.local = None
+
+        if token is not None:
+            distributed_state.release_lock(self.key, token)
+        if local is not None:
+            local.release()

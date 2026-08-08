@@ -106,7 +106,7 @@ function effectiveParams(configuration: TorumV1Configuration, symbol: SimulatorS
 function operationZoneEnabled(drawing: ChartDrawingRead): boolean {
   const metadataValue = drawing.metadata.torum_v1_zone_enabled;
   const payloadValue = drawing.payload.torum_v1_zone_enabled;
-  return drawing.visible && ["rectangle", "manual_zone"].includes(drawing.drawing_type) && (metadataValue === true || payloadValue === true);
+  return drawing.visible && drawing.drawing_type === "rectangle" && (metadataValue === true || payloadValue === true);
 }
 
 function supportLevel(drawing: ChartDrawingRead): number | null {

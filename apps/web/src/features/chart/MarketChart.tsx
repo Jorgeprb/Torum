@@ -167,7 +167,13 @@ function isTorumV1OperationZone(drawing: ChartDrawingRead): boolean {
 }
 
 function canBeTorumV1OperationZone(drawing: ChartDrawingRead | null): drawing is ChartDrawingRead {
-  return Boolean(drawing && (drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone"));
+  return Boolean(drawing && drawing.drawing_type === "rectangle");
+}
+
+function isTorumV1DoubleZone(drawing: ChartDrawingRead | null): boolean {
+  if (!drawing || drawing.drawing_type !== "rectangle" || !isTorumV1OperationZone(drawing)) return false;
+  const metadata = drawing.metadata ?? {};
+  return metadata.torum_v1_default_double_enabled === true;
 }
 
 function supportMetadata(drawing: ChartDrawingRead): Record<string, unknown> {
@@ -755,7 +761,12 @@ export function MarketChart({
       const bgColor = drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone" ? hexToRgba(color, opacity) : styleValue(drawing.style, "backgroundColor", "rgba(245,197,66,0.15)");
       const textColor = styleValue(drawing.style, "textColor", "#edf2ef");
       const fontSize = clampedNumericStyleValue(drawing.style, "fontSize", 14, 8, 48);
-      const label = denseChartView && !operationZone ? "" : operationZone ? "TORUM V1 BUY ZONE" : drawingLabel(drawing);
+      const doubleZone = isTorumV1DoubleZone(drawing);
+      const label = denseChartView && !operationZone
+        ? ""
+        : operationZone
+          ? `TORUM V1 BUY ZONE${doubleZone ? " · x2" : ""}`
+          : drawingLabel(drawing);
       const base = { id: drawing.id, drawing, color, lineWidth, lineStyle: ls, glow, label };
       const payload = draftDrawingPayloadsRef.current[drawing.id] ?? drawing.payload;
 
@@ -1553,10 +1564,6 @@ export function MarketChart({
       const ts = drawingTimeSpanFromPoints(pendingPoint.time, point.time, timeframe);
       onCreateDrawing(createBaseDrawing(symbol, timeframe, "rectangle", { time1: ts.time1, time2: ts.time2, price1: Number(Math.min(pendingPoint.price, point.price).toFixed(5)), price2: Number(Math.max(pendingPoint.price, point.price).toFixed(5)), label: "Zone" }, "Rectangle"));
     }
-    if (drawingTool === "manual_zone") {
-      const ts = drawingTimeSpanFromPoints(pendingPoint.time, point.time, timeframe);
-      onCreateDrawing(createBaseDrawing(symbol, timeframe, "manual_zone", { time1: ts.time1, time2: ts.time2, price_min: Number(Math.min(pendingPoint.price, point.price).toFixed(5)), price_max: Number(Math.max(pendingPoint.price, point.price).toFixed(5)), direction: "NEUTRAL", label: "Manual zone", rules: {}, metadata: {} }, "Manual zone"));
-    }
     setPendingPoint(null); setPendingCoordinate(null);
   }
 
@@ -1694,6 +1701,13 @@ export function MarketChart({
     ? { kind: "drawing" as const, id: selectedDrawing.id }
     : selectedAlert ? { kind: "alert" as const, id: selectedAlert.id } : null;
   const canToggleTorumZone = canBeTorumV1OperationZone(selectedDrawing) && Boolean(onUpdateDrawing && !selectedDrawing.locked);
+  const canToggleTorumDouble = Boolean(
+    selectedDrawing
+    && selectedDrawing.drawing_type === "rectangle"
+    && isTorumV1OperationZone(selectedDrawing)
+    && onUpdateDrawing
+    && !selectedDrawing.locked
+  );
   const canStyleSelectedObject = selectedDrawing ? Boolean(onUpdateDrawing && !selectedDrawing.locked) : Boolean(selectedAlert);
   const canDeleteSelectedObject = selectedDrawing ? Boolean(onDeleteDrawing) : Boolean(selectedAlert && onCancelPriceAlert);
 
@@ -1725,6 +1739,24 @@ export function MarketChart({
     if (!selectedDrawing || !onUpdateDrawing || selectedDrawing.locked || !canBeTorumV1OperationZone(selectedDrawing)) return;
     const enabled = !isTorumV1OperationZone(selectedDrawing);
     void onUpdateDrawing(selectedDrawing, { metadata: { ...selectedDrawing.metadata, torum_v1_zone_enabled: enabled, zone_type: enabled ? "OPERATION_ZONE" : null, direction: "BUY" } });
+  }
+
+  function handleTorumDoubleToggle(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation?.();
+    if (
+      !selectedDrawing
+      || selectedDrawing.drawing_type !== "rectangle"
+      || !isTorumV1OperationZone(selectedDrawing)
+      || !onUpdateDrawing
+      || selectedDrawing.locked
+    ) return;
+    const enabled = !isTorumV1DoubleZone(selectedDrawing);
+    void onUpdateDrawing(selectedDrawing, {
+      metadata: {
+        ...selectedDrawing.metadata,
+        torum_v1_default_double_enabled: enabled,
+      },
+    });
   }
 
   function handleSelectedDeleteButton(event: PointerEvent<HTMLButtonElement>) {
@@ -1802,6 +1834,8 @@ export function MarketChart({
         selectedObject={selectedObject}
         canToggleTorumZone={canToggleTorumZone}
         isTorumZoneActive={selectedDrawing ? isTorumV1OperationZone(selectedDrawing) : false}
+        canToggleTorumDouble={canToggleTorumDouble}
+        isTorumDoubleActive={isTorumV1DoubleZone(selectedDrawing)}
         canStyleSelectedObject={canStyleSelectedObject}
         canDeleteSelectedObject={canDeleteSelectedObject}
         pullbackDebugVisible={pullbackDebugVisible}
@@ -1809,6 +1843,7 @@ export function MarketChart({
         onCenterChart={() => { onAutoFollowChange?.(true); setLocalHardResetToken(c => c + 1); setLocalRecenterToken(c => c + 1); }}
         onPullbackDebugToggle={() => onPullbackDebugToggle?.(!pullbackDebugVisible)}
         onToggleTorumZone={handleTorumZoneToggle}
+        onToggleTorumDouble={handleTorumDoubleToggle}
         onStyleButton={handleSelectedStyleButton}
         onDeleteButton={handleSelectedDeleteButton}
       />

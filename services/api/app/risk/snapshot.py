@@ -93,6 +93,7 @@ class RiskSnapshotService:
         *,
         source: str = "ALL",
         recompute_if_missing: bool = True,
+        schedule_recompute: bool = True,
     ) -> RiskSnapshot:
         normalized_symbol = symbol.upper()
         normalized_source = _normalize_source(source)
@@ -102,7 +103,8 @@ class RiskSnapshotService:
             cached = _SNAPSHOTS.get(key)
         if cached is not None:
             if cached.dirty:
-                self._ensure_recompute_job(normalized_symbol, normalized_source, account_login, account_server)
+                if schedule_recompute:
+                    self._ensure_recompute_job(normalized_symbol, normalized_source, account_login, account_server)
                 if cached.valid:
                     return cached
             else:
@@ -114,7 +116,8 @@ class RiskSnapshotService:
             snapshot.dirty = bool(persisted.dirty)
             if snapshot.dirty:
                 snapshot.message = snapshot.message or "Riesgo pendiente de actualizar"
-                self._ensure_recompute_job(normalized_symbol, normalized_source, account_login, account_server)
+                if schedule_recompute:
+                    self._ensure_recompute_job(normalized_symbol, normalized_source, account_login, account_server)
             with _CACHE_LOCK:
                 _SNAPSHOTS[key] = snapshot
             if snapshot.valid or not recompute_if_missing:

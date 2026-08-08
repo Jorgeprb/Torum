@@ -21,13 +21,16 @@ from app.strategies.models import StrategyConfig, StrategySignal
 from app.strategies.notifications import send_torum_v1_unlock_notifications
 from app.strategies.repository import get_global_strategy_settings
 from app.strategies.runner import StrategyRunner, _record_torum_v1_executed_entry_cycle, _torum_v1_desired_multiplier_for_ath_zone
+from app.strategies.schemas import StrategyConfigCreate, StrategyConfigUpdate
 from app.strategies.service import StrategyCatalogService
+from app.strategies.torum_v1_config import TorumV1Params
 from app.market_context.models import DollarStrengthSnapshot
 from app.strategies.torum_v1 import (
     TorumV1OperationZone,
     TorumV1SupportZone,
     TorumV1StatusService,
     detect_pullbacks,
+    desired_multiplier_for_support,
     is_bullish_confirmation,
     is_candle_inside_operation_zone,
     is_pullback_low_inside_operation_zone,
@@ -293,6 +296,21 @@ def test_xaueur_2h_bullish_unlocks() -> None:
     assert status.reason == "bullish_closed_candle"
 
 
+
+
+def test_xaueur_2h_doji_unlocks_even_with_min_body_filter() -> None:
+    db = _session()
+    config = _config(db, "XAUEUR", "H2")
+    config.params_json = {**config.params_json, "unlock_min_body_pct": 0.25}
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=100, low=99, previous_low=90)
+    db.commit()
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
+
+    assert status.status == "UNLOCKED"
+    assert status.reason == "doji_closed_candle"
+
+
 def test_xaueur_visual_status_unlocks_even_when_strategy_off() -> None:
     db = _session()
     config = _config(db, "XAUEUR", "H2")
@@ -398,6 +416,23 @@ def test_xauusd_h2_fails_then_h3_bullish_unlocks() -> None:
     assert waiting.reason == "waiting_closed_candle"
     assert unlocked.status == "UNLOCKED"
     assert unlocked.reason == "bullish_closed_candle"
+
+
+
+
+def test_xauusd_h3_doji_unlocks_when_h2_did_not() -> None:
+    db = _session()
+    config = _config(db, "XAUUSD", "H2")
+    config.params_json = {**config.params_json, "unlock_min_body_pct": 0.25}
+    _tf_candle(db, "XAUUSD", "H2", _madrid(1, 13), 110, 111, 90, 100)
+    _tf_candle(db, "XAUUSD", "H2", _madrid(1, 15), 100, 101, 80, 95)
+    _tf_candle(db, "XAUUSD", "H3", _madrid(1, 15), 100, 101, 80, 100)
+    db.commit()
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 18, 5)).assets["XAUUSD"]
+
+    assert status.status == "UNLOCKED"
+    assert status.reason == "doji_closed_candle"
 
 
 def test_xauusd_h2_and_h3_fail_then_next_h2_unlocks() -> None:
@@ -1003,6 +1038,48 @@ def test_pullback_detected_bullish_inside_zone_buy() -> None:
     assert decision.zone is zone
 
 
+def test_current_broker_clock_prevents_three_hour_old_confirmation_entry() -> None:
+    stale_peak = datetime(2026, 7, 31, 10, 55, tzinfo=UTC)
+    stale_low = stale_peak + timedelta(minutes=5)
+    stale_confirmation = stale_peak + timedelta(minutes=10)
+    current_broker_confirmation = datetime(2026, 7, 31, 14, 5, tzinfo=UTC)
+    candles = [
+        _m5_candle(stale_peak, 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(stale_low, 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(stale_confirmation, 99.8, 99.95, 99.75, 99.9),
+        _m5_candle(current_broker_confirmation, 99.9, 99.92, 99.6, 99.65),
+    ]
+    zone = TorumV1OperationZone(
+        "z1",
+        "rectangle",
+        int(datetime(2026, 7, 31, 0, 0, tzinfo=UTC).timestamp()),
+        int(datetime(2026, 8, 1, 0, 0, tzinfo=UTC).timestamp()),
+        99.0,
+        101.0,
+    )
+    params = {"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12}
+
+    stale_clock_decision = should_buy_torum_v1(
+        symbol="XAUEUR",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params=params,
+        now=datetime(2026, 7, 31, 11, 10, 30, tzinfo=UTC),
+    )
+    broker_clock_decision = should_buy_torum_v1(
+        symbol="XAUEUR",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params=params,
+        now=datetime(2026, 7, 31, 14, 10, 30, tzinfo=UTC),
+    )
+
+    assert stale_clock_decision.should_buy is True
+    assert stale_clock_decision.confirmation_candle_time == stale_confirmation
+    assert broker_clock_decision.should_buy is False
+    assert broker_clock_decision.reason == "waiting_bullish_confirmation"
+
+
 def test_pullback_entry_min_pct_blocks_small_pullback_inside_zone() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
@@ -1355,40 +1432,62 @@ def test_runner_detects_duplicate_torum_setup_signal() -> None:
     assert duplicate.id == previous.id
 
 
-def test_support_level_uses_pullback_low_for_desired_multiplier() -> None:
+def test_support_level_uses_executable_price_inside_visual_band() -> None:
     candles = [
         _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
         _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
         _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
     ]
-    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99.65, 99.75)
-    s1 = TorumV1SupportZone("s1", 1, 99.7, 99.65, 99.75, 0.2)
-    s2 = TorumV1SupportZone("s2", 2, 99.7, 99.65, 99.75, 0.2)
-    s3 = TorumV1SupportZone("s3", 3, 99.7, 99.65, 99.75, 0.2)
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99.0, 101.0)
+    s1 = TorumV1SupportZone("s1", 1, 99.9, 99.85, 99.95, 0.2)
+    s2 = TorumV1SupportZone("s2", 2, 99.9, 99.85, 99.95, 0.2)
+    s3 = TorumV1SupportZone("s3", 3, 99.9, 99.85, 99.95, 0.2)
 
     base_params = {
         "pullback_entry_min_pct": 0.2,
         "pullback_lookback_bars": 12,
         "one_position_per_symbol": False,
-        "operation_zone_allow_confirmation_price_outside": True,
     }
-    s1_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s1], params=base_params, now=_madrid(1, 9, 16))
-    s2_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s2], params=base_params, now=_madrid(1, 9, 16))
-    s3_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s3], params=base_params, now=_madrid(1, 9, 16))
-    s3_with_open = should_buy_torum_v1(
-        symbol="XAUUSD",
-        candles_m5=candles,
-        operation_zones=[zone],
-        support_zones=[s3],
-        params=base_params,
-        now=_madrid(1, 9, 16),
-        open_positions=[object()],
-    )
+    s1_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s1], params=base_params, now=_madrid(1, 9, 16), current_price=99.9)
+    s2_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s2], params=base_params, now=_madrid(1, 9, 16), current_price=99.9)
+    s3_decision = should_buy_torum_v1(symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s3], params=base_params, now=_madrid(1, 9, 16), current_price=99.9)
 
     assert s1_decision.metadata["desired_multiplier"] == 1
     assert s2_decision.metadata["desired_multiplier"] == 2
     assert s3_decision.metadata["desired_multiplier"] == 3
-    assert s3_with_open.metadata["desired_multiplier"] == 3
+    assert s3_decision.metadata["support_reference"] == "ENTRY_PRICE_VISUAL_ZONE"
+    assert s3_decision.metadata["support_reference_price"] == 99.9
+
+
+def test_support_multiplier_does_not_expand_outside_visual_band() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100, 100, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone("z1", "rectangle", int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()), 99.0, 101.0)
+    support = TorumV1SupportZone("s3", 3, 99.7, 99.65, 99.75, 0.2)
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        support_zones=[support],
+        params={
+            "pullback_entry_min_pct": 0.2,
+            "pullback_lookback_bars": 12,
+            "one_position_per_symbol": False,
+            "support_reference": "PULLBACK_LOW",
+            "support_max_distance_pct": 99.0,
+        },
+        now=_madrid(1, 9, 16),
+        current_price=99.9,
+    )
+
+    assert decision.should_buy is True
+    assert decision.support is None
+    assert decision.metadata["desired_multiplier"] == 1
+    assert decision.metadata["support_reference"] == "ENTRY_PRICE_VISUAL_ZONE"
 
 
 def test_doji_can_confirm_current_pullback_when_enabled() -> None:
@@ -1426,35 +1525,41 @@ def test_doji_can_confirm_current_pullback_when_enabled() -> None:
     assert rejected.reason == "waiting_bullish_confirmation"
 
 
-def test_green_ath_option_prefers_x2_multiplier() -> None:
+def test_ath_zone_never_promotes_a_simple_setup_to_double() -> None:
     db = _session()
     set_symbol_ath_level(db, "XAUUSD", "manual", 6000)
 
-    preferred = _torum_v1_desired_multiplier_for_ath_zone(
+    legacy_enabled = _torum_v1_desired_multiplier_for_ath_zone(
         db,
         symbol="XAUUSD",
         current_price=5000,
         params={"ath_green_prefer_x2_entries": True},
         desired_multiplier=1,
     )
-    disabled = _torum_v1_desired_multiplier_for_ath_zone(
+    already_double = _torum_v1_desired_multiplier_for_ath_zone(
         db,
         symbol="XAUUSD",
         current_price=5000,
         params={"ath_green_prefer_x2_entries": False},
-        desired_multiplier=1,
-    )
-    not_green = _torum_v1_desired_multiplier_for_ath_zone(
-        db,
-        symbol="XAUUSD",
-        current_price=5300,
-        params={"ath_green_prefer_x2_entries": True},
-        desired_multiplier=1,
+        desired_multiplier=2,
     )
 
-    assert preferred == 2
-    assert disabled == 1
-    assert not_green == 1
+    assert legacy_enabled == 1
+    assert already_double == 2
+
+
+def test_no_support_is_simple_even_if_s1_multiplier_was_customized() -> None:
+    assert desired_multiplier_for_support(
+        None,
+        [],
+        params={"support_s1_multiplier": 3},
+    ) == 1
+    assert desired_multiplier_for_support(
+        None,
+        [],
+        params={"support_s1_multiplier": 3},
+        zone_default_multiplier=2,
+    ) == 2
 
 
 def test_rectangle_not_activated_does_not_count() -> None:
@@ -1474,6 +1579,70 @@ def test_rectangle_not_activated_does_not_count() -> None:
     )
 
     assert operation_zones_from_drawings([drawing]) == []
+
+
+def test_rectangle_torum_zone_can_request_x2_and_legacy_manual_zone_is_ignored() -> None:
+    common_metadata = {
+        "torum_v1_zone_enabled": True,
+        "torum_v1_default_double_enabled": True,
+        "direction": "BUY",
+    }
+    legacy_manual = ChartDrawing(
+        id="legacy-manual", user_id=1, internal_symbol="XAUUSD", timeframe="M5",
+        drawing_type="manual_zone", name=None,
+        payload_json={
+            "time1": int(_madrid(1, 9).timestamp()),
+            "time2": int(_madrid(1, 10).timestamp()),
+            "price_min": 99.0, "price_max": 101.0, "direction": "BUY",
+        },
+        style_json={}, metadata_json=common_metadata, locked=False, visible=True, source="MANUAL",
+    )
+    rectangle = ChartDrawing(
+        id="rectangle-x2", user_id=1, internal_symbol="XAUUSD", timeframe="M5",
+        drawing_type="rectangle", name=None,
+        payload_json={
+            "time1": int(_madrid(1, 9).timestamp()),
+            "time2": int(_madrid(1, 10).timestamp()),
+            "price1": 99.0, "price2": 101.0,
+        },
+        style_json={}, metadata_json=common_metadata, locked=False, visible=True, source="MANUAL",
+    )
+
+    zones = operation_zones_from_drawings([legacy_manual, rectangle])
+
+    assert [zone.drawing_id for zone in zones] == ["rectangle-x2"]
+    assert zones[0].default_multiplier == 2
+
+
+def test_rectangle_torum_zone_x2_applies_only_without_visual_support() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone(
+        "rectangle-x2", "rectangle",
+        int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()),
+        99.0, 101.0, default_multiplier=2,
+    )
+    no_support = should_buy_torum_v1(
+        symbol="XAUUSD", candles_m5=candles, operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.20},
+        now=_madrid(1, 9, 16), current_price=99.9,
+    )
+    s3 = TorumV1SupportZone(
+        drawing_id="s3", level=3, price=99.9, lower_price=99.7, upper_price=100.0, opacity=0.2,
+    )
+    with_support = should_buy_torum_v1(
+        symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s3],
+        params={"pullback_entry_min_pct": 0.20},
+        now=_madrid(1, 9, 16), current_price=99.9,
+    )
+
+    assert no_support.should_buy is True
+    assert no_support.metadata is not None and no_support.metadata["desired_multiplier"] == 2
+    assert with_support.should_buy is True
+    assert with_support.metadata is not None and with_support.metadata["desired_multiplier"] == 3
 
 
 def test_active_zone_time_price_outside_no_buy() -> None:
@@ -1867,3 +2036,576 @@ def test_runner_records_pullback_cycle_only_for_executed_torum_entry() -> None:
     assert config.params_json["last_executed_entry_candle_time"] == confirmation_time
     assert config.params_json["last_executed_entry_order_id"] == 123
     assert config.params_json["executed_entry_cycle_boundaries"] == [confirmation_time]
+
+
+def test_aggregated_unlock_diagnostic_uses_window_boundaries() -> None:
+    from app.strategies.torum_v1 import AggregatedCandle, _aggregated_candle_diagnostic_payload
+
+    start = _madrid(1, 9).astimezone(UTC)
+    end = _madrid(1, 11).astimezone(UTC)
+    payload = _aggregated_candle_diagnostic_payload(
+        AggregatedCandle(
+            start_time=start,
+            end_time=end,
+            open=100.0,
+            high=102.0,
+            low=99.0,
+            close=101.0,
+        )
+    )
+
+    assert payload is not None
+    assert payload["start_time"] == start
+    assert payload["end_time"] == end
+    assert "time" not in payload
+    assert payload["bullish"] is True
+
+
+def test_auto_runner_selects_only_latest_enabled_config_per_execution_scope() -> None:
+    from app.strategies.auto_runner import _latest_configs_by_execution_scope
+
+    old_xaueur = SimpleNamespace(
+        id=3,
+        user_id=1,
+        strategy_key="torum_v1",
+        internal_symbol="XAUEUR",
+        mode="DEMO",
+        revision=1,
+    )
+    current_xaueur = SimpleNamespace(
+        id=5,
+        user_id=1,
+        strategy_key="torum_v1",
+        internal_symbol="XAUEUR",
+        mode="DEMO",
+        revision=13,
+    )
+    live_xaueur = SimpleNamespace(
+        id=6,
+        user_id=1,
+        strategy_key="torum_v1",
+        internal_symbol="XAUEUR",
+        mode="LIVE",
+        revision=2,
+    )
+
+    selected, duplicates = _latest_configs_by_execution_scope(
+        [old_xaueur, current_xaueur, live_xaueur]
+    )
+
+    assert [item.id for item in selected] == [5]
+    assert [item.id for item in duplicates] == [3, 6]
+
+
+def test_enabling_new_torum_config_deactivates_every_other_mode_for_symbol() -> None:
+    db = _session()
+    service = StrategyCatalogService(db)
+    paper = service.create_config(
+        StrategyConfigCreate(
+            strategy_key="torum_v1",
+            internal_symbol="XAUUSD",
+            timeframe="M5",
+            enabled=True,
+            mode="PAPER",
+            params_json={},
+        ),
+        user_id=1,
+    )
+    live = service.create_config(
+        StrategyConfigCreate(
+            strategy_key="torum_v1",
+            internal_symbol="XAUUSD",
+            timeframe="M5",
+            enabled=True,
+            mode="LIVE",
+            params_json={},
+        ),
+        user_id=1,
+    )
+
+    db.refresh(paper)
+    db.refresh(live)
+    assert paper.enabled is False
+    assert live.enabled is True
+
+
+def test_switching_enabled_torum_config_is_single_active_revision() -> None:
+    db = _session()
+    service = StrategyCatalogService(db)
+    first = service.create_config(
+        StrategyConfigCreate(
+            strategy_key="torum_v1",
+            internal_symbol="XAUEUR",
+            timeframe="M5",
+            enabled=True,
+            mode="PAPER",
+            params_json={},
+        ),
+        user_id=1,
+    )
+    second = service.create_config(
+        StrategyConfigCreate(
+            strategy_key="torum_v1",
+            internal_symbol="XAUEUR",
+            timeframe="M5",
+            enabled=False,
+            mode="DEMO",
+            params_json={},
+        ),
+        user_id=1,
+    )
+
+    service.update_config(
+        second,
+        StrategyConfigUpdate(enabled=True, expected_revision=second.revision),
+        user_id=1,
+    )
+
+    db.refresh(first)
+    db.refresh(second)
+    assert first.enabled is False
+    assert second.enabled is True
+
+
+def test_strategy_context_ignores_wrong_mode_and_unidentified_mt5_ghost_positions() -> None:
+    from app.positions.models import Position
+    from app.strategies.engine import StrategyContextBuilder
+
+    db = _session()
+    config = _config(db, "XAUEUR")
+    config.mode = "DEMO"
+    db.commit()
+
+    def add_position(*, mode: str, ticket: int | None, identifier: int | None) -> Position:
+        order = Order(
+            user_id=1,
+            internal_symbol="XAUEUR",
+            broker_symbol="XAUEUR",
+            mode=mode,
+            side="BUY",
+            order_type="MARKET",
+            volume=0.03,
+            status="EXECUTED",
+            source="STRATEGY",
+            strategy_key="torum_v1",
+        )
+        db.add(order)
+        db.flush()
+        position = Position(
+            user_id=1,
+            order_id=order.id,
+            internal_symbol="XAUEUR",
+            broker_symbol="XAUEUR",
+            mode=mode,
+            side="BUY",
+            volume=0.03,
+            open_price=3500.0,
+            status="OPEN",
+            mt5_position_ticket=ticket,
+            mt5_position_identifier=identifier,
+            opened_at=datetime.now(UTC),
+        )
+        db.add(position)
+        db.flush()
+        return position
+
+    valid = add_position(mode="DEMO", ticket=None, identifier=987654)
+    add_position(mode="DEMO", ticket=None, identifier=None)
+    add_position(mode="PAPER", ticket=None, identifier=None)
+    db.commit()
+
+    positions = StrategyContextBuilder(db)._open_positions(config)
+
+    assert [position.id for position in positions] == [valid.id]
+
+
+def test_risk_exposure_accepts_persistent_mt5_position_identifier() -> None:
+    from app.strategies.ath import _is_live_bot_position
+
+    position = SimpleNamespace(
+        status="OPEN",
+        closed_at=None,
+        close_price=None,
+        mode="DEMO",
+        mt5_position_ticket=None,
+        mt5_position_identifier=123456,
+    )
+
+    assert _is_live_bot_position(position) is True
+
+
+def test_two_consecutive_s3_setups_request_triple_after_entry_cycle_reset() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 4048.0, 4050.0, 4047.0, 4049.0),
+        _m5_candle(_madrid(1, 9, 5), 4049.0, 4049.0, 4034.0, 4036.0),
+        _m5_candle(_madrid(1, 9, 10), 4036.0, 4037.0, 4032.0, 4033.0),
+        _m5_candle(_madrid(1, 9, 15), 4031.0, 4036.0, 4028.0, 4034.0),
+        _m5_candle(_madrid(1, 9, 20), 4034.0, 4042.0, 4033.0, 4040.0),
+        _m5_candle(_madrid(1, 9, 25), 4040.0, 4040.5, 4030.0, 4031.0),
+        _m5_candle(_madrid(1, 9, 30), 4030.5, 4036.0, 4029.0, 4035.0),
+    ]
+    zone = TorumV1OperationZone(
+        "operation-zone",
+        "rectangle",
+        int(_madrid(1, 9).timestamp()),
+        int(_madrid(1, 10).timestamp()),
+        4000.0,
+        4100.0,
+    )
+    support = TorumV1SupportZone(
+        drawing_id="support-s3",
+        level=3,
+        price=4030.0,
+        lower_price=4000.0,
+        upper_price=4100.0,
+        enabled=True,
+        opacity=0.2,
+    )
+    params = {
+        "pullback_entry_min_pct": 0.20,
+        "pullback_entry_recovery_pct": 0.0,
+        "pullback_lookback_bars": 12,
+        "support_reference": "ENTRY_PRICE",
+        "support_s3_multiplier": 3,
+        "one_position_per_symbol": True,
+    }
+
+    first = should_buy_torum_v1(
+        symbol="XAUEUR",
+        candles_m5=candles[:4],
+        operation_zones=[zone],
+        support_zones=[support],
+        params=params,
+        now=_madrid(1, 9, 21),
+        current_price=4034.0,
+        open_positions=[],
+    )
+    assert first.should_buy is True
+    assert first.support is not None and first.support.level == 3
+    assert first.metadata["desired_multiplier"] == 3
+
+    first_boundary = int(_madrid(1, 9, 15).timestamp())
+    second = should_buy_torum_v1(
+        symbol="XAUEUR",
+        candles_m5=candles,
+        operation_zones=[zone],
+        support_zones=[support],
+        params={
+            **params,
+            "last_signal_candle_time": first_boundary,
+            "last_executed_entry_candle_time": first_boundary,
+            "executed_entry_cycle_boundaries": [first_boundary],
+        },
+        now=_madrid(1, 9, 36),
+        current_price=4035.0,
+        open_positions=[],
+    )
+    assert second.should_buy is True
+    assert second.support is not None and second.support.level == 3
+    assert second.metadata["desired_multiplier"] == 3
+    assert second.pullback is not None
+    assert second.pullback.swing_high == 4042.0
+
+
+def test_third_entry_spacing_keeps_first_and_second_entries_unrestricted() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 4048.0, 4050.0, 4047.0, 4049.0),
+        _m5_candle(_madrid(1, 9, 5), 4049.0, 4049.0, 4034.0, 4036.0),
+        _m5_candle(_madrid(1, 9, 10), 4036.0, 4037.0, 4032.0, 4033.0),
+        _m5_candle(_madrid(1, 9, 15), 4031.0, 4036.0, 4028.0, 4034.0),
+    ]
+    zone = TorumV1OperationZone(
+        "operation-zone",
+        "rectangle",
+        int(_madrid(1, 9).timestamp()),
+        int(_madrid(1, 10).timestamp()),
+        4000.0,
+        4100.0,
+    )
+    first_open_position = SimpleNamespace(
+        open_price=4045.0,
+        order_id=101,
+        opened_at=_madrid(1, 9),
+    )
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={
+            "pullback_entry_min_pct": 0.20,
+            "pullback_entry_recovery_pct": 0.0,
+            "pullback_lookback_bars": 12,
+            "third_entry_spacing_enabled": True,
+            "third_entry_min_distance_pct": 0.20,
+            "executed_entry_price_ladder": [
+                {
+                    "order_id": 101,
+                    "confirmation_candle_time": int(_madrid(1, 8, 30).timestamp()),
+                    "executed_price": 4045.0,
+                }
+            ],
+        },
+        now=_madrid(1, 9, 21),
+        current_price=4034.0,
+        open_positions=[first_open_position],
+    )
+
+    assert decision.should_buy is True
+    assert decision.metadata is not None
+    assert decision.metadata["entry_ladder_count"] == 1
+    assert decision.metadata["third_entry_spacing_applied"] is False
+
+
+def test_entry_spacing_defaults_are_enabled_and_legacy_single_position_guard_is_off() -> None:
+    normalized = TorumV1Params.normalize("XAUUSD", {})
+
+    assert normalized.one_position_per_symbol is False
+    assert normalized.third_entry_spacing_enabled is True
+    assert normalized.third_entry_min_distance_pct == 0.20
+
+
+def test_third_entry_spacing_blocks_close_third_entry_and_allows_lower_price() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 4048.0, 4050.0, 4047.0, 4049.0),
+        _m5_candle(_madrid(1, 9, 5), 4049.0, 4049.0, 4034.0, 4036.0),
+        _m5_candle(_madrid(1, 9, 10), 4036.0, 4037.0, 4032.0, 4033.0),
+        _m5_candle(_madrid(1, 9, 15), 4031.0, 4036.0, 4028.0, 4034.0),
+    ]
+    zone = TorumV1OperationZone(
+        "operation-zone",
+        "rectangle",
+        int(_madrid(1, 9).timestamp()),
+        int(_madrid(1, 10).timestamp()),
+        3900.0,
+        4100.0,
+    )
+    open_positions = [
+        SimpleNamespace(open_price=4055.31, order_id=201, opened_at=_madrid(1, 8, 30)),
+        SimpleNamespace(open_price=4051.50, order_id=202, opened_at=_madrid(1, 8, 45)),
+    ]
+    params = {
+        "pullback_entry_min_pct": 0.20,
+        "pullback_entry_recovery_pct": 0.0,
+        "pullback_lookback_bars": 12,
+        "one_position_per_symbol": False,
+        "third_entry_spacing_enabled": True,
+        "third_entry_min_distance_pct": 0.20,
+        # Historical rungs are intentionally irrelevant to the live guard.
+        "executed_entry_price_ladder": [
+            {"order_id": 100, "executed_price": 4200.0},
+        ],
+    }
+
+    too_close = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params=params,
+        now=_madrid(1, 9, 21),
+        current_price=4050.0,
+        open_positions=open_positions,
+    )
+    assert too_close.should_buy is False
+    assert too_close.reason == "third_entry_price_too_close"
+    assert too_close.metadata is not None
+    assert too_close.metadata["third_entry_open_position_count"] == 2
+    assert too_close.metadata["third_entry_existing_pair_close"] is True
+    assert too_close.metadata["third_entry_spacing_allowed"] is False
+
+    sufficiently_lower = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params=params,
+        now=_madrid(1, 9, 21),
+        current_price=4043.0,
+        open_positions=open_positions,
+    )
+    assert sufficiently_lower.should_buy is True
+    assert sufficiently_lower.metadata is not None
+    assert sufficiently_lower.metadata["third_entry_spacing_allowed"] is True
+
+
+def test_third_entry_spacing_releases_immediately_when_one_position_closes() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 4048.0, 4050.0, 4047.0, 4049.0),
+        _m5_candle(_madrid(1, 9, 5), 4049.0, 4049.0, 4034.0, 4036.0),
+        _m5_candle(_madrid(1, 9, 10), 4036.0, 4037.0, 4032.0, 4033.0),
+        _m5_candle(_madrid(1, 9, 15), 4031.0, 4036.0, 4028.0, 4034.0),
+    ]
+    zone = TorumV1OperationZone(
+        "operation-zone", "rectangle",
+        int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()),
+        3900.0, 4100.0,
+    )
+    params = {
+        "pullback_entry_min_pct": 0.20,
+        "pullback_entry_recovery_pct": 0.0,
+        "pullback_lookback_bars": 12,
+        "third_entry_spacing_enabled": True,
+        "third_entry_min_distance_pct": 0.20,
+        "executed_entry_price_ladder": [
+            {"order_id": 201, "executed_price": 4055.31},
+            {"order_id": 202, "executed_price": 4051.50},
+        ],
+    }
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params=params,
+        now=_madrid(1, 9, 21),
+        current_price=4050.0,
+        # Order 202 already hit TP, so only the still-open position is supplied.
+        open_positions=[SimpleNamespace(open_price=4055.31, order_id=201)],
+    )
+
+    assert decision.should_buy is True
+    assert decision.metadata is not None
+    assert decision.metadata["third_entry_open_position_count"] == 1
+    assert decision.metadata["third_entry_spacing_applied"] is False
+
+
+def test_third_entry_spacing_does_not_block_when_two_open_entries_are_far_apart() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 4048.0, 4050.0, 4047.0, 4049.0),
+        _m5_candle(_madrid(1, 9, 5), 4049.0, 4049.0, 4034.0, 4036.0),
+        _m5_candle(_madrid(1, 9, 10), 4036.0, 4037.0, 4032.0, 4033.0),
+        _m5_candle(_madrid(1, 9, 15), 4031.0, 4036.0, 4028.0, 4034.0),
+    ]
+    zone = TorumV1OperationZone(
+        "operation-zone", "rectangle",
+        int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()),
+        3900.0, 4100.0,
+    )
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={
+            "pullback_entry_min_pct": 0.20,
+            "pullback_entry_recovery_pct": 0.0,
+            "pullback_lookback_bars": 12,
+            "third_entry_spacing_enabled": True,
+            "third_entry_min_distance_pct": 0.20,
+        },
+        now=_madrid(1, 9, 21),
+        current_price=4034.0,
+        open_positions=[
+            SimpleNamespace(open_price=4055.31, order_id=201),
+            SimpleNamespace(open_price=4038.50, order_id=202),
+        ],
+    )
+
+    assert decision.should_buy is True
+    assert decision.metadata is not None
+    assert decision.metadata["third_entry_existing_pair_close"] is False
+    assert decision.metadata["third_entry_spacing_applied"] is False
+
+
+def test_third_entry_spacing_ignores_finished_campaign() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 4048.0, 4050.0, 4047.0, 4049.0),
+        _m5_candle(_madrid(1, 9, 5), 4049.0, 4049.0, 4034.0, 4036.0),
+        _m5_candle(_madrid(1, 9, 10), 4036.0, 4037.0, 4032.0, 4033.0),
+        _m5_candle(_madrid(1, 9, 15), 4031.0, 4036.0, 4028.0, 4034.0),
+    ]
+    zone = TorumV1OperationZone(
+        "operation-zone",
+        "rectangle",
+        int(_madrid(1, 9).timestamp()),
+        int(_madrid(1, 10).timestamp()),
+        3900.0,
+        4100.0,
+    )
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={
+            "pullback_entry_min_pct": 0.20,
+            "pullback_entry_recovery_pct": 0.0,
+            "pullback_lookback_bars": 12,
+            "one_position_per_symbol": False,
+            "third_entry_spacing_enabled": True,
+            "third_entry_min_distance_pct": 0.20,
+            "executed_entry_price_ladder": [
+                {"order_id": 301, "executed_price": 4055.31},
+                {"order_id": 302, "executed_price": 4038.50},
+            ],
+        },
+        now=_madrid(1, 9, 21),
+        current_price=4034.0,
+        open_positions=[],
+    )
+
+    assert decision.should_buy is True
+    assert decision.metadata is not None
+    assert decision.metadata["third_entry_spacing_applied"] is False
+
+
+def test_runner_records_entry_price_ladder_across_open_campaign() -> None:
+    db = _session()
+    config = _config(db, "XAUUSD")
+    first_confirmation = int(_madrid(1, 9).timestamp())
+    second_confirmation = int(_madrid(1, 9, 15).timestamp())
+    config.params_json = {
+        "executed_entry_price_ladder": [
+            {
+                "order_id": 401,
+                "confirmation_candle_time": first_confirmation,
+                "executed_price": 4255.31,
+            }
+        ]
+    }
+    signal = StrategySignal(
+        strategy_config_id=config.id,
+        strategy_key="torum_v1",
+        user_id=1,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        signal_type="ENTRY",
+        side="BUY",
+        entry_type="MARKET",
+        confidence=0.72,
+        reason="buy_pullback_confirmed_inside_zone",
+        metadata_json={"confirmation_candle_time": second_confirmation},
+        status="ORDER_EXECUTED",
+    )
+    prior = SimpleNamespace(
+        open_price=4255.31,
+        order_id=401,
+        opened_at=_madrid(1, 9),
+    )
+
+    _record_torum_v1_executed_entry_cycle(
+        config,
+        signal,
+        order_id=402,
+        executed_price=4238.50,
+        prior_open_positions=[prior],
+    )
+
+    ladder = config.params_json["executed_entry_price_ladder"]
+    assert [entry["order_id"] for entry in ladder] == [401, 402]
+    assert [entry["executed_price"] for entry in ladder] == [4255.31, 4238.50]
+
+
+def test_auto_runner_failed_result_keeps_durable_retry_armed() -> None:
+    from app.strategies.auto_runner import _raise_if_incomplete_result
+    import pytest
+
+    failed = SimpleNamespace(run=SimpleNamespace(status="FAILED"), message="symbol_lock_timeout")
+    with pytest.raises(RuntimeError, match="torum_strategy_run_failed:42:symbol_lock_timeout"):
+        _raise_if_incomplete_result(42, failed)
+
+
+def test_auto_runner_terminal_result_does_not_retry_completed_decision() -> None:
+    from app.strategies.auto_runner import _raise_if_incomplete_result
+
+    for result in (
+        SimpleNamespace(run=SimpleNamespace(status="FINISHED"), message="No setup"),
+        SimpleNamespace(run=SimpleNamespace(status="FINISHED"), message="MT5 response is reconciling"),
+    ):
+        _raise_if_incomplete_result(42, result)

@@ -22,17 +22,6 @@ export function drawingLabel(drawing: ChartDrawingRead): string {
 }
 
 export function defaultDrawingStyle(tool: DrawingTool): Record<string, unknown> {
-  if (tool === "manual_zone") {
-    return {
-      color: "#62d995",
-      lineWidth: 2,
-      lineStyle: "solid",
-      glow: 0,
-      opacity: 0.16,
-      backgroundColor: "rgba(98,217,149,0.16)",
-      textColor: "#edf2ef"
-    };
-  }
   if (tool === "rectangle") {
     return {
       color: "#d6b25e",
@@ -72,8 +61,7 @@ export function toolName(tool: DrawingTool): string {
     vertical_line: "Vertical",
     trend_line: "Tendencia",
     rectangle: "Rectangulo",
-    text: "Texto",
-    manual_zone: "Zona manual"
+    text: "Texto"
   };
   return names[tool];
 }

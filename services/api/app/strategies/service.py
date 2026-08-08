@@ -1,3 +1,4 @@
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -41,6 +42,12 @@ class StrategyCatalogService:
         data = payload.model_dump()
         if payload.strategy_key == "torum_v1":
             data["params_json"] = TorumV1Params.normalize(payload.internal_symbol, payload.params_json).model_dump()
+            if bool(payload.enabled):
+                self._deactivate_other_torum_configs(
+                    user_id=user_id,
+                    symbol=payload.internal_symbol,
+                    exclude_id=None,
+                )
         config = StrategyConfig(user_id=user_id, revision=1, **data)
         self.db.add(config)
         self.db.flush()
@@ -53,8 +60,21 @@ class StrategyCatalogService:
         data = payload.model_dump(exclude_unset=True)
         expected_revision = data.pop("expected_revision", None)
         change_note = data.pop("change_note", None)
+        # Optional API fields may be sent explicitly as null. They mean "leave
+        # unchanged" for execution-critical scalar settings; persisting NULL
+        # would violate the DB contract and could disable the runner entirely.
+        for field in ("enabled", "mode", "params_json"):
+            if data.get(field) is None:
+                data.pop(field, None)
         if expected_revision is not None and int(config.revision or 1) != expected_revision:
             raise ValueError(f"strategy_config_revision_conflict:{config.revision}")
+        target_enabled = bool(data.get("enabled", config.enabled))
+        if config.strategy_key == "torum_v1" and target_enabled:
+            self._deactivate_other_torum_configs(
+                user_id=config.user_id,
+                symbol=config.internal_symbol,
+                exclude_id=config.id,
+            )
         if config.strategy_key == "torum_v1" and "params_json" in data:
             data["params_json"] = TorumV1Params.normalize(config.internal_symbol, data["params_json"]).model_dump()
         for field, value in data.items():
@@ -79,24 +99,38 @@ class StrategyCatalogService:
     ) -> list[StrategyConfig]:
         from app.strategies.repository import list_configs
 
-        existing = {
-            item.internal_symbol.upper(): item
-            for item in list_configs(self.db, user_id=user_id)
-            if item.strategy_key == "torum_v1" and item.internal_symbol.upper() in TORUM_SYMBOLS
-        }
+        candidates = sorted(
+            (
+                item
+                for item in list_configs(self.db, user_id=user_id)
+                if item.strategy_key == "torum_v1" and item.internal_symbol.upper() in TORUM_SYMBOLS
+            ),
+            key=lambda item: (int(item.revision or 1), int(item.id or 0)),
+        )
+        existing = {item.internal_symbol.upper(): item for item in candidates}
         updated: list[StrategyConfig] = []
         try:
             for symbol in TORUM_SYMBOLS:
                 config = existing.get(symbol)
                 merged = {**base_params, **asset_overrides.get(symbol, {})}
                 normalized = TorumV1Params.normalize(symbol, merged).model_dump()
+                target_enabled = enabled_by_symbol.get(
+                    symbol,
+                    config.enabled if config is not None else bool(normalized.get("enabled", True)),
+                )
+                if target_enabled:
+                    self._deactivate_other_torum_configs(
+                        user_id=user_id,
+                        symbol=symbol,
+                        exclude_id=config.id if config is not None else None,
+                    )
                 if config is None:
                     config = StrategyConfig(
                         user_id=user_id,
                         strategy_key="torum_v1",
                         internal_symbol=symbol,
                         timeframe=normalized["timeframe"],
-                        enabled=enabled_by_symbol.get(symbol, bool(normalized.get("enabled", True))),
+                        enabled=target_enabled,
                         mode=mode_by_symbol.get(symbol, "PAPER"),
                         params_json=normalized,
                         revision=1,
@@ -109,7 +143,7 @@ class StrategyCatalogService:
                         raise ValueError(f"strategy_config_revision_conflict:{symbol}:{config.revision}")
                     config.params_json = normalized
                     config.timeframe = normalized["timeframe"]
-                    config.enabled = enabled_by_symbol.get(symbol, config.enabled)
+                    config.enabled = target_enabled
                     config.mode = mode_by_symbol.get(symbol, config.mode)
                     config.revision = int(config.revision or 1) + 1
                 self.db.flush()
@@ -126,6 +160,12 @@ class StrategyCatalogService:
     def restore_version(
         self, config: StrategyConfig, version: StrategyConfigVersion, *, user_id: int | None = None
     ) -> StrategyConfig:
+        if config.strategy_key == "torum_v1" and version.enabled:
+            self._deactivate_other_torum_configs(
+                user_id=config.user_id,
+                symbol=config.internal_symbol,
+                exclude_id=config.id,
+            )
         config.enabled = version.enabled
         config.mode = version.mode
         config.timeframe = version.timeframe
@@ -154,6 +194,37 @@ class StrategyCatalogService:
                 change_note=change_note,
             )
         )
+
+    def _deactivate_other_torum_configs(
+        self,
+        *,
+        user_id: int | None,
+        symbol: str,
+        exclude_id: int | None,
+    ) -> None:
+        """Keep exactly one enabled Torum configuration per user and asset.
+
+        Mode is a property of that active configuration, not a second execution
+        lane.  Allowing DEMO and LIVE rows to remain enabled together caused the
+        same candle to be evaluated twice with different revisions.
+        """
+
+        stmt = select(StrategyConfig).where(
+            StrategyConfig.strategy_key == "torum_v1",
+            StrategyConfig.user_id == user_id,
+            StrategyConfig.internal_symbol == symbol.upper(),
+            StrategyConfig.enabled.is_(True),
+        )
+        if exclude_id is not None:
+            stmt = stmt.where(StrategyConfig.id != exclude_id)
+        for other in self.db.scalars(stmt.with_for_update()):
+            other.enabled = False
+            other.revision = int(other.revision or 1) + 1
+            self._snapshot_version(
+                other,
+                user_id=user_id,
+                change_note="Desactivada automáticamente al activar otra configuración Torum del mismo activo",
+            )
 
     def delete_config(self, config: StrategyConfig) -> None:
         self.db.delete(config)

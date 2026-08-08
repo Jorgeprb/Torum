@@ -50,6 +50,8 @@ class BridgeSettings(BaseSettings):
     mt5_diagnostic_log_interval_seconds: int = 5
     mt5_position_sync_interval_seconds: float = 0.5
     mt5_deals_history_lookback_days: int = 365
+    mt5_history_chunk_days: int = 7
+    mt5_history_future_tolerance_hours: int = 14
     mt5_startup_history_reconcile_enabled: bool = True
     mt5_startup_history_reconcile_delay_seconds: int = 5
     mt5_deals_sync_interval_seconds: int = 5

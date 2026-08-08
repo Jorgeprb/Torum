@@ -1,7 +1,7 @@
 import { apiRequest } from "./apiClient";
 
 
-export type DrawingTool = "select" | "horizontal_line" | "vertical_line" | "trend_line" | "rectangle" | "text" | "manual_zone";
+export type DrawingTool = "select" | "horizontal_line" | "vertical_line" | "trend_line" | "rectangle" | "text";
 
 export interface ChartDrawingRead {
   id: string;

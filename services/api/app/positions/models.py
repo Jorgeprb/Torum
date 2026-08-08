@@ -40,7 +40,7 @@ class Position(Base):
     enrichment_status: Mapped[str] = mapped_column(String(32), nullable=False, default="CONFIRMED")
     missing_sync_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_seen_mt5_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    sync_state: Mapped[str] = mapped_column(String(24), nullable=False, default="CONFIRMED")
+    sync_state: Mapped[str] = mapped_column(String(32), nullable=False, default="CONFIRMED")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

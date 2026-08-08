@@ -5,6 +5,8 @@ interface ChartActionButtonsProps {
   selectedObject: { kind: "drawing" | "alert"; id: string } | null;
   canToggleTorumZone: boolean;
   isTorumZoneActive: boolean;
+  canToggleTorumDouble: boolean;
+  isTorumDoubleActive: boolean;
   canStyleSelectedObject: boolean;
   canDeleteSelectedObject: boolean;
   pullbackDebugVisible: boolean;
@@ -12,6 +14,7 @@ interface ChartActionButtonsProps {
   onCenterChart: () => void;
   onPullbackDebugToggle: () => void;
   onToggleTorumZone: (event: PointerEvent<HTMLButtonElement>) => void;
+  onToggleTorumDouble: (event: PointerEvent<HTMLButtonElement>) => void;
   onStyleButton: (event: PointerEvent<HTMLButtonElement>) => void;
   onDeleteButton: (event: PointerEvent<HTMLButtonElement>) => void;
 }
@@ -25,12 +28,15 @@ export function ChartActionButtons({
   selectedObject,
   canToggleTorumZone,
   isTorumZoneActive,
+  canToggleTorumDouble,
+  isTorumDoubleActive,
   canStyleSelectedObject,
   canDeleteSelectedObject,
   pullbackDebugVisible,
   onCenterChart,
   onPullbackDebugToggle,
   onToggleTorumZone,
+  onToggleTorumDouble,
   onStyleButton,
   onDeleteButton
 }: ChartActionButtonsProps) {
@@ -50,6 +56,25 @@ export function ChartActionButtons({
           onPointerUp={stopBubble}
         >
           <Bot size={16} />
+        </button>
+      ) : null}
+
+      {canToggleTorumDouble ? (
+        <button
+          aria-label={isTorumDoubleActive ? "Desactivar entradas dobles en esta zona Torum" : "Activar entradas dobles en esta zona Torum"}
+          aria-pressed={isTorumDoubleActive}
+          className={
+            isTorumDoubleActive
+              ? "chart-hard-reset-button chart-object-torum-double-button chart-object-torum-double-button--active"
+              : "chart-hard-reset-button chart-object-torum-double-button"
+          }
+          title="Entradas dobles por defecto en esta zona Torum"
+          type="button"
+          onClick={onToggleTorumDouble}
+          onPointerDown={stopBubble}
+          onPointerUp={stopBubble}
+        >
+          x2
         </button>
       ) : null}
 

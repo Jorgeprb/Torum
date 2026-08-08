@@ -1,8 +1,8 @@
-import { Activity, BarChart3, CalendarClock, FlaskConical, Gauge, History, Settings, Shield, X, type LucideIcon } from "lucide-react";
+import { Activity, BarChart3, CalendarClock, FlaskConical, Gauge, History, Settings, Shield, TrendingUp, X, type LucideIcon } from "lucide-react";
 
 import type { MT5Status } from "../../services/market";
 
-export type MobileView = "chart" | "strategies" | "simulator" | "indicators" | "settings" | "history" | "news";
+export type MobileView = "chart" | "performance" | "strategies" | "simulator" | "indicators" | "settings" | "history" | "news";
 
 interface AccountDrawerProps {
   activeView: MobileView;
@@ -16,6 +16,7 @@ interface AccountDrawerProps {
 
 export const accountNavItems: Array<{ id: MobileView; label: string; icon: LucideIcon }> = [
   { id: "chart", label: "Grafico", icon: BarChart3 },
+  { id: "performance", label: "Rentabilidad", icon: TrendingUp },
   { id: "history", label: "Historial", icon: History },
   { id: "news", label: "Noticias", icon: CalendarClock },
   { id: "strategies", label: "Estrategias", icon: Activity },

@@ -16,6 +16,8 @@ from app.positions.schemas import PositionRead
 from app.positions.repository import get_position, list_positions
 from app.risk.snapshot import RiskSnapshotService
 from app.settings.trading_service import get_global_trading_settings
+from app.strategies.models import StrategyConfig, StrategySignal
+from app.strategies.torum_v1 import update_torum_entry_price_ladder
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.ticks.service import latest_tick_order_by
@@ -24,6 +26,8 @@ from app.trading.lot_sizing import calculate_buy_take_profit
 from app.websockets.manager import market_ws_manager
 
 logger = logging.getLogger(__name__)
+
+SYNC_STATE_CLOSED_BY_ABSENCE = "CLOSED_BY_ABSENCE"
 
 
 class PositionService:
@@ -190,16 +194,10 @@ class PositionService:
             position.close_price = position.close_price or position.current_price
             position.current_price = position.close_price or position.current_price
             position.enrichment_status = "PENDING_MT5_DEAL"
-            position.sync_state = "CLOSED_BY_CONFIRMED_ABSENCE"
+            position.sync_state = SYNC_STATE_CLOSED_BY_ABSENCE
             identity = position.mt5_position_identifier or position.mt5_position_ticket
-            if identity is not None:
-                enqueue_trade_job(
-                    self.db,
-                    job_type="ENRICH_CLOSE",
-                    idempotency_key=f"enrich-close:{position.id}:latest",
-                    payload={"position_id": position.id, "ticket": identity, "deal_ticket": None},
-                    reactivate_completed=True,
-                )
+            self.db.flush([position])
+            self._enqueue_close_enrichment(position, identity)
         position.raw_payload_json = {
             **(position.raw_payload_json or {}),
             "closed_by_mt5_reconciliation": True,
@@ -226,6 +224,41 @@ class PositionService:
             if isinstance(deal, dict):
                 return deal
         return None
+
+    def _enqueue_close_enrichment(self, position: Position, identity: int | None) -> None:
+        """Queue deal enrichment without allowing the auxiliary job to undo a close.
+
+        The authoritative state transition is the position disappearing from
+        MT5.  Enrichment adds the exact deal/profit afterwards, but a queue or
+        idempotency failure must never keep the local position OPEN.
+        """
+
+        if identity is None:
+            return
+        try:
+            # Keep auxiliary queue writes in their own savepoint.  A queue-table
+            # error can then be rolled back without invalidating the transaction
+            # that has already persisted the authoritative CLOSED position state.
+            with self.db.begin_nested():
+                enqueue_trade_job(
+                    self.db,
+                    job_type="ENRICH_CLOSE",
+                    idempotency_key=f"enrich-close:{position.id}:latest",
+                    payload={"position_id": position.id, "ticket": identity, "deal_ticket": None},
+                    reactivate_completed=True,
+                )
+        except Exception as exc:  # noqa: BLE001 - closure must remain durable
+            logger.exception(
+                "close_enrichment_enqueue_failed position_id=%s ticket=%s error=%s",
+                position.id,
+                identity,
+                exc,
+            )
+            position.raw_payload_json = {
+                **(position.raw_payload_json or {}),
+                "close_enrichment_enqueue_failed": True,
+                "close_enrichment_enqueue_error": str(exc),
+            }
 
     def _schedule_position_event(self, event_type: str, position: Position) -> None:
         if self.background_tasks is None:
@@ -331,6 +364,7 @@ class PositionService:
         positions: list[dict[str, Any]],
         account: MT5AccountPayload | None,
         closed_deals: list[dict[str, Any]] | None = None,
+        deals_checked: bool = False,
     ) -> dict[str, Any]:
         account_login = account.login if account else None
         account_server = account.server if account else None
@@ -385,6 +419,7 @@ class PositionService:
                 opened_at=opened_at,
                 account_login=account_login,
                 account_server=account_server,
+                raw_comment=str(raw.get("comment") or ""),
             )
             if position is None and matched_order is not None:
                 position = self.db.scalar(
@@ -491,6 +526,21 @@ class PositionService:
                 self._mark_synced_order_executed(matched_order, position, raw, open_price, opened_at, intended_tp)
             self._repair_synced_position_tp(position, matched_order, raw, intended_tp)
 
+        # A small-TP trade can open and close between two positions_get polls.
+        # When the API response was also lost, no local OPEN row exists to
+        # enrich. Rebuild that complete round trip from entry+exit deals and
+        # attach it to the exact RECONCILING order instead of losing the trade.
+        closed_only_created, closed_only_symbols, closed_only_positions = self._reconcile_closed_only_orders(
+            close_deals_by_position,
+            seen_position_ids=seen_position_ids,
+            account_login=account_login,
+            account_server=account_server,
+            default_mode=mode,
+        )
+        created += closed_only_created
+        risk_changed_symbols.update(closed_only_symbols)
+        changed_positions.update({position.id: position for position in closed_only_positions})
+
         refreshed, refreshed_symbols, refreshed_positions = self._refresh_closed_mt5_position_deals(
             close_deals_by_position,
             account_login=account_login,
@@ -506,6 +556,16 @@ class PositionService:
             account_server=account_server,
             close_deals_by_position=close_deals_by_position,
         )
+        reconciliation_failed, reconciliation_symbols = self._fail_absent_ambiguous_torum_orders(
+            account_login=account_login,
+            account_server=account_server,
+            deals_checked=deals_checked,
+        )
+        risk_changed_symbols.update(reconciliation_symbols)
+        # A round trip reconstructed exclusively from deals is both a newly
+        # discovered row and an already closed trade. Reflect both facts in
+        # the sync counters so monitoring does not report it as merely open.
+        closed += closed_only_created
         risk_changed_symbols.update(closed_symbols)
         changed_positions.update({position.id: position for position in closed_positions})
 
@@ -524,8 +584,208 @@ class PositionService:
             "closed": closed,
             "received": len(positions),
             "deals_received": len(closed_deals or []),
+            "reconciliation_failed": reconciliation_failed,
             "changed_positions": changed_payloads,
         }
+
+    def _fail_absent_ambiguous_torum_orders(
+        self,
+        *,
+        account_login: int | None,
+        account_server: str | None,
+        deals_checked: bool,
+    ) -> tuple[int, set[str]]:
+        """Release an ambiguous reservation only after authoritative absence.
+
+        A timeout/None result can mean either "not executed" or "executed but
+        response lost". Current positions and complete deal history are checked
+        first in this sync method. If neither contains the request for several
+        complete cycles after a grace period, the order is terminally failed and
+        its capacity is released. Empty/incomplete history payloads never count.
+        """
+
+        if not deals_checked or account_login is None:
+            return 0, set()
+
+        settings = get_settings()
+        required_absent_syncs = max(2, int(settings.torum_reconciliation_absent_syncs))
+        grace_seconds = max(5, int(settings.torum_reconciliation_grace_seconds))
+        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        stmt = select(Order).where(
+            Order.source == "STRATEGY",
+            Order.strategy_key == "torum_v1",
+            Order.status.in_(("SENT", "RECONCILING")),
+            Order.created_at <= cutoff,
+            ~select(Position.id).where(Position.order_id == Order.id).exists(),
+            or_(Order.account_login == account_login, Order.account_login.is_(None)),
+        )
+        if account_server:
+            stmt = stmt.where(or_(Order.account_server == account_server, Order.account_server.is_(None)))
+
+        failed = 0
+        symbols: set[str] = set()
+        checked_at = datetime.now(UTC)
+        for order in self.db.scalars(stmt.order_by(Order.created_at, Order.id).limit(100)):
+            response_payload = dict(order.response_payload_json or {})
+            previous_count = _int_or_none(response_payload.get("reconciliation_absent_sync_count")) or 0
+            absent_count = previous_count + 1
+            response_payload.update(
+                {
+                    "reconciliation_absent_sync_count": absent_count,
+                    "reconciliation_last_checked_at": checked_at.isoformat(),
+                    "reconciliation_history_complete": True,
+                }
+            )
+            order.response_payload_json = response_payload
+            if absent_count < required_absent_syncs:
+                continue
+
+            reason = "mt5_execution_not_found_after_authoritative_sync"
+            order.status = "FAILED"
+            order.rejection_reason = reason
+            order.response_payload_json = {
+                **response_payload,
+                "reconciliation_required": False,
+                "reconciliation_result": "NOT_EXECUTED",
+                "reconciliation_failed_at": checked_at.isoformat(),
+            }
+            if order.strategy_signal_id is not None:
+                signal = self.db.get(StrategySignal, order.strategy_signal_id)
+                if signal is not None and signal.status in {
+                    "RISK_APPROVED",
+                    "SENT_TO_ORDER_MANAGER",
+                    "ORDER_RECONCILING",
+                }:
+                    signal.order_id = order.id
+                    signal.status = "ORDER_FAILED"
+                    signal.risk_result_json = {
+                        "allowed": False,
+                        "reasons": [reason],
+                        "warnings": [],
+                    }
+            failed += 1
+            symbols.add(order.internal_symbol)
+            logger.warning(
+                "torum_ambiguous_order_not_executed order_id=%s signal_id=%s symbol=%s absent_syncs=%s",
+                order.id,
+                order.strategy_signal_id,
+                order.internal_symbol,
+                absent_count,
+            )
+        return failed, symbols
+
+    def _reconcile_closed_only_orders(
+        self,
+        close_deals_by_position: dict[int, dict[str, Any]],
+        *,
+        seen_position_ids: set[int],
+        account_login: int | None,
+        account_server: str | None,
+        default_mode: str,
+    ) -> tuple[int, set[str], list[Position]]:
+        created = 0
+        changed_symbols: set[str] = set()
+        reconstructed: list[Position] = []
+        for position_id, aggregate in close_deals_by_position.items():
+            if position_id in seen_position_ids:
+                continue
+            existing_stmt = select(Position).where(
+                or_(
+                    Position.mt5_position_ticket == position_id,
+                    Position.mt5_position_identifier == position_id,
+                )
+            )
+            if account_login is not None:
+                existing_stmt = existing_stmt.where(
+                    or_(Position.account_login == account_login, Position.account_login.is_(None))
+                )
+            if account_server:
+                existing_stmt = existing_stmt.where(
+                    or_(Position.account_server == account_server, Position.account_server.is_(None))
+                )
+            if self.db.scalar(existing_stmt.limit(1)) is not None:
+                continue
+
+            broker_symbol = str(aggregate.get("symbol") or "")
+            entry_price = _float_or_none(aggregate.get("entry_price"))
+            entry_volume = _float_or_none(aggregate.get("entry_volume") or aggregate.get("volume"))
+            entry_time = _datetime_from_mt5_milliseconds(aggregate.get("entry_time_msc")) or _datetime_from_mt5_seconds(
+                aggregate.get("entry_time")
+            )
+            if not broker_symbol or entry_price is None or entry_price <= 0 or entry_volume is None or entry_volume <= 0 or entry_time is None:
+                continue
+            mapping = self.db.scalar(
+                select(SymbolMapping).where(SymbolMapping.broker_symbol == broker_symbol).limit(1)
+            )
+            internal_symbol = str(mapping.internal_symbol if mapping else broker_symbol).upper()
+            entry_type = _int_or_none(aggregate.get("entry_type"))
+            if entry_type not in {0, 1}:
+                # Without an authoritative MT5 entry side we cannot safely
+                # attach a historical deal to a local order.
+                continue
+            side = "BUY" if entry_type == 0 else "SELL"
+            matched_order = self._match_order_for_synced_mt5_position(
+                internal_symbol=internal_symbol,
+                broker_symbol=broker_symbol,
+                side=side,
+                volume=entry_volume,
+                magic_number=_int_or_none(aggregate.get("entry_magic")),
+                opened_at=entry_time,
+                account_login=account_login,
+                account_server=account_server,
+                raw_comment=str(aggregate.get("entry_comment") or ""),
+            )
+            # Only reconstruct trades that belong to a known Torum request.
+            # Importing every historical manual deal here would change the
+            # existing scope of the live-position synchronizer.
+            if matched_order is None:
+                continue
+
+            close_price = _float_or_none(aggregate.get("price")) or entry_price
+            position = Position(
+                user_id=matched_order.user_id,
+                order_id=matched_order.id,
+                internal_symbol=internal_symbol,
+                broker_symbol=broker_symbol,
+                mode=matched_order.mode or default_mode,
+                account_login=account_login or matched_order.account_login,
+                account_server=account_server or matched_order.account_server,
+                side=side,
+                volume=entry_volume,
+                open_price=entry_price,
+                current_price=close_price,
+                sl=matched_order.sl,
+                tp=matched_order.tp,
+                profit=0.0,
+                status="CLOSED",
+                mt5_position_ticket=position_id,
+                mt5_position_identifier=position_id,
+                magic_number=matched_order.magic_number,
+                opened_at=entry_time,
+                open_time_msc=_int_or_none(aggregate.get("entry_time_msc")) or int(entry_time.timestamp() * 1000),
+                enrichment_status="CONFIRMED_MT5",
+                missing_sync_count=0,
+                last_seen_mt5_at=None,
+                sync_state="CLOSED_CONFIRMED",
+                raw_payload_json={"reconciled_from_closed_deals": aggregate},
+            )
+            self.db.add(position)
+            self.db.flush()
+            _apply_close_deal(position, aggregate)
+            position.status = "CLOSED"
+            self._mark_synced_order_executed(
+                matched_order,
+                position,
+                {"closed_deal_round_trip": aggregate},
+                entry_price,
+                entry_time,
+                matched_order.tp,
+            )
+            self._notify_take_profit_hit(position)
+            created += 1
+            changed_symbols.add(internal_symbol)
+            reconstructed.append(position)
+        return created, changed_symbols, reconstructed
 
     def _match_order_for_synced_mt5_position(
         self,
@@ -538,6 +798,7 @@ class PositionService:
         opened_at: datetime,
         account_login: int | None,
         account_server: str | None,
+        raw_comment: str = "",
     ) -> Order | None:
         # Never match a live MT5 position to an arbitrary order from hours ago.
         # A small, account-scoped window prevents two same-volume entries from
@@ -549,7 +810,7 @@ class PositionService:
             Order.broker_symbol == broker_symbol,
             Order.side == side,
             Order.mt5_position_ticket.is_(None),
-            Order.status.in_(["CREATED", "VALIDATING", "SENT", "EXECUTED"]),
+            Order.status.in_(["CREATED", "VALIDATING", "SENT", "EXECUTED", "FAILED", "RECONCILING"]),
             Order.created_at >= window_start,
             Order.created_at <= window_end,
         )
@@ -560,13 +821,48 @@ class PositionService:
         candidates = self.db.scalars(stmt.order_by(Order.created_at.desc(), Order.id.desc()).limit(20)).all()
 
         compatible: list[Order] = []
+        normalized_raw_comment = raw_comment.strip()
         for order in candidates:
+            comment_matches = _mt5_comments_match(order.comment, normalized_raw_comment)
+            # Current Torum requests carry a compact unique comment. Whenever
+            # MT5 returned a comment, require it to match for every order state,
+            # not only RECONCILING, so simultaneous same-volume requests cannot
+            # steal each other's position. Legacy rows with no stored comment
+            # retain the conservative attribute/time fallback.
+            if (
+                order.strategy_key == "torum_v1"
+                and order.comment
+                and normalized_raw_comment
+                and not comment_matches
+            ):
+                continue
+            if order.status in {"FAILED", "RECONCILING"} and normalized_raw_comment and not comment_matches:
+                continue
             if magic_number is not None and order.magic_number is not None and order.magic_number != magic_number:
                 continue
-            if abs(float(order.volume) - float(volume)) > max(0.000001, float(volume) * 0.001):
+
+            requested_volume = max(0.0, float(order.volume))
+            actual_volume = max(0.0, float(volume))
+            tolerance = max(0.000001, max(requested_volume, actual_volume) * 0.001)
+            exact_volume = abs(requested_volume - actual_volume) <= tolerance
+            # MT5 can return TRADE_RETCODE_DONE_PARTIAL. If the HTTP response
+            # was lost, the API still stores requested volume while the broker
+            # exposes only the filled part. A uniquely identified Torum request
+            # must remain reconcilable in that case.
+            partial_volume = (
+                order.strategy_key == "torum_v1"
+                and actual_volume > 0
+                and actual_volume < requested_volume - tolerance
+                and (comment_matches or (not normalized_raw_comment and order.status in {"CREATED", "VALIDATING", "SENT", "FAILED", "RECONCILING"}))
+            )
+            if not exact_volume and not partial_volume:
                 continue
             compatible.append(order)
         if not compatible:
+            return None
+        # A missing MT5 comment is uncommon but possible on some brokers. Only
+        # fall back to attributes when they identify exactly one local request.
+        if not normalized_raw_comment and len(compatible) != 1:
             return None
         opened_at_utc = _as_utc_datetime(opened_at)
         return min(
@@ -588,7 +884,7 @@ class PositionService:
         if order is not None and order.tp is not None and order.tp > 0:
             return order.tp
         comment = str(raw.get("comment") or "").lower()
-        if "strategy" not in comment or open_price <= 0:
+        if not any(marker in comment for marker in ("strategy", "torum")) or open_price <= 0:
             return raw_tp
         settings = get_global_trading_settings(self.db)
         tp_percent = _float_or_none(getattr(settings, "default_take_profit_percent", None)) or 0.09
@@ -617,6 +913,82 @@ class PositionService:
             "position_resolved_by": "positions_sync",
             "tp_final": intended_tp,
             "tp_status": "PENDING" if intended_tp else (order.response_payload_json or {}).get("tp_status", "NONE"),
+        }
+        if order.strategy_signal_id is not None:
+            signal = self.db.get(StrategySignal, order.strategy_signal_id)
+            if signal is not None:
+                signal.order_id = order.id
+                signal.status = "ORDER_EXECUTED"
+                self._record_reconciled_torum_cycle(
+                    signal,
+                    order.id,
+                    position=position,
+                    executed_price=open_price,
+                )
+
+    def _record_reconciled_torum_cycle(
+        self,
+        signal: StrategySignal,
+        order_id: int,
+        *,
+        position: Position,
+        executed_price: float,
+    ) -> None:
+        if signal.strategy_key != "torum_v1" or signal.strategy_config_id is None:
+            return
+        metadata = signal.metadata_json or {}
+        try:
+            confirmation_time = int(metadata.get("confirmation_candle_time"))
+        except (TypeError, ValueError):
+            return
+        if confirmation_time <= 0:
+            return
+        config = self.db.get(StrategyConfig, signal.strategy_config_id)
+        if config is None:
+            return
+        params = dict(config.params_json or {})
+        prior_open_positions = list(
+            self.db.scalars(
+                select(Position)
+                .join(Order, Position.order_id == Order.id)
+                .where(
+                    Position.id != position.id,
+                    Position.user_id == position.user_id,
+                    Position.internal_symbol == position.internal_symbol,
+                    Position.mode == position.mode,
+                    Position.status == "OPEN",
+                    Position.closed_at.is_(None),
+                    Position.close_price.is_(None),
+                    Order.source == "STRATEGY",
+                    Order.strategy_key == "torum_v1",
+                )
+            )
+        )
+        raw_boundaries = params.get("executed_entry_cycle_boundaries")
+        boundaries: set[int] = set()
+        if isinstance(raw_boundaries, list):
+            for value in raw_boundaries:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    boundaries.add(parsed)
+        boundaries.add(confirmation_time)
+        entry_ladder = update_torum_entry_price_ladder(
+            params,
+            executed_price=executed_price,
+            order_id=order_id,
+            confirmation_candle_time=confirmation_time,
+            prior_open_positions=prior_open_positions,
+            reset_campaign=not prior_open_positions,
+        )
+        config.params_json = {
+            **params,
+            "last_executed_entry_candle_time": confirmation_time,
+            "last_executed_entry_order_id": order_id,
+            "executed_entry_cycle_boundaries": sorted(boundaries)[-100:],
+            "executed_entry_price_ladder": entry_ladder,
         }
 
     def _repair_synced_position_tp(
@@ -850,7 +1222,7 @@ class PositionService:
             position.closed_at = position.closed_at or datetime.now(UTC)
             position.close_time_msc = position.close_time_msc or int(position.closed_at.timestamp() * 1000)
             position.enrichment_status = "PENDING_MT5_DEAL"
-            position.sync_state = "CLOSED_BY_CONFIRMED_ABSENCE"
+            position.sync_state = SYNC_STATE_CLOSED_BY_ABSENCE
             position.raw_payload_json = {
                 **(position.raw_payload_json or {}),
                 "closed_by_mt5_sync": True,
@@ -858,14 +1230,8 @@ class PositionService:
                 "close_reason": f"Position absent from {confirmations} consecutive authoritative positions_get snapshots",
             }
             enrichment_identity = position.mt5_position_identifier or ticket
-            if enrichment_identity is not None:
-                enqueue_trade_job(
-                    self.db,
-                    job_type="ENRICH_CLOSE",
-                    idempotency_key=f"enrich-close:{position.id}:latest",
-                    payload={"position_id": position.id, "ticket": enrichment_identity, "deal_ticket": None},
-                    reactivate_completed=True,
-                )
+            self.db.flush([position])
+            self._enqueue_close_enrichment(position, enrichment_identity)
             closed_positions.append(position)
             changed_symbols.add(position.internal_symbol)
             count += 1
@@ -929,6 +1295,30 @@ def _float_or_none(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _mt5_comments_match(order_comment: str | None, raw_comment: str | None) -> bool:
+    """Match current compact comments and legacy MT5-truncated comments.
+
+    The bridge historically prefixed ``Torum `` and then truncated at 20
+    characters, while the API stored only ``strategy-s<id>``. Exact matching
+    therefore failed precisely when a lost HTTP response needed reconciliation.
+    Symbol, side, volume, magic and a five-minute window are checked separately,
+    so accepting the deterministic prefix-truncated legacy form remains safe.
+    """
+
+    expected = str(order_comment or "").strip().casefold()
+    actual = str(raw_comment or "").strip().casefold()
+    if not expected or not actual:
+        return False
+    if expected == actual:
+        return True
+    for prefix in ("torum ",):
+        if actual.startswith(prefix):
+            actual = actual[len(prefix) :].strip()
+        if expected.startswith(prefix):
+            expected = expected[len(prefix) :].strip()
+    return expected == actual or expected.startswith(actual) or actual.startswith(expected)
 
 
 def _calculate_position_profit(
@@ -1065,15 +1455,34 @@ def _aggregate_position_deals(position_deals: list[dict[str, Any]]) -> dict[str,
     entry_deals = [deal for deal in ordered if _int_or_none(deal.get("entry")) == 0]
     close_deals = [deal for deal in ordered if _is_close_deal(deal)]
     last_deal = close_deals[-1] if close_deals else ordered[-1]
-    first_entry = entry_deals[0] if entry_deals else ordered[0]
-    entry_price = _weighted_price(entry_deals) or _float_or_none(first_entry.get("price"))
+    # Incremental MT5 history windows may contain only the closing deal.  A
+    # close-only payload must never be treated as an entry because doing so
+    # rewrites the original opening time/price and moves the chart entry marker
+    # onto the exit candle.
+    first_entry = entry_deals[0] if entry_deals else None
+    entry_price = (
+        _weighted_price(entry_deals) or _float_or_none(first_entry.get("price"))
+        if first_entry is not None
+        else None
+    )
     close_price = _weighted_price(close_deals) or _float_or_none(last_deal.get("price"))
-    entry_time_msc = _deal_sort_key(first_entry)[0]
+    entry_time_msc = _deal_sort_key(first_entry)[0] if first_entry is not None else None
     close_time_msc = _deal_sort_key(last_deal)[0]
+    entry_volume = sum(max(0.0, _float_or_none(deal.get("volume")) or 0.0) for deal in entry_deals)
     return {
         **last_deal,
+        "has_entry_deal": first_entry is not None,
         "price": close_price,
         "entry_price": entry_price,
+        "entry_volume": entry_volume if first_entry is not None else None,
+        "entry_type": _int_or_none(first_entry.get("type")) if first_entry is not None else None,
+        "entry_magic": _int_or_none(first_entry.get("magic")) if first_entry is not None else None,
+        "entry_comment": str(first_entry.get("comment") or "") if first_entry is not None else None,
+        "entry_deal_ticket": (
+            _int_or_none(first_entry.get("ticket") or first_entry.get("deal"))
+            if first_entry is not None
+            else None
+        ),
         "entry_time_msc": entry_time_msc,
         "entry_time": entry_time_msc // 1000 if entry_time_msc else None,
         "close_time_msc": close_time_msc,
@@ -1130,13 +1539,14 @@ def _apply_close_deal(position: Position, deal: dict[str, Any]) -> None:
         if close_time_msc is not None
         else _datetime_from_mt5_seconds(deal.get("close_time") or deal.get("time"))
     )
-    entry_time_msc = _int_or_none(deal.get("entry_time_msc"))
+    has_entry_deal = bool(deal.get("has_entry_deal"))
+    entry_time_msc = _int_or_none(deal.get("entry_time_msc")) if has_entry_deal else None
     entry_time = (
         _datetime_from_mt5_milliseconds(entry_time_msc)
         if entry_time_msc is not None
         else _datetime_from_mt5_seconds(deal.get("entry_time"))
     )
-    entry_price = _float_or_none(deal.get("entry_price"))
+    entry_price = _float_or_none(deal.get("entry_price")) if has_entry_deal else None
     close_price = _float_or_none(deal.get("price"))
     if entry_price is not None and entry_price > 0:
         position.open_price = entry_price

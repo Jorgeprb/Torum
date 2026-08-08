@@ -80,7 +80,13 @@ class OrderExecutor:
             return BridgeOrderResponse(ok=False, comment=str(exc))
         price = self._normalize_price(price, symbol_info)
         sl = self._normalize_price(payload.sl, symbol_info) if payload.sl else 0.0
-        tp = self._normalize_price(payload.tp, symbol_info) if payload.tp else 0.0
+        requested_tp = payload.tp
+        if requested_tp is None and payload.tp_percent is not None:
+            if payload.side == "BUY":
+                requested_tp = price * (1.0 + payload.tp_percent / 100.0)
+            else:
+                requested_tp = price * (1.0 - payload.tp_percent / 100.0)
+        tp = self._normalize_price(requested_tp, symbol_info) if requested_tp else 0.0
         base_request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": payload.broker_symbol,
@@ -425,6 +431,12 @@ class OrderExecutor:
             if response.ok:
                 return response
             last_response = response
+            # Filling-mode fallback is safe only when MT5 explicitly says that
+            # the selected filling policy is invalid. Retrying on NO_MONEY,
+            # MARKET_CLOSED or a None response adds latency and, in the worst
+            # case, could duplicate an order whose local response was lost.
+            if response.retcode != 10030:  # TRADE_RETCODE_INVALID_FILL
+                return response
 
         return last_response or BridgeOrderResponse(ok=False, comment="order_send failed without response")
 
@@ -582,7 +594,14 @@ class OrderExecutor:
         prefix = self.settings.mt5_order_comment_prefix.strip() or "Torum"
 
         if comment:
-            raw = f"{prefix} {comment}"
+            normalized_comment = str(comment).strip()
+            # The API may already send the complete compact Torum comment so
+            # both databases retain the exact same value for reconciliation.
+            raw = (
+                normalized_comment
+                if normalized_comment.casefold().startswith(prefix.casefold() + " ")
+                else f"{prefix} {normalized_comment}"
+            )
         elif side:
             raw = f"{prefix} {side}"
         else:
@@ -669,7 +688,7 @@ def _result_to_response(
         if not name.startswith("_")
     }
     retcode = int(raw.get("retcode") or 0)
-    ok = retcode in {10008, 10009}
+    ok = retcode in {10008, 10009, 10010}
     return BridgeOrderResponse(
         ok=ok,
         retcode=retcode,

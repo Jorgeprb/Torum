@@ -117,28 +117,7 @@ def test_reject_invalid_horizontal_line_payload() -> None:
     assert response.status_code == 422
 
 
-def test_create_manual_zone_valid() -> None:
-    payload = ChartDrawingCreate.model_validate(
-        {
-            "internal_symbol": "XAUUSD",
-            "timeframe": "H1",
-            "drawing_type": "manual_zone",
-            "payload": {
-                "time1": 1777209600,
-                "time2": None,
-                "price_min": 2320.0,
-                "price_max": 2335.0,
-                "direction": "BUY",
-                "label": "Manual buy zone",
-            },
-        }
-    )
-
-    assert payload.payload["direction"] == "BUY"
-    assert payload.payload["price_max"] > payload.payload["price_min"]
-
-
-def test_reject_manual_zone_invalid_price_range() -> None:
+def test_manual_zone_is_no_longer_a_supported_drawing_type() -> None:
     db = _session()
     client = _client(db, _user(db))
 
@@ -148,7 +127,13 @@ def test_reject_manual_zone_invalid_price_range() -> None:
             "internal_symbol": "XAUUSD",
             "timeframe": "H1",
             "drawing_type": "manual_zone",
-            "payload": {"time1": 1777209600, "price_min": 2335.0, "price_max": 2320.0},
+            "payload": {
+                "time1": 1777209600,
+                "time2": 1777213200,
+                "price_min": 2320.0,
+                "price_max": 2335.0,
+                "direction": "BUY",
+            },
         },
     )
 

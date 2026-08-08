@@ -5,6 +5,7 @@ import type { IndicatorLineOutput } from "../../services/indicators";
 import type { MobileView } from "../mobile/AccountDrawer";
 import { IndicatorsPanel } from "../indicators/IndicatorsPanel";
 import { NewsProviderPage } from "../news/NewsProviderPage";
+import { StrategyPerformancePage } from "../performance/StrategyPerformancePage";
 import { TradingSettingsPage } from "../settings/TradingSettingsPage";
 import { StrategyPanel } from "../strategies/StrategyPanel";
 import { StrategySimulatorPage } from "../strategies/simulator/StrategySimulatorPage";
@@ -38,6 +39,7 @@ export function TradingWorkspacePanels({
     <div className="mobile-view-panel">
       {activeView === "strategies" ? <StrategyPanel symbols={chartSymbols} timeframes={timeframes} onChanged={onStrategyChanged} /> : null}
       {activeView === "simulator" ? <StrategySimulatorPage /> : null}
+      {activeView === "performance" ? <StrategyPerformancePage /> : null}
       {activeView === "indicators" ? <IndicatorsPanel indicatorLines={indicatorLines} onChanged={onChartContextChanged} symbol={symbol} timeframe={timeframe} /> : null}
       {activeView === "settings" ? <><TradingSettingsPage onChanged={onStrategyChanged} />{diagnostics}</> : null}
       {activeView === "history" ? history : null}

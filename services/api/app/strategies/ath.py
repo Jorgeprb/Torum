@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Iterable, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.candles.models import Candle
+from app.core.config import get_settings
 from app.orders.models import Order
 from app.positions.models import Position
 from app.strategies.ath_models import SymbolAthLevel
-from app.strategies.models import StrategySignal
+from app.strategies.models import StrategyConfig, StrategySignal
 from app.symbols.models import SymbolMapping
 from app.ticks.models import Tick
 from app.trading.lot_sizing import calculate_lot_size
@@ -21,8 +22,12 @@ ATH_RISK_LIMIT_RATIO = 0.50
 ATH_ADVERSE_MOVE_RATIO = 0.30
 ATH_AUTO_SOURCE = "candles"
 ATH_MANUAL_SOURCE = "manual"
-TORUM_V1_PENDING_ORDER_STATUSES = ("CREATED", "VALIDATING", "SENT")
-TORUM_V1_RESERVED_SIGNAL_STATUSES = ("RISK_APPROVED", "SENT_TO_ORDER_MANAGER")
+TORUM_V1_PENDING_ORDER_STATUSES = ("CREATED", "VALIDATING", "SENT", "RECONCILING")
+TORUM_V1_RESERVED_SIGNAL_STATUSES = ("RISK_APPROVED", "SENT_TO_ORDER_MANAGER", "ORDER_RECONCILING")
+# Reservations are only meaningful while the synchronous order pipeline is alive.
+# The actual TTL is configurable and intentionally short: the normal pipeline is
+# sub-second and the MT5 request timeout is measured in seconds, not minutes.
+TORUM_V1_RESERVATION_TTL = timedelta(seconds=120)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,34 +63,84 @@ class RiskPreview:
     positions_count: int
 
 
-def get_or_update_symbol_ath(db: Session, symbol: str) -> float | None:
+def get_or_update_symbol_ath(db: Session, symbol: str, *, refresh: bool = False) -> float | None:
+    """Return the persisted ATH without scanning the candle table on entries.
+
+    ATH is updated incrementally during candle ingestion. A full MAX(high) scan
+    is only needed for initial bootstrap or an explicit refresh from the admin UI.
+    """
+
     normalized_symbol = symbol.upper()
     if normalized_symbol not in ATH_SYMBOLS:
         return None
 
-    highest = db.scalar(select(func.max(Candle.high)).where(Candle.internal_symbol == normalized_symbol))
     existing = db.get(SymbolAthLevel, normalized_symbol)
+    if existing is not None and (existing.source == ATH_MANUAL_SOURCE or not refresh):
+        return float(existing.ath_price)
 
-    if existing is not None and existing.source == ATH_MANUAL_SOURCE:
-        return existing.ath_price
-
+    highest = db.scalar(select(func.max(Candle.high)).where(Candle.internal_symbol == normalized_symbol))
     if highest is None:
-        return existing.ath_price if existing is not None else None
+        return float(existing.ath_price) if existing is not None else None
 
     highest_float = float(highest)
     if existing is None:
-        existing = SymbolAthLevel(internal_symbol=normalized_symbol, ath_price=highest_float, source=ATH_AUTO_SOURCE, calculated_at=datetime.now(UTC))
+        existing = SymbolAthLevel(
+            internal_symbol=normalized_symbol,
+            ath_price=highest_float,
+            source=ATH_AUTO_SOURCE,
+            calculated_at=datetime.now(UTC),
+        )
         db.add(existing)
-        db.commit()
-        return highest_float
-
-    if highest_float > existing.ath_price:
-        existing.ath_price = highest_float
+    elif highest_float > float(existing.ath_price) or refresh:
+        existing.ath_price = max(highest_float, float(existing.ath_price))
         existing.source = ATH_AUTO_SOURCE
         existing.calculated_at = datetime.now(UTC)
-        db.commit()
+    db.commit()
+    return float(existing.ath_price)
 
-    return max(highest_float, existing.ath_price)
+
+def update_symbol_ath_from_candles(db: Session, candles: Iterable[Candle]) -> set[str]:
+    """Incrementally persist ATH values from the candles already ingested."""
+
+    highs: dict[str, float] = {}
+    for candle in candles:
+        symbol = str(candle.internal_symbol).upper()
+        if symbol not in ATH_SYMBOLS:
+            continue
+        high = float(candle.high)
+        previous = highs.get(symbol)
+        if previous is None or high > previous:
+            highs[symbol] = high
+
+    changed: set[str] = set()
+    now = datetime.now(UTC)
+    for symbol, high in highs.items():
+        existing = db.get(SymbolAthLevel, symbol)
+        if existing is not None and existing.source == ATH_MANUAL_SOURCE:
+            continue
+        if existing is None:
+            # Bootstrap from all persisted candles once. Seeding the ATH from
+            # only the current tick bucket would silently understate the real
+            # all-time high and could classify risk zones incorrectly.
+            historical_high = db.scalar(
+                select(func.max(Candle.high)).where(Candle.internal_symbol == symbol)
+            )
+            bootstrap_high = max(high, float(historical_high)) if historical_high is not None else high
+            db.add(SymbolAthLevel(
+                internal_symbol=symbol,
+                ath_price=bootstrap_high,
+                source=ATH_AUTO_SOURCE,
+                calculated_at=now,
+            ))
+            changed.add(symbol)
+        elif high > float(existing.ath_price):
+            existing.ath_price = high
+            existing.source = ATH_AUTO_SOURCE
+            existing.calculated_at = now
+            changed.add(symbol)
+    if changed:
+        db.commit()
+    return changed
 
 
 def list_symbol_ath_levels(db: Session) -> list[SymbolAthLevel | None]:
@@ -198,7 +253,15 @@ def ath_zone_for_price_config(
     return AthRiskZone("deep_green", f"VERDE -{green:.0f}%+", None, ath_price * (1 - green / 100), "#32d074", 3)
 
 
-def bot_open_positions(db: Session, symbol: str, user_id: int | None = None) -> list[Position]:
+def bot_open_positions(
+    db: Session,
+    symbol: str,
+    user_id: int | None = None,
+    *,
+    mode: str | None = None,
+    account_login: int | None = None,
+    account_server: str | None = None,
+) -> list[Position]:
     stmt = (
         select(Position)
         .join(Order, Position.order_id == Order.id)
@@ -211,6 +274,15 @@ def bot_open_positions(db: Session, symbol: str, user_id: int | None = None) -> 
     )
     if user_id is not None:
         stmt = stmt.where(Position.user_id == user_id)
+    if mode is not None:
+        stmt = stmt.where(Position.mode == mode.upper())
+    if account_login is not None:
+        # Keep legacy/open rows whose account identity has not yet been
+        # backfilled. Ignoring them could allow a second entry while a real MT5
+        # position is still open.
+        stmt = stmt.where(or_(Position.account_login == account_login, Position.account_login.is_(None)))
+    if account_server:
+        stmt = stmt.where(or_(Position.account_server == account_server, Position.account_server.is_(None)))
     return [position for position in db.scalars(stmt) if _is_live_bot_position(position)]
 
 
@@ -219,7 +291,11 @@ def _is_live_bot_position(position: Position) -> bool:
         return False
     if position.closed_at is not None or position.close_price is not None:
         return False
-    if position.mode != "PAPER" and position.mt5_position_ticket is None:
+    if (
+        position.mode != "PAPER"
+        and position.mt5_position_ticket is None
+        and position.mt5_position_identifier is None
+    ):
         return False
     return True
 
@@ -229,37 +305,105 @@ def open_lot_equivalents(positions: Iterable[Position], base_lot: float) -> floa
     return sum(max(0.0, float(position.volume)) / safe_base for position in positions)
 
 
-def bot_pending_lot_equivalents(db: Session, symbol: str, user_id: int | None, base_lot: float, exclude_order_id: int | None = None) -> float:
-    safe_base = base_lot if base_lot > 0 else 0.01
+def _reservation_cutoff() -> datetime:
+    seconds = max(15, int(get_settings().torum_reservation_ttl_seconds))
+    return datetime.now(UTC) - timedelta(seconds=seconds)
+
+
+def _ambiguous_reservation_cutoff() -> datetime:
+    # Once the request may have crossed the broker boundary, releasing the
+    # reservation merely because the normal sub-second pipeline TTL elapsed can
+    # create a duplicate/over-sized second order. Healthy MT5 position+deal sync
+    # resolves these rows explicitly; this longer window is only a fail-safe for
+    # prolonged bridge outages.
+    seconds = max(300, int(get_settings().torum_ambiguous_reservation_ttl_seconds))
+    return datetime.now(UTC) - timedelta(seconds=seconds)
+
+
+def _active_pending_orders(
+    db: Session,
+    symbol: str,
+    user_id: int | None,
+    *,
+    exclude_order_id: int | None = None,
+    mode: str | None = None,
+    account_login: int | None = None,
+    account_server: str | None = None,
+) -> list[Order]:
     stmt = select(Order).where(
         Order.internal_symbol == symbol.upper(),
         Order.source == "STRATEGY",
         Order.strategy_key == "torum_v1",
-        Order.status.in_(TORUM_V1_PENDING_ORDER_STATUSES),
+        or_(
+            and_(
+                Order.status.in_(("CREATED", "VALIDATING")),
+                Order.created_at >= _reservation_cutoff(),
+            ),
+            and_(
+                Order.status.in_(("SENT", "RECONCILING")),
+                Order.created_at >= _ambiguous_reservation_cutoff(),
+            ),
+        ),
     )
     if user_id is not None:
         stmt = stmt.where(Order.user_id == user_id)
+    if mode is not None:
+        stmt = stmt.where(Order.mode == mode.upper())
+    if account_login is not None:
+        stmt = stmt.where(or_(Order.account_login == account_login, Order.account_login.is_(None)))
+    if account_server:
+        stmt = stmt.where(or_(Order.account_server == account_server, Order.account_server.is_(None)))
     if exclude_order_id is not None:
         stmt = stmt.where(Order.id != exclude_order_id)
-    return sum(max(0.0, float(order.volume)) / safe_base for order in db.scalars(stmt))
+    return list(db.scalars(stmt))
 
 
-def bot_reserved_signal_lot_equivalents(db: Session, symbol: str, user_id: int | None, base_lot: float, exclude_signal_id: int | None = None) -> float:
-    safe_base = base_lot if base_lot > 0 else 0.01
-    stmt = select(StrategySignal).where(
+def _active_reserved_signals(
+    db: Session,
+    symbol: str,
+    user_id: int | None,
+    *,
+    exclude_signal_id: int | None = None,
+    mode: str | None = None,
+) -> list[StrategySignal]:
+    stmt = select(StrategySignal)
+    if mode is not None:
+        stmt = stmt.join(StrategyConfig, StrategySignal.strategy_config_id == StrategyConfig.id)
+    stmt = stmt.where(
         StrategySignal.strategy_key == "torum_v1",
         StrategySignal.internal_symbol == symbol.upper(),
         StrategySignal.signal_type == "ENTRY",
         StrategySignal.side == "BUY",
-        StrategySignal.status.in_(TORUM_V1_RESERVED_SIGNAL_STATUSES),
+        or_(
+            and_(
+                StrategySignal.status == "RISK_APPROVED",
+                StrategySignal.created_at >= _reservation_cutoff(),
+            ),
+            and_(
+                StrategySignal.status.in_(("SENT_TO_ORDER_MANAGER", "ORDER_RECONCILING")),
+                StrategySignal.created_at >= _ambiguous_reservation_cutoff(),
+            ),
+        ),
     )
     if user_id is not None:
         stmt = stmt.where(StrategySignal.user_id == user_id)
+    if mode is not None:
+        stmt = stmt.where(StrategyConfig.mode == mode.upper())
     if exclude_signal_id is not None:
         stmt = stmt.where(StrategySignal.id != exclude_signal_id)
+    return list(db.scalars(stmt))
 
+
+def bot_pending_lot_equivalents(db: Session, symbol: str, user_id: int | None, base_lot: float, exclude_order_id: int | None = None) -> float:
+    safe_base = base_lot if base_lot > 0 else 0.01
+    orders = _active_pending_orders(db, symbol, user_id, exclude_order_id=exclude_order_id)
+    return sum(max(0.0, float(order.volume)) / safe_base for order in orders)
+
+
+def bot_reserved_signal_lot_equivalents(db: Session, symbol: str, user_id: int | None, base_lot: float, exclude_signal_id: int | None = None) -> float:
+    safe_base = base_lot if base_lot > 0 else 0.01
     total = 0.0
-    for signal in db.scalars(stmt):
+    for signal in _active_reserved_signals(db, symbol, user_id, exclude_signal_id=exclude_signal_id):
         metadata = signal.metadata_json or {}
         volume = _float_or_none(metadata.get("accepted_volume")) or _float_or_none(signal.suggested_volume)
         if volume is not None:
@@ -280,21 +424,19 @@ def bot_reserved_potential_loss(
     fallback_price: float | None,
     exclude_order_id: int | None = None,
     exclude_signal_id: int | None = None,
+    pending_orders: Sequence[Order] | None = None,
+    reserved_signals: Sequence[StrategySignal] | None = None,
 ) -> float:
     from app.risk.snapshot import candidate_loss
 
     total = 0.0
-    order_stmt = select(Order).where(
-        Order.internal_symbol == symbol.upper(),
-        Order.source == "STRATEGY",
-        Order.strategy_key == "torum_v1",
-        Order.status.in_(TORUM_V1_PENDING_ORDER_STATUSES),
+    orders = list(pending_orders) if pending_orders is not None else _active_pending_orders(
+        db, symbol, user_id, exclude_order_id=exclude_order_id
     )
-    if user_id is not None:
-        order_stmt = order_stmt.where(Order.user_id == user_id)
-    if exclude_order_id is not None:
-        order_stmt = order_stmt.where(Order.id != exclude_order_id)
-    for order in db.scalars(order_stmt):
+    signals = list(reserved_signals) if reserved_signals is not None else _active_reserved_signals(
+        db, symbol, user_id, exclude_signal_id=exclude_signal_id
+    )
+    for order in orders:
         price = order.executed_price or order.requested_price or fallback_price
         if price is None:
             continue
@@ -305,19 +447,7 @@ def bot_reserved_potential_loss(
             stress_price=stress_price,
             contract_size=contract_size,
         )
-
-    signal_stmt = select(StrategySignal).where(
-        StrategySignal.strategy_key == "torum_v1",
-        StrategySignal.internal_symbol == symbol.upper(),
-        StrategySignal.signal_type == "ENTRY",
-        StrategySignal.side == "BUY",
-        StrategySignal.status.in_(TORUM_V1_RESERVED_SIGNAL_STATUSES),
-    )
-    if user_id is not None:
-        signal_stmt = signal_stmt.where(StrategySignal.user_id == user_id)
-    if exclude_signal_id is not None:
-        signal_stmt = signal_stmt.where(StrategySignal.id != exclude_signal_id)
-    for signal in db.scalars(signal_stmt):
+    for signal in signals:
         metadata = signal.metadata_json or {}
         volume = _float_or_none(metadata.get("accepted_volume")) or _float_or_none(signal.suggested_volume)
         price = fallback_price or _float_or_none(metadata.get("current_price"))
@@ -346,6 +476,8 @@ def plan_torum_v1_bot_exposure(
     strategy_params: dict[str, object] | None = None,
     exclude_order_id: int | None = None,
     exclude_signal_id: int | None = None,
+    account_login: int | None = None,
+    account_server: str | None = None,
 ) -> BotExposurePlan:
     normalized_symbol = symbol.upper()
     base_lot = _base_lot(balance, trading_settings)
@@ -356,10 +488,40 @@ def plan_torum_v1_bot_exposure(
     if zone is not None and zone.max_lot_equivalents <= 0:
         return _blocked("ath_red_zone", ath, zone, max_equivalents, 0.0)
 
-    open_positions = bot_open_positions(db, normalized_symbol, user_id)
+    execution_mode = str(getattr(trading_settings, "trading_mode", "")).upper() or None
+    open_positions = bot_open_positions(
+        db, normalized_symbol, user_id, mode=execution_mode,
+        account_login=account_login, account_server=account_server,
+    )
+    pending_orders = _active_pending_orders(
+        db, normalized_symbol, user_id, exclude_order_id=exclude_order_id,
+        mode=execution_mode, account_login=account_login, account_server=account_server,
+    )
+    reserved_signals = _active_reserved_signals(
+        db, normalized_symbol, user_id, exclude_signal_id=exclude_signal_id, mode=execution_mode,
+    )
+    # Once an Order exists it is the authoritative reservation. Its originating
+    # signal may remain RISK_APPROVED/SENT/RECONCILING at the same time; counting
+    # both would turn one x3 request into six occupied equivalents and block the
+    # next valid setup. This also covers an exception before runner could copy
+    # order.id back into signal.order_id by using Order.strategy_signal_id.
+    pending_signal_ids = {
+        int(order.strategy_signal_id)
+        for order in pending_orders
+        if order.strategy_signal_id is not None
+    }
+    reserved_signals = [
+        signal
+        for signal in reserved_signals
+        if signal.id is None or int(signal.id) not in pending_signal_ids
+    ]
     open_equiv = open_lot_equivalents(open_positions, base_lot)
-    pending_equiv = bot_pending_lot_equivalents(db, normalized_symbol, user_id, base_lot, exclude_order_id=exclude_order_id)
-    reserved_equiv = bot_reserved_signal_lot_equivalents(db, normalized_symbol, user_id, base_lot, exclude_signal_id=exclude_signal_id)
+    pending_equiv = sum(max(0.0, float(order.volume)) / base_lot for order in pending_orders)
+    reserved_equiv = 0.0
+    for signal in reserved_signals:
+        metadata = signal.metadata_json or {}
+        volume = _float_or_none(metadata.get("accepted_volume")) or _float_or_none(signal.suggested_volume)
+        reserved_equiv += (max(0.0, volume) / base_lot) if volume is not None else max(0.0, _float_or_none(metadata.get("accepted_multiplier")) or _float_or_none(metadata.get("desired_multiplier")) or 1.0)
     used_equiv = open_equiv + pending_equiv + reserved_equiv
     max_multiplier = min(max(1, int(desired_multiplier)), configured_max_equivalents)
     allow_degrade = bool((strategy_params or {}).get("support_degrade_enabled", True))
@@ -371,26 +533,35 @@ def plan_torum_v1_bot_exposure(
 
     from app.risk.snapshot import RiskSnapshotService, candidate_loss
 
-    snapshot = RiskSnapshotService(db).get_snapshot(normalized_symbol, source="STRATEGY")
-    if snapshot.dirty or not snapshot.valid:
-        snapshot = RiskSnapshotService(db).recompute(normalized_symbol, source="STRATEGY")
-    if not snapshot.valid or snapshot.stress_price is None:
-        return _blocked("missing_risk_snapshot", ath, zone, max_equivalents, used_equiv)
+    # Never synchronously rebuild/calibrate the risk snapshot while an entry is
+    # waiting. A dirty valid snapshot remains usable; when absent, the mapping
+    # provides the deterministic contract/conversion values and current open
+    # positions are already available in this transaction.
+    snapshot = RiskSnapshotService(db).get_snapshot(
+        normalized_symbol,
+        source="STRATEGY",
+        recompute_if_missing=False,
+        schedule_recompute=False,
+    )
+    mapped_contract_size = float(symbol_mapping.contract_size) if symbol_mapping is not None and symbol_mapping.contract_size > 0 else 100.0
+    mapped_conversion = float(symbol_mapping.risk_conversion_rate) if symbol_mapping is not None and symbol_mapping.risk_conversion_rate > 0 else 1.0
+    contract_size = float(snapshot.contract_size) if snapshot.valid and snapshot.contract_size > 0 else mapped_contract_size * mapped_conversion
     stress_drop_pct = _float_or_none((strategy_params or {}).get("risk_stress_drop_from_ath_pct")) or (ATH_ADVERSE_MOVE_RATIO * 100.0)
-    stress_price = ath * (1.0 - stress_drop_pct / 100.0) if ath is not None else snapshot.stress_price
+    stress_price = ath * (1.0 - stress_drop_pct / 100.0) if ath is not None else None
+    if stress_price is None or stress_price <= 0:
+        return _blocked("missing_ath_for_risk", ath, zone, max_equivalents, used_equiv)
     risk_limit_pct = _float_or_none((strategy_params or {}).get("risk_max_balance_pct")) or (ATH_RISK_LIMIT_RATIO * 100.0)
     risk_limit = balance * risk_limit_pct / 100.0
-    from app.risk.snapshot import candidate_loss
     current_loss = round(
         sum(
             candidate_loss(
-                side=item.side,
-                volume=float(item.volume),
-                price=float(item.open_price),
+                side=position.side,
+                volume=float(position.volume),
+                price=float(position.open_price),
                 stress_price=stress_price,
-                contract_size=snapshot.contract_size,
+                contract_size=contract_size,
             )
-            for item in snapshot.positions
+            for position in open_positions
         ),
         2,
     )
@@ -399,10 +570,12 @@ def plan_torum_v1_bot_exposure(
         normalized_symbol,
         user_id,
         stress_price=stress_price,
-        contract_size=snapshot.contract_size,
+        contract_size=contract_size,
         fallback_price=current_price,
         exclude_order_id=exclude_order_id,
         exclude_signal_id=exclude_signal_id,
+        pending_orders=pending_orders,
+        reserved_signals=reserved_signals,
     )
     current_loss = round(current_loss + reserved_loss, 2)
     if not allow_degrade and used_equiv + max_multiplier > max_equivalents + 1e-9:
@@ -418,7 +591,7 @@ def plan_torum_v1_bot_exposure(
             volume=volume,
             price=current_price,
             stress_price=stress_price,
-            contract_size=snapshot.contract_size,
+            contract_size=contract_size,
         )
         potential_loss = round(current_loss + added_loss, 2)
         projected_balance = balance - potential_loss

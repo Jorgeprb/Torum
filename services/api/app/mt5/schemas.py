@@ -59,6 +59,11 @@ class MT5PositionsSyncPayload(BaseModel):
     account: MT5AccountPayload | None = None
     positions: list[dict] = Field(default_factory=list)
     closed_deals: list[dict] = Field(default_factory=list)
+    capital_flows: list[dict] = Field(default_factory=list)
+    # True only when the bridge completed an authoritative history-deals query
+    # for this sync cycle. An empty list without this flag cannot prove that an
+    # ambiguous market request was not filled and closed between polls.
+    deals_checked: bool = False
 
 
 class MT5PositionsSyncRead(BaseModel):
@@ -68,4 +73,7 @@ class MT5PositionsSyncRead(BaseModel):
     created: int
     updated: int
     closed: int
+    reconciliation_failed: int = 0
+    capital_flows_received: int = 0
+    capital_flows_created: int = 0
     changed_positions: list[dict] = Field(default_factory=list)

@@ -51,40 +51,58 @@ class PositionSyncer:
             self._stop.wait(max(0.1, self.settings.mt5_position_sync_interval_seconds))
 
     def sync_once(self) -> dict[str, Any] | None:
-        with self.mt5_client.operation("sync", "position_sync"):
-            try:
-                self.mt5_client.initialize()
-                account_state = self.mt5_client.get_account_state()
-                account = account_state.to_payload()
-            except MT5ClientError as exc:
-                logger.debug("Skipping position sync; MT5 unavailable: %s", exc)
-                return None
+        # Do not hold one giant MT5 lock around positions + up to a year of
+        # deal history. MT5Client serializes each vendor call itself and gives
+        # orders priority between calls, so a buy can pre-empt reconciliation.
+        try:
+            self.mt5_client.initialize()
+            account_state = self.mt5_client.get_account_state()
+            account = account_state.to_payload()
+        except MT5ClientError as exc:
+            logger.debug("Skipping position sync; MT5 unavailable: %s", exc)
+            return None
 
-            positions = self.mt5_client.get_positions()
-            if positions is None:
-                return None
-            payload = [_position_to_payload(position, self.mt5_client.mt5) for position in positions]
+        positions = self.mt5_client.get_positions()
+        if positions is None:
+            return None
+        payload = [_position_to_payload(position, self.mt5_client.mt5) for position in positions]
 
-            account_key = _account_key(account)
-            self._ensure_cursor_loaded(account_key)
-            closed_deals: list[dict[str, Any]] = []
-            now_mono = monotonic()
-            if not self._startup_history_reconciled and now_mono >= self._startup_history_due:
-                closed_deals = self._load_full_history_deals()
-                self._startup_history_reconciled = True
+        account_key = _account_key(account)
+        self._ensure_cursor_loaded(account_key)
+        history_events: list[dict[str, Any]] = []
+        deals_checked = False
+        now_mono = monotonic()
+        if not self._startup_history_reconciled:
+            if now_mono >= self._startup_history_due:
+                history_events, deals_checked = self._load_full_history_deals()
+                if deals_checked:
+                    self._startup_history_reconciled = True
+                    self._last_deals_sync_monotonic = now_mono
+                    logger.info("MT5 startup history reconciliation loaded %s relevant events", len(history_events))
+                else:
+                    logger.warning("MT5 startup history reconciliation incomplete; will retry")
+            # Before the configured startup delay, deliberately skip history.
+            # The old elif branch accidentally loaded 365 days immediately.
+        elif (
+            self._last_deals_sync_monotonic == 0
+            or now_mono - self._last_deals_sync_monotonic >= max(1, self.settings.mt5_deals_sync_interval_seconds)
+        ):
+            history_events, deals_checked = self._load_incremental_closed_deals()
+            if deals_checked:
                 self._last_deals_sync_monotonic = now_mono
-                logger.info("MT5 startup history reconciliation loaded %s deals", len(closed_deals))
-            elif (
-                self._last_deals_sync_monotonic == 0
-                or now_mono - self._last_deals_sync_monotonic >= max(1, self.settings.mt5_deals_sync_interval_seconds)
-            ):
-                closed_deals = self._load_incremental_closed_deals()
-                self._last_deals_sync_monotonic = now_mono
 
-        response = self.backend_client.post_positions_sync(payload, account, closed_deals)
+        closed_deals = [event for event in history_events if event.get("history_category") != "cash_flow"]
+        capital_flows = [event for event in history_events if event.get("history_category") == "cash_flow"]
+        response = self.backend_client.post_positions_sync(
+            payload,
+            account,
+            closed_deals,
+            capital_flows,
+            deals_checked=deals_checked,
+        )
         if response is not None:
-            if closed_deals:
-                self._advance_cursor(closed_deals, account_key)
+            if history_events and deals_checked:
+                self._advance_cursor(history_events, account_key)
             logger.debug(
                 "Synced MT5 positions: received=%s deals=%s created=%s updated=%s closed=%s",
                 response.get("received"),
@@ -95,57 +113,85 @@ class PositionSyncer:
             )
         return response
 
-    def _load_full_history_deals(self) -> list[dict[str, Any]]:
-        date_to = datetime.now(UTC) + timedelta(seconds=1)
-        date_from = date_to - timedelta(days=max(1, self.settings.mt5_deals_history_lookback_days))
-        deals = self.mt5_client.get_history_deals(date_from, date_to)
-        if deals is None:
-            return []
-        mt5 = self.mt5_client.mt5
-        if mt5 is None:
-            return []
-        trade_types = {getattr(mt5, "DEAL_TYPE_BUY", 0), getattr(mt5, "DEAL_TYPE_SELL", 1)}
-        payloads = [
-            _deal_to_payload(deal)
-            for deal in deals
-            if getattr(deal, "position_id", None)
-            and (getattr(deal, "type", None) is None or getattr(deal, "type", None) in trade_types)
-        ]
-        payloads.sort(key=_deal_cursor_key)
-        return payloads
+    def _history_date_to(self) -> datetime:
+        # Some MT5 brokers expose deal timestamps in broker wall time while the
+        # Python process runs in UTC.  Querying only up to real ``now`` then
+        # misses a TP deal for several hours and leaves a ghost OPEN position.
+        future_hours = max(1, min(24, int(self.settings.mt5_history_future_tolerance_hours)))
+        return datetime.now(UTC) + timedelta(hours=future_hours)
 
-    def _load_incremental_closed_deals(self) -> list[dict[str, Any]]:
-        date_to = datetime.now(UTC) + timedelta(seconds=1)
+    def _load_full_history_deals(self) -> tuple[list[dict[str, Any]], bool]:
+        date_to = self._history_date_to()
+        date_from = date_to - timedelta(days=max(1, self.settings.mt5_deals_history_lookback_days))
+        return self._load_history_deals_chunked(date_from, date_to)
+
+    def _load_incremental_closed_deals(self) -> tuple[list[dict[str, Any]], bool]:
+        date_to = self._history_date_to()
         if self._cursor_time_msc > 0:
             overlap_ms = max(0, self.settings.mt5_deal_cursor_overlap_seconds) * 1000
             date_from = datetime.fromtimestamp(max(0, self._cursor_time_msc - overlap_ms) / 1000, UTC)
         else:
             date_from = date_to - timedelta(days=max(1, self.settings.mt5_deals_history_lookback_days))
 
-        deals = self.mt5_client.get_history_deals(date_from, date_to)
-        if deals is None:
-            return []
+        payloads, complete = self._load_history_deals_chunked(date_from, date_to)
+        payloads = [
+            payload
+            for payload in payloads
+            if _deal_cursor_key(payload) > (self._cursor_time_msc, self._cursor_ticket)
+        ]
+        payloads.sort(key=_deal_cursor_key)
+        return payloads, complete
+
+    def _load_history_deals_chunked(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Load history in short calls and report whether every chunk succeeded."""
+
         mt5 = self.mt5_client.mt5
         if mt5 is None:
-            return []
+            return [], False
+        if date_from >= date_to:
+            return [], True
         trade_types = {
             getattr(mt5, "DEAL_TYPE_BUY", 0),
             getattr(mt5, "DEAL_TYPE_SELL", 1),
         }
-        payloads: list[dict[str, Any]] = []
-        for deal in deals:
-            if not getattr(deal, "position_id", None):
-                continue
-            deal_type = getattr(deal, "type", None)
-            if deal_type is not None and deal_type not in trade_types:
-                continue
-            payload = _deal_to_payload(deal)
-            key = _deal_cursor_key(payload)
-            if key <= (self._cursor_time_msc, self._cursor_ticket):
-                continue
-            payloads.append(payload)
-        payloads.sort(key=_deal_cursor_key)
-        return payloads
+        cash_flow_types = _cash_flow_deal_types(mt5)
+        chunk_days = max(1, int(self.settings.mt5_history_chunk_days))
+        cursor = date_from
+        by_key: dict[tuple[int, int], dict[str, Any]] = {}
+        while cursor < date_to and not self._stop.is_set():
+            chunk_end = min(date_to, cursor + timedelta(days=chunk_days))
+            deals = self.mt5_client.get_history_deals(cursor, chunk_end)
+            if deals is None:
+                # Partial history cannot authoritatively prove that a timed-out
+                # market request was never filled. Positive matches already
+                # collected are still posted, but the backend will not release
+                # an ambiguous reservation from this incomplete cycle.
+                return [by_key[key] for key in sorted(by_key)], False
+            for deal in deals:
+                deal_type = getattr(deal, "type", None)
+                position_id = getattr(deal, "position_id", None)
+                if deal_type in trade_types and position_id:
+                    payload = _deal_to_payload(deal)
+                    payload["history_category"] = "trade"
+                elif deal_type in cash_flow_types:
+                    payload = _deal_to_payload(deal)
+                    payload["history_category"] = "cash_flow"
+                    payload["cash_flow_kind"] = _cash_flow_kind(payload.get("profit"))
+                    payload["deal_type_name"] = cash_flow_types[deal_type]
+                    # This project stores live MT5 chart/history timestamps in
+                    # broker wall-clock form (UTC-tagged).  Tell the API which
+                    # clock domain this cash movement belongs to so performance
+                    # periods can normalize it to real UTC before TWR math.
+                    payload["time_domain"] = "BROKER_CHART"
+                else:
+                    continue
+                by_key[_deal_cursor_key(payload)] = payload
+            cursor = chunk_end
+        return [by_key[key] for key in sorted(by_key)], True
 
     def _ensure_cursor_loaded(self, account_key: str) -> None:
         if self._cursor_loaded_for == account_key:
@@ -238,6 +284,38 @@ def _deal_to_payload(deal: Any) -> dict[str, Any]:
     }
 
 
+
+def _cash_flow_deal_types(mt5: Any) -> dict[int, str]:
+    """MT5 balance-side events that must not inflate strategy return."""
+
+    candidates = (
+        ("DEAL_TYPE_BALANCE", 2, "BALANCE"),
+        ("DEAL_TYPE_CREDIT", 3, "CREDIT"),
+        ("DEAL_TYPE_CHARGE", 15, "CHARGE"),
+        ("DEAL_TYPE_CORRECTION", 16, "CORRECTION"),
+        ("DEAL_TYPE_BONUS", 17, "BONUS"),
+    )
+    result: dict[int, str] = {}
+    for attr, fallback, label in candidates:
+        value = getattr(mt5, attr, fallback)
+        try:
+            result[int(value)] = label
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _cash_flow_kind(amount: Any) -> str:
+    try:
+        value = float(amount or 0.0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value > 0:
+        return "DEPOSIT"
+    if value < 0:
+        return "WITHDRAWAL"
+    return "ADJUSTMENT"
+
 def _deal_cursor_key(deal: dict[str, Any]) -> tuple[int, int]:
     try:
         time_msc = int(deal.get("time_msc") or 0)
@@ -250,14 +328,20 @@ def _deal_cursor_key(deal: dict[str, Any]) -> tuple[int, int]:
     return time_msc, ticket
 
 
-def _load_closed_deals(mt5: Any, lookback_days: int) -> list[dict[str, Any]]:
+def _load_closed_deals(
+    mt5: Any,
+    lookback_days: int,
+    *,
+    future_tolerance_hours: int = 14,
+) -> list[dict[str, Any]]:
     """Backward-compatible broad history loader used by startup/reconciliation tests.
 
     Despite the historic name, all BUY/SELL trade deals are returned because entry
     deals are required to aggregate a complete position history.  The live syncer
     uses the incremental cursor path above instead of calling this every second.
     """
-    date_to = datetime.now(UTC) + timedelta(seconds=1)
+    future_hours = max(1, min(24, int(future_tolerance_hours)))
+    date_to = datetime.now(UTC) + timedelta(hours=future_hours)
     date_from = date_to - timedelta(days=max(1, int(lookback_days)))
     deals = mt5.history_deals_get(date_from, date_to)
     if deals is None:

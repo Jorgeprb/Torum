@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-DRAWING_TYPES = {"horizontal_line", "vertical_line", "trend_line", "rectangle", "text", "manual_zone"}
+DRAWING_TYPES = {"horizontal_line", "vertical_line", "trend_line", "rectangle", "text"}
 DRAWING_SOURCES = {"MANUAL", "INDICATOR", "NEWS", "STRATEGY", "IMPORT"}
 ZONE_DIRECTIONS = {"BUY", "SELL", "NEUTRAL"}
 
@@ -118,30 +118,7 @@ def validate_drawing_payload(drawing_type: str, payload: dict[str, Any]) -> dict
             "text": text.strip(),
         }
 
-    time1 = normalize_unix_time(payload.get("time1"), "time1")
-    raw_time2 = payload.get("time2")
-    time2 = None if raw_time2 is None else normalize_unix_time(raw_time2, "time2")
-    if time2 is not None and time2 <= time1:
-        raise DrawingValidationError("time2 must be greater than time1")
-    price_min = require_number(payload, "price_min")
-    price_max = require_number(payload, "price_max")
-    if price_max <= price_min:
-        raise DrawingValidationError("price_max must be greater than price_min")
-    direction = str(payload.get("direction") or "NEUTRAL").upper()
-    if direction not in ZONE_DIRECTIONS:
-        raise DrawingValidationError("direction must be BUY, SELL or NEUTRAL")
-    rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    return {
-        "time1": time1,
-        "time2": time2,
-        "price_min": price_min,
-        "price_max": price_max,
-        "direction": direction,
-        "label": normalize_label(payload.get("label")) or "Manual zone",
-        "rules": rules,
-        "metadata": metadata,
-    }
+    raise DrawingValidationError(f"Unsupported drawing_type: {drawing_type}")
 
 
 def normalize_style(style: dict[str, Any] | None) -> dict[str, Any]:

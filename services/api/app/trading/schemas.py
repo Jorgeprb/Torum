@@ -7,7 +7,7 @@ TradingMode = Literal["PAPER", "DEMO", "LIVE"]
 MarketDataSource = Literal["MT5", "MOCK"]
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET"]
-OrderStatus = Literal["CREATED", "VALIDATING", "REJECTED", "SENT", "EXECUTED", "FAILED", "CANCELLED", "CLOSED"]
+OrderStatus = Literal["CREATED", "VALIDATING", "REJECTED", "SENT", "EXECUTED", "FAILED", "RECONCILING", "CANCELLED", "CLOSED"]
 PositionStatus = Literal["OPEN", "CLOSED"]
 AthMode = Literal["auto", "manual"]
 
