@@ -668,7 +668,7 @@ def test_manual_close_reconciles_mt5_tp_race_instead_of_returning_invalid_reques
             assert ticket == 111111
             return {"ok": False, "comment": "Invalid request"}
 
-        def get_close_deal(self, ticket: int, deal: int | None = None) -> dict[str, object]:
+        def get_close_deal(self, ticket: int, deal: int | None = None, **kwargs) -> dict[str, object]:  # type: ignore[no-untyped-def]
             assert ticket == 222222
             return {
                 "ok": True,

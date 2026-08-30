@@ -277,6 +277,8 @@ def _apply_tp(db: Session, payload: dict[str, Any]) -> None:
                 "sl": position.sl or 0,
                 "magic_number": position.magic_number,
                 "comment": "tp-final",
+                "expected_account_login": position.account_login,
+                "expected_account_server": position.account_server,
             },
         )
     except MT5BridgeClientError as exc:
@@ -317,7 +319,12 @@ def _enrich_close(db: Session, payload: dict[str, Any]) -> None:
         return
     ticket = int(payload["ticket"])
     deal_ticket = payload.get("deal_ticket")
-    response = MT5BridgeClient().get_close_deal(ticket, int(deal_ticket) if deal_ticket is not None else None)
+    response = MT5BridgeClient().get_close_deal(
+        ticket,
+        int(deal_ticket) if deal_ticket is not None else None,
+        expected_account_login=position.account_login,
+        expected_account_server=position.account_server,
+    )
     close_deal = response.get("close_deal") if isinstance(response, dict) else None
     deals = response.get("deals") if isinstance(response, dict) else None
     if isinstance(deals, list) and deals:

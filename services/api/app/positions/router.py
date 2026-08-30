@@ -20,6 +20,8 @@ def get_positions(
     status_filter: str | None = Query(default=None, alias="status"),
     symbol: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    account_login: int | None = Query(default=None),
+    account_server: str | None = Query(default=None),
 ) -> list[PositionRead]:
     return [
         PositionRead.model_validate(position)
@@ -29,6 +31,8 @@ def get_positions(
             symbol,
             user_id=current_user.id,
             include_all_users=current_user.role == UserRole.admin,
+            account_login=account_login,
+            account_server=account_server,
         )
     ]
 

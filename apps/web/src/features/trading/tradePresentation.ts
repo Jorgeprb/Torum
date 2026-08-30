@@ -367,7 +367,8 @@ export function tradeLinesForSymbol(
           profitEstimated: valuation.estimated,
           contractSize,
           currency: accountCurrency,
-          selected
+          selected,
+          editable: selected && !position.tp
         }
       ];
 

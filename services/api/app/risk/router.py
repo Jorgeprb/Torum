@@ -5,8 +5,9 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
-from app.risk.schemas import RiskCandidatePreviewRead, RiskSnapshotRead
+from app.risk.schemas import RiskCandidatePreviewRead, RiskSnapshotRead, StopOutLineRead
 from app.risk.snapshot import RiskSnapshotService
+from app.risk.stopout import StopOutLineService
 from app.users.models import User
 
 router = APIRouter(prefix="/risk", tags=["risk"])
@@ -43,3 +44,12 @@ def get_risk_candidate_preview(
     source: str = Query("ALL", min_length=2, max_length=16),
 ) -> RiskCandidatePreviewRead:
     return RiskSnapshotService(db).preview_candidate(symbol, side=side, volume=volume, price=price, source=source)
+
+
+@router.get("/stopout-line", response_model=StopOutLineRead)
+def get_stopout_line(
+    db: Annotated[Session, Depends(get_db)],
+    _current_user: Annotated[User, Depends(get_current_user)],
+    symbol: str = Query(..., min_length=3, max_length=32),
+) -> StopOutLineRead:
+    return StopOutLineService(db).get_line(symbol)

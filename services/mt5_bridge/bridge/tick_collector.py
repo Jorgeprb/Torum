@@ -69,7 +69,9 @@ class TickCollector:
 
     def run(self, once: bool = False) -> None:
         mappings: list[SymbolMapping] = []
+        active_mappings: list[SymbolMapping] = []
         account: AccountState | None = None
+        account_identity: tuple[int | None, str] | None = None
         self.tick_buffer.start()
         try:
             backend_symbols = self.backend_client.get_symbols()
@@ -78,23 +80,45 @@ class TickCollector:
 
             self.mt5_client.initialize()
             self.health.connected_to_mt5 = self.mt5_client.is_connected()
-            account = self.mt5_client.get_account_state()
-            self._log_account(account)
-            self._enforce_account_mode(account)
-
-            active_mappings = self._select_symbols(mappings)
-            self.health.active_symbols = [mapping.internal_symbol for mapping in active_mappings]
-            self.health.account = account
-            self.health.account_trade_mode = account.trade_mode
+            with self.mt5_client.operation("market", "collector_startup"):
+                account = self.mt5_client.get_account_state()
+                account_identity = _account_identity(account)
+                self._log_account(account)
+                self._enforce_account_mode(account)
+                active_mappings = self._select_symbols(mappings)
+                self.health.active_symbols = [mapping.internal_symbol for mapping in active_mappings]
+                self._apply_account_state(account, reset_market_state=False)
+                self._recover_recent_ticks(active_mappings, account)
             self._post_status(force=True)
-
-            self._recover_recent_ticks(active_mappings)
             self._flush(account=account, force=True)
             if once:
                 return
 
             while not self._stop_requested:
-                self._collect_poll(active_mappings)
+                # Keep account read + the whole poll under one re-entrant market
+                # operation. An account switch has order priority and therefore
+                # happens only between complete polls, never halfway through one.
+                with self.mt5_client.operation("market", "tick_poll"):
+                    current_account = self.mt5_client.get_account_state()
+                    current_identity = _account_identity(current_account)
+                    if current_identity != account_identity:
+                        logger.warning(
+                            "Tick collector detected MT5 account change: previous=%s current=%s",
+                            account_identity,
+                            current_identity,
+                        )
+                        account = current_account
+                        account_identity = current_identity
+                        self._enforce_account_mode(account)
+                        self._reset_market_state_for_account_change()
+                        active_mappings = self._select_symbols(mappings)
+                        self.health.active_symbols = [mapping.internal_symbol for mapping in active_mappings]
+                        self._apply_account_state(account, reset_market_state=False)
+                        self._post_status(force=True)
+                    else:
+                        account = current_account
+                        self._apply_account_state(account, reset_market_state=False)
+                    self._collect_poll(active_mappings, account)
                 self._flush(account=account, force=False)
                 self._post_status()
                 self._log_market_diagnostics(active_mappings)
@@ -108,7 +132,35 @@ class TickCollector:
             self._post_status(force=True)
             raise
         finally:
+            # Queued ticks are account-tagged, so even if ``account`` changed
+            # during shutdown each batch is posted with the account that created it.
             self._flush(account=account, force=True)
+
+    def _apply_account_state(self, account: AccountState, *, reset_market_state: bool) -> None:
+        if reset_market_state:
+            self._reset_market_state_for_account_change()
+        self.health.account = account
+        self.health.account_trade_mode = account.trade_mode
+        self.health.connected_to_mt5 = self.mt5_client.is_connected()
+        try:
+            terminal_info = self.mt5_client.get_terminal_info()
+        except Exception:  # noqa: BLE001 - status reporting must never stop tick collection
+            logger.exception("MT5 terminal permission status unavailable")
+            self.health.terminal_trade_allowed = None
+            self.health.terminal_tradeapi_disabled = None
+        else:
+            trade_allowed = getattr(terminal_info, "trade_allowed", None)
+            tradeapi_disabled = getattr(terminal_info, "tradeapi_disabled", None)
+            self.health.terminal_trade_allowed = bool(trade_allowed) if trade_allowed is not None else None
+            self.health.terminal_tradeapi_disabled = bool(tradeapi_disabled) if tradeapi_disabled is not None else None
+        self.health.message = None
+
+    def _reset_market_state_for_account_change(self) -> None:
+        self.deduplicator = TickDeduplicator()
+        self._last_seen_by_symbol.clear()
+        self.health.last_tick_time_by_symbol.clear()
+        self._diagnostic_sent_counts.clear()
+        self._diagnostic_latest_ticks.clear()
 
     def _select_symbols(self, mappings: list[SymbolMapping]) -> list[SymbolMapping]:
         active: list[SymbolMapping] = []
@@ -132,19 +184,19 @@ class TickCollector:
         logger.info("Active MT5 symbols: %s", ", ".join(f"{m.internal_symbol}->{m.broker_symbol}" for m in active))
         return active
 
-    def _recover_recent_ticks(self, mappings: list[SymbolMapping]) -> None:
+    def _recover_recent_ticks(self, mappings: list[SymbolMapping], account: AccountState) -> None:
         since = datetime.now(UTC) - timedelta(seconds=self.settings.mt5_lookback_seconds_on_start)
         logger.info("Recovering MT5 ticks from last %s seconds", self.settings.mt5_lookback_seconds_on_start)
         for mapping in mappings:
-            self._collect_symbol(mapping, since)
+            self._collect_symbol(mapping, since, account)
 
-    def _collect_poll(self, mappings: list[SymbolMapping]) -> None:
+    def _collect_poll(self, mappings: list[SymbolMapping], account: AccountState) -> None:
         now = datetime.now(UTC)
         for mapping in mappings:
             since = self._last_seen_by_symbol.get(mapping.internal_symbol, now - timedelta(seconds=1))
-            self._collect_symbol(mapping, since)
+            self._collect_symbol(mapping, since, account)
 
-    def _collect_symbol(self, mapping: SymbolMapping, since: datetime) -> None:
+    def _collect_symbol(self, mapping: SymbolMapping, since: datetime, account: AccountState) -> None:
         raw_ticks = self.mt5_client.get_ticks_since(mapping.broker_symbol, since)
         converted_ticks: list[dict[str, Any]] = []
         for raw_tick in raw_ticks:
@@ -161,7 +213,7 @@ class TickCollector:
         if not converted_ticks:
             return
 
-        self.tick_buffer.add_many(converted_ticks)
+        self.tick_buffer.add_many(converted_ticks, account=account.to_payload())
         latest_tick = max(converted_ticks, key=lambda tick: int(tick.get("time_msc") or 0))
         latest_time = parse_iso_time(latest_tick["time"])
         self._last_seen_by_symbol[mapping.internal_symbol] = latest_time
@@ -291,3 +343,7 @@ def _float_or_zero(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _account_identity(account: AccountState) -> tuple[int | None, str]:
+    return account.login, (account.server or "").strip().casefold()

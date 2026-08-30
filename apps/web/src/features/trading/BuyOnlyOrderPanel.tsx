@@ -86,6 +86,9 @@ export function BuyOnlyOrderPanel({
   const previewTp = useMemo(() => calculateTp(lastPrice, tpPercent), [lastPrice, tpPercent]);
   const mode: TradingMode = settings?.trading_mode ?? "PAPER";
   const liveDataBlocked = mode !== "PAPER" && !marketConnectionHealthy;
+  const mt5ClientTradingBlocked = mode !== "PAPER" && Boolean(
+    mt5Status && (mt5Status.terminal_trade_allowed === false || mt5Status.terminal_tradeapi_disabled === true)
+  );
   const typedLot = parseLotInput(lotInputText);
   const minLot = lotSize?.min_lot ?? settings?.minimum_lot ?? 0.01;
   const maxLot = settings?.max_order_volume ?? null;
@@ -157,6 +160,7 @@ export function BuyOnlyOrderPanel({
         side: "BUY",
         order_type: "MARKET",
         volume: selectedLot,
+        multiplier: typedLot === null ? Math.max(1, Math.min(3, multiplier)) : null,
         sl: null,
         tp_percent: settings.default_take_profit_percent,
         comment: "Manual BUY from Torum mobile",
@@ -269,6 +273,11 @@ export function BuyOnlyOrderPanel({
       </button>
 
       {!tradable ? <div className="compact-warning">{disabledReason}</div> : null}
+      {mt5ClientTradingBlocked ? (
+        <div className="compact-error">
+          MT5 tiene Algo Trading/AutoTrading desactivado en el terminal. Torum puede preparar la orden manual o automática, pero MT5 la rechazará hasta activarlo.
+        </div>
+      ) : null}
       {mode !== "PAPER" && !mt5Connected ? <div className="compact-warning">MT5 desconectado: DEMO/LIVE bloqueado</div> : null}
       {liveDataBlocked ? <div className="compact-warning">{marketStaleReason}</div> : null}
       {lotInputInvalid ? <div className="compact-warning">Lotaje no valido</div> : null}
@@ -283,6 +292,11 @@ export function BuyOnlyOrderPanel({
               <ShieldAlert size={20} />
               <h2>Confirmar compra</h2>
             </div>
+            {mt5ClientTradingBlocked ? (
+              <div className="compact-error">
+                AutoTrading está desactivado en MT5. La orden será rechazada por el terminal hasta que actives Algo Trading/AutoTrading.
+              </div>
+            ) : null}
             <dl className="confirm-summary">
               <div>
                 <dt>Simbolo</dt>

@@ -59,9 +59,25 @@ def main() -> None:
     order_server: OrderServerHandle | None = None
     position_syncer: PositionSyncer | None = None
     if not args.once:
-        order_server = start_order_server(settings, mt5_client)
         position_syncer = PositionSyncer(settings=settings, mt5_client=mt5_client, backend_client=backend_client)
         position_syncer.start()
+
+        def switch_active_account(login: int, server: str):
+            # Switching owns the highest-priority MT5 slot. Finish posting any
+            # already collected old-account ticks before changing the terminal;
+            # batches are also individually account-tagged as a second guard.
+            with mt5_client.operation("order", f"account_switch:{login}"):
+                previous = mt5_client.get_account_state()
+                tick_buffer.flush(account=previous.to_payload(), force=True, timeout=5.0)
+                previous, current = mt5_client.switch_account(login, server)
+                position_syncer.request_sync()
+                return previous, current
+
+        order_server = start_order_server(
+            settings,
+            mt5_client,
+            account_switch_handler=switch_active_account,
+        )
 
     def stop_bridge(_signum: int, _frame: object) -> None:
         logger.info("Stop requested")

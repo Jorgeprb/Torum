@@ -53,6 +53,13 @@ function drawingCenter(shape: DrawingShape): { x: number; y: number } {
   return { x: shape.x + shape.width / 2, y: shape.y + shape.height / 2 };
 }
 
+function isTorumOperationRectangle(shape: DrawingShape): boolean {
+  if (shape.kind !== "rectangle") return false;
+  const metadata = shape.drawing.metadata ?? {};
+  const payload = shape.drawing.payload ?? {};
+  return metadata.torum_v1_zone_enabled === true || payload.torum_v1_zone_enabled === true;
+}
+
 function DrawingHtmlHandles({
   shape,
   onDragStart
@@ -124,9 +131,11 @@ function DrawingHtmlHandles({
   const right = shape.x + shape.width;
   const bottom = shape.y + shape.height;
 
+  const moveFromBody = isTorumOperationRectangle(shape);
+
   return (
     <>
-      {centerHandle}
+      {moveFromBody ? null : centerHandle}
       <button
         aria-label="Escalar arriba izquierda"
         className="drawing-html-handle"

@@ -52,6 +52,7 @@ export interface MarketChartProps {
   onPullbackDebugToggle?: (visible: boolean) => void;
   dollarStrengthBadge?: ReactNode;
   tradeExecutionMarkers?: TradeExecutionMarker[];
+  accountStopOutLine?: import("../../services/risk").StopOutLine | null;
 }
 
 export interface ZoneOverlay {

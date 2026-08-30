@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import islice
 import logging
 from threading import Condition, Thread
 import time
@@ -48,7 +49,11 @@ class TickBuffer:
         self.batch_max_size = max(1, batch_max_size)
         self.flush_interval_seconds = max(0.01, flush_interval_seconds)
         self.max_buffer_size = max(1, max_buffer_size)
-        self._ticks: deque[dict[str, Any]] = deque()
+        # Each queued tick carries the MT5 account that produced it. This is
+        # critical when the terminal changes account while old ticks are still
+        # waiting for the HTTP sender: no batch can be attributed to the new
+        # account accidentally.
+        self._ticks: deque[tuple[dict[str, Any], dict[str, Any] | None]] = deque()
         self._condition = Condition()
         self._last_flush_monotonic = time.monotonic()
         self._latest_account: dict[str, Any] | None = None
@@ -72,11 +77,12 @@ class TickBuffer:
             self._thread = Thread(target=self._run, name="torum-tick-sender", daemon=False)
             self._thread.start()
 
-    def add_many(self, ticks: list[dict[str, Any]]) -> int:
+    def add_many(self, ticks: list[dict[str, Any]], account: dict[str, Any] | None = None) -> int:
         if not ticks:
             return 0
+        account_snapshot = dict(account) if account is not None else None
         with self._condition:
-            self._ticks.extend(ticks)
+            self._ticks.extend((tick, account_snapshot) for tick in ticks)
             dropped = 0
             while len(self._ticks) > self.max_buffer_size:
                 self._ticks.popleft()
@@ -121,8 +127,8 @@ class TickBuffer:
                 ) >= self.flush_interval_seconds
                 if not due:
                     break
-                batch = [self._ticks[index] for index in range(min(len(self._ticks), self.batch_max_size))]
-            response = self.backend_client.post_ticks_batch(batch, account=account, source="MT5")
+                batch, batch_account = self._peek_batch_locked(account)
+            response = self.backend_client.post_ticks_batch(batch, account=batch_account, source="MT5")
             submitted = int(response.get("received", len(batch)))
             inserted = int(response.get("inserted", response.get("accepted_ticks", len(batch))))
             duplicates = int(response.get("duplicates_ignored", max(0, submitted - inserted)))
@@ -178,8 +184,7 @@ class TickBuffer:
                 if not self._ticks:
                     self._force_flush = False
                     continue
-                batch = [self._ticks[index] for index in range(min(len(self._ticks), self.batch_max_size))]
-                account = self._latest_account
+                batch, account = self._peek_batch_locked(self._latest_account)
 
             try:
                 response = self.backend_client.post_ticks_batch(batch, account=account, source="MT5")
@@ -225,6 +230,29 @@ class TickBuffer:
                 )
                 self._last_summary_log = now
 
+    def _peek_batch_locked(
+        self, fallback_account: dict[str, Any] | None
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Return one account-homogeneous batch without removing it.
+
+        Legacy callers/tests may enqueue untagged ticks; for those, the account
+        supplied to flush remains the fallback. Tagged production ticks always
+        keep the account snapshot captured at collection time.
+        """
+
+        if not self._ticks:
+            return [], fallback_account
+        first_tick, first_account = self._ticks[0]
+        batch_account = first_account if first_account is not None else fallback_account
+        batch_key = _account_identity(batch_account)
+        batch = [first_tick]
+        for tick, tagged_account in islice(self._ticks, 1, self.batch_max_size):
+            effective_account = tagged_account if tagged_account is not None else fallback_account
+            if _account_identity(effective_account) != batch_key:
+                break
+            batch.append(tick)
+        return batch, batch_account
+
     def _should_send_locked(self) -> bool:
         if not self._ticks:
             return False
@@ -246,3 +274,14 @@ class TickBuffer:
             dropped=self._totals.dropped,
         )
         return result
+
+
+def _account_identity(account: dict[str, Any] | None) -> tuple[int | None, str]:
+    if not account:
+        return None, ""
+    login = account.get("login")
+    try:
+        parsed_login = int(login) if login is not None else None
+    except (TypeError, ValueError):
+        parsed_login = None
+    return parsed_login, str(account.get("server") or "").strip().casefold()

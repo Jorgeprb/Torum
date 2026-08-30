@@ -13,8 +13,13 @@ export interface User {
 
 export interface LoginResponse {
   access_token: string;
+  session_token: string;
   token_type: "bearer";
   user: User;
+}
+
+export interface SessionBootstrapResponse {
+  session_token: string;
 }
 
 export interface SystemStatus {
@@ -35,8 +40,22 @@ export function login(username: string, password: string): Promise<LoginResponse
   });
 }
 
-export function getMe(token: string): Promise<User> {
-  return apiRequest<User>("/api/v1/auth/me", { token });
+export function getMe(): Promise<User> {
+  return apiRequest<User>("/api/v1/auth/me");
+}
+
+export function bootstrapPersistentSession(): Promise<SessionBootstrapResponse> {
+  return apiRequest<SessionBootstrapResponse>("/api/v1/auth/session", { method: "POST" });
+}
+
+export function revokePersistentSession(sessionToken: string): Promise<void> {
+  return apiRequest<void>("/api/v1/auth/logout", {
+    method: "POST",
+    token: null,
+    timeoutMs: 3_000,
+    keepalive: true,
+    body: JSON.stringify({ session_token: sessionToken })
+  });
 }
 
 export function getSystemStatus(token?: string | null): Promise<SystemStatus> {

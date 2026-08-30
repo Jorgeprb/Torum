@@ -25,6 +25,7 @@ class ManualOrderRequest(BaseModel):
     side: OrderSide
     order_type: OrderType = "MARKET"
     volume: float
+    multiplier: int | None = Field(default=None, ge=1, le=3)
     sl: float | None = Field(default=None, gt=0)
     tp: float | None = Field(default=None, gt=0)
     tp_percent: float | None = Field(default=None, gt=0, le=20)

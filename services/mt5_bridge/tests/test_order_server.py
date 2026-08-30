@@ -16,6 +16,12 @@ class FakeMT5Client:
     def get_account_state(self) -> AccountState:
         return AccountState(login=123456, server="Broker-Demo", trade_mode="DEMO")  # type: ignore[arg-type]
 
+    def discover_terminal_accounts(self) -> list[dict[str, object]]:
+        return [
+            {"login": 123456, "server": "Broker-Demo", "active": True, "source": "CURRENT"},
+            {"login": 654321, "server": "Broker-Live", "active": False, "source": "TERMINAL_DATA"},
+        ]
+
     def initialize(self) -> None:
         return None
 
@@ -64,3 +70,34 @@ def test_order_execution_setting_can_allow_demo_and_real_at_runtime() -> None:
     assert payload["enable_real_trading"] is True
     assert settings.mt5_allowed_account_modes == "DEMO,REAL"
     assert settings.mt5_enable_real_trading is True
+
+
+def test_bridge_switch_endpoint_returns_selected_account() -> None:
+    settings = BridgeSettings()
+    mt5_client = FakeMT5Client()
+    mt5_client.account_generation = 1  # type: ignore[attr-defined]
+
+    def switch_handler(login: int, server: str):  # type: ignore[no-untyped-def]
+        previous = AccountState(login=123456, server="Broker-Demo", trade_mode="DEMO")  # type: ignore[arg-type]
+        current = AccountState(login=login, server=server, trade_mode="DEMO")  # type: ignore[arg-type]
+        return previous, current
+
+    client = TestClient(create_order_app(settings, mt5_client, account_switch_handler=switch_handler))  # type: ignore[arg-type]
+    response = client.post("/accounts/switch", json={"login": 654321, "server": "Broker-Other"})
+
+    assert response.status_code == 200
+    assert response.json()["account"]["login"] == 654321
+    assert response.json()["account"]["server"] == "Broker-Other"
+
+
+def test_bridge_discover_accounts_returns_terminal_candidates() -> None:
+    settings = BridgeSettings()
+    client = TestClient(create_order_app(settings, FakeMT5Client()))  # type: ignore[arg-type]
+
+    response = client.get("/accounts/discover")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"login": 123456, "server": "Broker-Demo", "active": True, "source": "CURRENT"},
+        {"login": 654321, "server": "Broker-Live", "active": False, "source": "TERMINAL_DATA"},
+    ]

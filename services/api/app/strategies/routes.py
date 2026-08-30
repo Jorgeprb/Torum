@@ -1,5 +1,7 @@
 from dataclasses import asdict
+from datetime import datetime
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -21,6 +23,7 @@ from app.strategies.schemas import (
     StrategyConfigVersionRead,
     TorumV1ConfigurationRead,
     TorumV1ConfigurationUpdate,
+    TorumV1ManualLockStateUpdate,
     TorumV1ReplayRead,
     TorumV1ReplayRequest,
     TorumV1BacktestRead,
@@ -60,6 +63,55 @@ def get_torum_v1_status(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> TorumV1StatusRead:
+    status_payload = asdict(TorumV1StatusService(db).status_for_user(current_user.id))
+    return TorumV1StatusRead.model_validate(status_payload)
+
+
+@router.post("/strategies/torum-v1/manual-lock-state", response_model=TorumV1StatusRead)
+def set_torum_v1_manual_lock_state(
+    payload: TorumV1ManualLockStateUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> TorumV1StatusRead:
+    symbol = payload.symbol.upper()
+    candidates = [
+        item
+        for item in list_configs(db, user_id=current_user.id)
+        if item.strategy_key == "torum_v1" and item.internal_symbol.upper() == symbol
+    ]
+    if not candidates:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Torum V1 config not found")
+
+    config = max(candidates, key=lambda item: (bool(item.enabled), int(item.revision or 1), int(item.id or 0)))
+    params = dict(config.params_json or {})
+    if payload.unlocked is None:
+        # "No actuar": remove today's manual decision completely.  The status
+        # service will immediately go back to the unchanged automatic H2/H3
+        # unlock logic.
+        params.pop("manual_unlock_override", None)
+        params.pop("manual_unlock_override_day", None)
+        action_note = "automático (sin intervención manual)"
+    else:
+        params["manual_unlock_override"] = "UNLOCKED" if payload.unlocked else "LOCKED"
+        params["manual_unlock_override_day"] = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
+        action_note = "desbloqueado" if payload.unlocked else "bloqueado"
+
+    try:
+        StrategyCatalogService(db).update_config(
+            config,
+            StrategyConfigUpdate(
+                params_json=params,
+                expected_revision=int(config.revision or 1),
+                change_note=f"Control manual {symbol}: {action_note}",
+            ),
+            user_id=current_user.id,
+        )
+    except ValueError as exc:
+        if str(exc).startswith("strategy_config_revision_conflict"):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    invalidate_pullback_cache(user_id=current_user.id, symbol=symbol)
     status_payload = asdict(TorumV1StatusService(db).status_for_user(current_user.id))
     return TorumV1StatusRead.model_validate(status_payload)
 

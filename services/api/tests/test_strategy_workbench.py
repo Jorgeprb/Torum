@@ -21,6 +21,8 @@ from app.settings.trading_settings import TradingSettings  # noqa: F401
 from app.strategies.models import StrategyConfig, StrategyConfigVersion
 from app.strategies.repository import list_configs, list_config_versions
 from app.strategies.service import StrategyCatalogService
+from app.strategies.routes import set_torum_v1_manual_lock_state
+from app.strategies.schemas import TorumV1ManualLockStateUpdate
 from app.strategies.torum_v1_config import TorumV1Params, ui_schema
 from app.strategies.torum_v1_simulator import TorumV1Simulator
 from app.symbols.models import SymbolMapping
@@ -197,3 +199,30 @@ def test_simulator_never_creates_orders() -> None:
     assert result.decision in {"WAIT", "BLOCKED", "BUY"}
     assert result.steps
     assert db.query(Order).count() == 0
+
+
+def test_manual_lock_state_none_removes_override_and_returns_to_automatic() -> None:
+    db = _session()
+    service = StrategyCatalogService(db)
+    configs = service.update_torum_bundle(
+        user_id=1,
+        base_params={},
+        asset_overrides={"XAUUSD": {"manual_unlock_override": "LOCKED", "manual_unlock_override_day": "2099-01-01"}},
+        enabled_by_symbol={"XAUUSD": True},
+        mode_by_symbol={"XAUUSD": "PAPER"},
+        expected_revisions={},
+        change_note="manual lock test",
+    )
+    user = db.get(User, 1)
+    assert user is not None
+
+    set_torum_v1_manual_lock_state(
+        TorumV1ManualLockStateUpdate(symbol="XAUUSD", unlocked=None),
+        db=db,
+        current_user=user,
+    )
+
+    xauusd = next(item for item in list_configs(db, user_id=1) if item.internal_symbol == "XAUUSD")
+    assert "manual_unlock_override" not in xauusd.params_json
+    assert "manual_unlock_override_day" not in xauusd.params_json
+    assert xauusd.revision > configs[1].revision - 1

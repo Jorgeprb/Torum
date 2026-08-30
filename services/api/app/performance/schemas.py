@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -53,8 +53,52 @@ class MonthlyPerformance(BaseModel):
     net_profit: float
     cash_flow: float
     trades: int
+    pending: int = 0
     wins: int
     losses: int
+
+
+class DailyTradePerformance(BaseModel):
+    position_id: int
+    symbol: str
+    multiplier: int = Field(ge=1, le=3)
+    volume: float
+    side: str
+    opened_at: datetime
+    closed_at: datetime
+    open_price: float
+    close_price: float | None = None
+    net_profit: float | None = None
+    pending: bool = False
+    duration_minutes: float | None = None
+
+
+class DailyPerformance(BaseModel):
+    date: date
+    return_pct: float | None
+    net_profit: float
+    trades: int
+    pending: int = 0
+    wins: int
+    losses: int
+    x1: int = 0
+    x2: int = 0
+    x3: int = 0
+    xauusd: int = 0
+    xaueur: int = 0
+    trades_detail: list[DailyTradePerformance] = Field(default_factory=list)
+
+
+class PerformanceBreakdown(BaseModel):
+    key: str
+    label: str
+    trades: int
+    pending: int = 0
+    wins: int
+    losses: int
+    win_rate_pct: float | None
+    net_profit: float
+    average_profit: float
 
 
 class PerformanceSummary(BaseModel):
@@ -75,11 +119,30 @@ class PerformanceSummary(BaseModel):
     losses: int
     win_rate_pct: float | None
     max_drawdown_pct: float | None
+    profit_factor: float | None = None
+    expectancy: float | None = None
+    average_win: float | None = None
+    average_loss: float | None = None
+    best_trade: float | None = None
+    worst_trade: float | None = None
+    profitable_days: int = 0
+    losing_days: int = 0
+    best_day_pct: float | None = None
+    worst_day_pct: float | None = None
+    best_day_profit: float | None = None
+    worst_day_profit: float | None = None
+    max_win_streak: int = 0
+    max_loss_streak: int = 0
+    current_streak_type: Literal["WIN", "LOSS"] | None = None
+    current_streak: int = 0
     best_month_key: str | None = None
     best_month_return_pct: float | None = None
     basis_source: str
     basis_note: str
     pending_trades: int = 0
     points: list[PerformancePoint] = Field(default_factory=list)
+    days: list[DailyPerformance] = Field(default_factory=list)
     months: list[MonthlyPerformance] = Field(default_factory=list)
+    multiplier_breakdown: list[PerformanceBreakdown] = Field(default_factory=list)
+    symbol_breakdown: list[PerformanceBreakdown] = Field(default_factory=list)
     capital_movements: list[CapitalMovementRead] = Field(default_factory=list)

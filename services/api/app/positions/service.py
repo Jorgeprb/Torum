@@ -10,6 +10,7 @@ from app.alerts.push import PushNotificationService
 from app.core.config import get_settings
 from app.mt5.schemas import MT5AccountPayload
 from app.mt5.client import MT5BridgeClient, MT5BridgeClientError
+from app.mt5.status_store import mt5_status_store
 from app.orders.models import Order
 from app.positions.models import Position
 from app.positions.schemas import PositionRead
@@ -49,6 +50,8 @@ class PositionService:
         *,
         user_id: int | None = None,
         include_all_users: bool = True,
+        account_login: int | None = None,
+        account_server: str | None = None,
     ) -> list[Position]:
         positions = list_positions(
             self.db,
@@ -57,6 +60,8 @@ class PositionService:
             symbol=symbol,
             user_id=user_id,
             include_all_users=include_all_users,
+            account_login=account_login,
+            account_server=account_server,
         )
 
         safe_positions: list[Position] = []
@@ -100,6 +105,10 @@ class PositionService:
             self._schedule_post_close_tasks(position.id, None, None)
             return True, "Paper position closed", position
 
+        account_error = self._active_account_error(position)
+        if account_error is not None:
+            return False, account_error, position
+
         if self._reconcile_already_closed_mt5_position(position, source="manual_close_preflight"):
             return True, "Position was already closed in MT5 and has been reconciled", position
 
@@ -118,6 +127,8 @@ class PositionService:
                     "mode": position.mode,
                     "magic_number": position.magic_number,
                     "fetch_close_deal": fetch_close_deal,
+                    "expected_account_login": position.account_login,
+                    "expected_account_server": position.account_server,
                 },
             )
         except MT5BridgeClientError as exc:
@@ -171,6 +182,8 @@ class PositionService:
         MT5 health must be connected and the position must be absent from the
         current ``positions_get`` snapshot before Torum changes local state.
         """
+        if self._active_account_error(position) is not None:
+            return False
         try:
             health = self.mt5_client.health()
             if not bool(health.get("connected_to_mt5")):
@@ -214,7 +227,11 @@ class PositionService:
     def _fetch_close_deal_for_position(self, position: Position) -> dict[str, Any] | None:
         for identity in _position_mt5_identities(position):
             try:
-                response = self.mt5_client.get_close_deal(identity)
+                response = self.mt5_client.get_close_deal(
+                    identity,
+                    expected_account_login=position.account_login,
+                    expected_account_server=position.account_server,
+                )
             except MT5BridgeClientError:
                 continue
             deal = response.get("close_deal") if isinstance(response, dict) else None
@@ -329,6 +346,9 @@ class PositionService:
             self.db.refresh(position)
             return True, "Paper TP updated", position
 
+        account_error = self._active_account_error(position)
+        if account_error is not None:
+            return False, account_error, position
         if position.mt5_position_ticket is None:
             return False, "MT5 position ticket is missing", position
 
@@ -344,6 +364,8 @@ class PositionService:
                     "sl": 0,
                     "magic_number": position.magic_number,
                     "comment": "tp",
+                    "expected_account_login": position.account_login,
+                    "expected_account_server": position.account_server,
                 },
             )
         except MT5BridgeClientError as exc:
@@ -357,6 +379,32 @@ class PositionService:
         self.db.commit()
         self.db.refresh(position)
         return True, "MT5 TP updated", position
+
+    @staticmethod
+    def _active_account_error(position: Position) -> str | None:
+        """Reject live actions when the selected terminal account differs."""
+
+        if position.mode == "PAPER":
+            return None
+        active = mt5_status_store.get().account
+        if active is None or active.login is None:
+            # The bridge still validates expected_account_login/server on every
+            # live action. A temporarily stale/empty API status must not block a
+            # legitimate close while the status heartbeat is reconnecting.
+            return None
+        if position.account_login is not None and int(active.login) != int(position.account_login):
+            return (
+                f"La posición pertenece a la cuenta MT5 {position.account_login}, "
+                f"pero la cuenta activa es {active.login}"
+            )
+        expected_server = (position.account_server or "").strip().casefold()
+        active_server = (active.server or "").strip().casefold()
+        if expected_server and expected_server != active_server:
+            return (
+                f"La posición pertenece al servidor {position.account_server}, "
+                f"pero el servidor activo es {active.server}"
+            )
+        return None
 
     def sync_mt5_positions(
         self,

@@ -53,3 +53,31 @@ class RiskCandidatePreviewRead(BaseModel):
     projected_balance_pct: float | None
     breaches_limit: bool
     accepted_required: bool = True
+
+
+class GoldCorrelationRead(BaseModel):
+    timeframe: str = "H1"
+    samples: int = 0
+    pearson: float | None = None
+    beta_xaueur_from_xauusd: float = 1.0
+    beta_xauusd_from_xaueur: float = 1.0
+    source: str = "FALLBACK_1_TO_1"
+
+
+class StopOutLineRead(BaseModel):
+    symbol: str
+    visible: bool
+    price: float | None = None
+    account_currency: str | None = None
+    current_equity: float | None = None
+    current_margin: float | None = None
+    threshold_equity: float | None = None
+    stop_out_mode: str | None = None
+    stop_out_value: float | None = None
+    positions_on_symbol: int = 0
+    gold_positions_total: int = 0
+    correlated_other_symbol: str | None = None
+    projected_other_price: float | None = None
+    correlation: GoldCorrelationRead = Field(default_factory=GoldCorrelationRead)
+    estimated: bool = True
+    message: str | None = None

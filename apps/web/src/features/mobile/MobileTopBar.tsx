@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bell, ChevronDown, Columns2, Columns3, Menu, PencilLine, Rows2, Rows3, Signal } from "lucide-react";
+import { Bell, ChevronDown, LockKeyhole, Menu, PencilLine, Signal } from "lucide-react";
 
 import type { Timeframe } from "../../services/market";
 import type { MarketSocketStatus } from "../../services/marketSocket";
@@ -7,15 +7,14 @@ import type { DrawingTool } from "../../services/drawings";
 
 interface MobileTopBarProps {
   alertToolActive: boolean;
-  chartSplitCount: 1 | 2 | 3;
-  chartSplitOrientation: "vertical" | "horizontal";
+  assetLockOpen: boolean;
   chartSymbols: string[];
   connected: boolean;
   connectionStatus: MarketSocketStatus;
   drawingTool: DrawingTool;
   drawingMenuOpen: boolean;
   onAlertClick: () => void;
-  onChartSplitChange: (count: 1 | 2 | 3, orientation: "vertical" | "horizontal") => void;
+  onAssetLockClick: () => void;
   onDrawingMenuClick: () => void;
   onMenuClick: () => void;
   onSystemStatusClick: () => void;
@@ -31,15 +30,14 @@ interface MobileTopBarProps {
 
 export function MobileTopBar({
   alertToolActive,
-  chartSplitCount,
-  chartSplitOrientation,
+  assetLockOpen,
   chartSymbols,
   connected,
   connectionStatus,
   drawingTool,
   drawingMenuOpen,
   onAlertClick,
-  onChartSplitChange,
+  onAssetLockClick,
   onDrawingMenuClick,
   onMenuClick,
   onSystemStatusClick,
@@ -51,7 +49,7 @@ export function MobileTopBar({
   symbolStatusTones,
   timeframes
 }: MobileTopBarProps) {
-  const [openMenu, setOpenMenu] = useState<"symbol" | "timeframe" | "split" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"symbol" | "timeframe" | null>(null);
   const dropdownRootRef = useRef<HTMLDivElement | null>(null);
   const statusClass =
     marketClosed
@@ -75,29 +73,12 @@ export function MobileTopBar({
             : connected
               ? "Stream pendiente"
               : "Stream desconectado";
-  const splitOptions: Array<{ className?: string; count: 1 | 2 | 3; orientation: "vertical" | "horizontal"; label: string }> = [
-    { className: "mobile-split-menu__item--wide", count: 1, orientation: chartSplitOrientation, label: "1" },
-    { count: 2, orientation: "horizontal", label: "2H" },
-    { count: 2, orientation: "vertical", label: "2V" },
-    { count: 3, orientation: "horizontal", label: "3H" },
-    { count: 3, orientation: "vertical", label: "3V" }
-  ];
-
-  const splitIcon =
-    chartSplitOrientation === "horizontal"
-      ? chartSplitCount === 3
-        ? <Rows3 size={22} />
-        : <Rows2 size={22} />
-      : chartSplitCount === 3
-        ? <Columns3 size={22} />
-        : <Columns2 size={22} />;
-
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
       const target = event.target as Element | null;
       if (
         !dropdownRootRef.current?.contains(event.target as Node) ||
-        (!target?.closest(".mobile-topbar-dropdown") && !target?.closest(".mobile-split-picker"))
+        !target?.closest(".mobile-topbar-dropdown")
       ) {
         setOpenMenu(null);
       }
@@ -107,7 +88,7 @@ export function MobileTopBar({
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, []);
 
-  function toggleMenu(menu: "symbol" | "timeframe" | "split") {
+  function toggleMenu(menu: "symbol" | "timeframe") {
     setOpenMenu((current) => (current === menu ? null : menu));
   }
 
@@ -181,46 +162,15 @@ export function MobileTopBar({
           </div>
         ) : null}
       </div>
-      <div className="mobile-split-picker">
-        <button
-          aria-label="Elegir graficos divididos"
-          aria-expanded={openMenu === "split"}
-          className={chartSplitCount > 1 ? "mobile-icon-button mobile-icon-button--active" : "mobile-icon-button"}
-          type="button"
-          onClick={() => toggleMenu("split")}
-        >
-          {splitIcon}
-          <span>{chartSplitCount}</span>
-        </button>
-        {openMenu === "split" ? (
-          <div className="mobile-split-menu">
-            {splitOptions.map((option) => (
-              <button
-                className={
-                  chartSplitCount === option.count && (option.count === 1 || chartSplitOrientation === option.orientation)
-                    ? `mobile-split-menu__item ${option.className ?? ""} mobile-split-menu__item--active`
-                    : `mobile-split-menu__item ${option.className ?? ""}`
-                }
-                key={`${option.count}-${option.orientation}`}
-                type="button"
-                onClick={() => {
-                  onChartSplitChange(option.count, option.orientation);
-                  setOpenMenu(null);
-                }}
-              >
-                {option.orientation === "horizontal" ? (
-                  option.count === 3 ? <Rows3 size={18} /> : <Rows2 size={18} />
-                ) : option.count === 3 ? (
-                  <Columns3 size={18} />
-                ) : (
-                  <Columns2 size={18} />
-                )}
-                <span>{option.label}</span>
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
+      <button
+        aria-label="Bloquear o desbloquear activos Torum"
+        aria-pressed={assetLockOpen}
+        className={assetLockOpen ? "mobile-icon-button mobile-icon-button--active" : "mobile-icon-button"}
+        type="button"
+        onClick={onAssetLockClick}
+      >
+        <LockKeyhole size={22} />
+      </button>
       <button
         aria-label="Herramientas de dibujo"
         className={drawingMenuOpen || drawingTool !== "select" ? "mobile-icon-button mobile-icon-button--active" : "mobile-icon-button"}

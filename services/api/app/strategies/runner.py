@@ -437,6 +437,14 @@ class StrategyRunner:
                     executed_price=order_response.executed_price,
                     prior_open_positions=list(context.open_positions),
                 )
+            elif order_response.status != "RECONCILING":
+                # A definitive MT5 rejection (for example retcode 10027 when
+                # AutoTrading is disabled in the client terminal) must not burn
+                # the technical setup. Release only this attempt marker so the
+                # same still-valid M5 signal can be retried after the external
+                # MT5 condition is corrected. Ambiguous RECONCILING responses
+                # remain reserved to avoid duplicate live orders.
+                _release_torum_v1_signal_attempt(config, signal)
             run.status = "FINISHED"
             run.finished_at = datetime.now(UTC)
             self.db.commit()
@@ -578,6 +586,29 @@ class StrategyRunner:
 
 
 
+def _release_torum_v1_signal_attempt(config: StrategyConfig, signal: StrategySignal) -> None:
+    if signal.strategy_key != "torum_v1" or signal.signal_type != "ENTRY" or signal.side != "BUY":
+        return
+    metadata = signal.metadata_json or {}
+    confirmation_time = _positive_int_or_none(metadata.get("confirmation_candle_time"))
+    if confirmation_time is None:
+        return
+    current_params = dict(config.params_json or {})
+    if _positive_int_or_none(current_params.get("last_signal_candle_time")) != confirmation_time:
+        return
+    for key in ("last_signal_candle_time", "last_signal_pullback_low_time", "last_signal_operation_zone_id"):
+        current_params.pop(key, None)
+    config.params_json = current_params
+    trace_event(
+        "strategy_runner",
+        "signal_attempt_released_after_definitive_order_failure",
+        config_id=config.id,
+        signal_id=signal.id,
+        symbol=signal.internal_symbol,
+        confirmation_candle_time=confirmation_time,
+    )
+
+
 def _record_torum_v1_executed_entry_cycle(
     config: StrategyConfig,
     signal: StrategySignal,
@@ -694,11 +725,11 @@ def _torum_v1_desired_multiplier_for_ath_zone(
 ) -> int:
     """Keep the setup multiplier unchanged.
 
-    ATH zones still cap total exposure in ``plan_torum_v1_bot_exposure`` but no
-    longer promote a normal x1 setup to x2.  Double entries are requested only
-    by a visual S2/S3 support or by the explicit x2 flag on a manual Torum zone.
-    The unused arguments are retained for compatibility with existing callers
-    and diagnostics.
+    ATH zones are visual/diagnostic context only.  The requested multiplier is
+    selected by a visual support or by the explicit x1/x2/x3 setting on the
+    Torum rectangle. ``plan_torum_v1_bot_exposure`` only degrades it to fit the
+    remaining equivalent-position capacity.  The unused arguments are retained
+    for compatibility with existing callers and diagnostics.
     """
 
     del db, symbol, current_price, params

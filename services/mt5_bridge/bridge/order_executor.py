@@ -40,7 +40,9 @@ class OrderExecutor:
     def execute_market_order(self, payload: MarketOrderRequest) -> BridgeOrderResponse:
         started = perf_counter()
         validate_started = perf_counter()
-        validation_error = self._validate_execution_allowed(payload.mode)
+        validation_error = self._validate_execution_allowed(
+            payload.mode, payload.expected_account_login, payload.expected_account_server
+        )
         if validation_error is not None:
             return validation_error
         validate_ms = (perf_counter() - validate_started) * 1000
@@ -157,7 +159,9 @@ class OrderExecutor:
     @_serialized_order_call
     def close_position(self, ticket: int, payload: ClosePositionRequest) -> BridgeOrderResponse:
         started = perf_counter()
-        validation_error = self._validate_execution_allowed(payload.mode)
+        validation_error = self._validate_execution_allowed(
+            payload.mode, payload.expected_account_login, payload.expected_account_server
+        )
         if validation_error is not None:
             return validation_error
 
@@ -220,12 +224,23 @@ class OrderExecutor:
         return response
 
     @_serialized_order_call
-    def close_deal(self, ticket: int, deal_ticket: int | None = None) -> dict[str, Any]:
+    def close_deal(
+        self,
+        ticket: int,
+        deal_ticket: int | None = None,
+        *,
+        expected_account_login: int | None = None,
+        expected_account_server: str | None = None,
+    ) -> dict[str, Any]:
         started = perf_counter()
         try:
             self.mt5_client.initialize()
+            account = self.mt5_client.get_account_state()
         except MT5ClientError as exc:
             return {"ok": False, "comment": str(exc), "close_deal": None}
+        mismatch = self._validate_expected_account(account, expected_account_login, expected_account_server)
+        if mismatch is not None:
+            return {"ok": False, "comment": mismatch.comment, "close_deal": None, "raw": mismatch.raw}
         mt5 = self.mt5_client.mt5
         if mt5 is None:
             return {"ok": False, "comment": "MT5 unavailable", "close_deal": None}
@@ -243,7 +258,9 @@ class OrderExecutor:
 
     @_serialized_order_call
     def modify_position_tp(self, ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
-        validation_error = self._validate_execution_allowed(payload.mode)
+        validation_error = self._validate_execution_allowed(
+            payload.mode, payload.expected_account_login, payload.expected_account_server
+        )
         if validation_error is not None:
             return validation_error
 
@@ -303,7 +320,48 @@ class OrderExecutor:
             return ProfitPreviewResponse(ok=False, comment=str(_last_error(mt5)))
         return ProfitPreviewResponse(ok=True, profit=float(profit), comment="MT5 order_calc_profit")
 
-    def _validate_execution_allowed(self, requested_mode: str) -> BridgeOrderResponse | None:
+    def reset_account_caches(self) -> None:
+        """Discard symbol metadata cached for the previously active broker account."""
+
+        self._selected_symbols.clear()
+        self._symbol_info_cache.clear()
+        self._filling_modes_cache.clear()
+
+    @staticmethod
+    def _validate_expected_account(
+        account: AccountState,
+        expected_account_login: int | None,
+        expected_account_server: str | None,
+    ) -> BridgeOrderResponse | None:
+        if expected_account_login is not None and account.login != int(expected_account_login):
+            return BridgeOrderResponse(
+                ok=False,
+                comment=(
+                    f"Active MT5 account changed: expected login {expected_account_login}, "
+                    f"current login {account.login}"
+                ),
+                raw={"account": account.to_payload(), "account_mismatch": True},
+            )
+        if expected_account_server:
+            expected_server = expected_account_server.strip().casefold()
+            current_server = (account.server or "").strip().casefold()
+            if current_server != expected_server:
+                return BridgeOrderResponse(
+                    ok=False,
+                    comment=(
+                        f"Active MT5 account changed: expected server {expected_account_server}, "
+                        f"current server {account.server}"
+                    ),
+                    raw={"account": account.to_payload(), "account_mismatch": True},
+                )
+        return None
+
+    def _validate_execution_allowed(
+        self,
+        requested_mode: str,
+        expected_account_login: int | None = None,
+        expected_account_server: str | None = None,
+    ) -> BridgeOrderResponse | None:
         if not self.settings.mt5_allow_order_execution:
             return BridgeOrderResponse(ok=False, comment="MT5 order execution is disabled")
         try:
@@ -314,6 +372,9 @@ class OrderExecutor:
             return BridgeOrderResponse(ok=False, comment=str(exc))
         if not self.mt5_client.is_connected():
             return BridgeOrderResponse(ok=False, comment="MT5 terminal is disconnected")
+        account_mismatch = self._validate_expected_account(account, expected_account_login, expected_account_server)
+        if account_mismatch is not None:
+            return account_mismatch
         logger.info(
             "MT5 execution precheck: connected=%s trade_allowed=%s tradeapi_disabled=%s account_mode=%s",
             getattr(terminal_info, "connected", None),
@@ -321,13 +382,21 @@ class OrderExecutor:
             getattr(terminal_info, "tradeapi_disabled", None),
             account.trade_mode,
         )
-        if hasattr(terminal_info, "trade_allowed") and not bool(getattr(terminal_info, "trade_allowed")):
-            logger.warning(
-                "MT5 terminal reports trade_allowed=false; Torum will still call order_send so MT5 can return the real retcode/last_error."
-            )
-        if bool(getattr(terminal_info, "tradeapi_disabled", False)):
-            logger.warning(
-                "MT5 terminal reports tradeapi_disabled=true; Torum will still call order_send so MT5 can return the real retcode/last_error."
+        terminal_trade_allowed = getattr(terminal_info, "trade_allowed", None)
+        terminal_tradeapi_disabled = getattr(terminal_info, "tradeapi_disabled", None)
+        if terminal_trade_allowed is False or bool(terminal_tradeapi_disabled):
+            return BridgeOrderResponse(
+                ok=False,
+                retcode=10027,
+                comment=(
+                    "MT5 AutoTrading está desactivado en el terminal. Activa Algo Trading/AutoTrading en "
+                    "MetaTrader 5; el terminal no permite que Torum envíe órdenes ni modifique TP mientras esté desactivado."
+                ),
+                raw={
+                    "terminal_trade_allowed": terminal_trade_allowed,
+                    "terminal_tradeapi_disabled": terminal_tradeapi_disabled,
+                    "client_autotrading_disabled": True,
+                },
             )
         raw_account_getter = getattr(self.mt5_client, "get_account_info", None)
         if callable(raw_account_getter):
@@ -336,8 +405,10 @@ class OrderExecutor:
             except MT5ClientError as exc:
                 return BridgeOrderResponse(ok=False, comment=str(exc))
             if hasattr(raw_account, "trade_allowed") and not bool(getattr(raw_account, "trade_allowed")):
-                logger.warning(
-                    "MT5 account reports trade_allowed=false; Torum will still call order_send so MT5 can return the real retcode/last_error."
+                return BridgeOrderResponse(
+                    ok=False,
+                    comment="La cuenta MT5 no permite trading en este momento.",
+                    raw={"account_trade_allowed": False, "account": account.to_payload()},
                 )
         if account.trade_mode not in self.settings.allowed_account_modes and account.trade_mode != "UNKNOWN":
             return BridgeOrderResponse(

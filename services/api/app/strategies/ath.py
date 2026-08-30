@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Iterable, Sequence
 
@@ -262,14 +263,24 @@ def bot_open_positions(
     account_login: int | None = None,
     account_server: str | None = None,
 ) -> list[Position]:
+    """Return live Torum positions that consume equivalent-position capacity.
+
+    Capacity is shared between automatic Torum V1 entries and manual orders
+    opened from Torum.  An arbitrary MT5 position imported without a Torum
+    ``Order`` row is intentionally excluded: the user asked the strategy limit
+    to govern Torum's own exposure, not unrelated broker positions.
+    """
+
     stmt = (
         select(Position)
         .join(Order, Position.order_id == Order.id)
         .where(
             Position.internal_symbol == symbol.upper(),
             Position.status == "OPEN",
-            Order.source == "STRATEGY",
-            Order.strategy_key == "torum_v1",
+            or_(
+                and_(Order.source == "STRATEGY", Order.strategy_key == "torum_v1"),
+                Order.source == "MANUAL",
+            ),
         )
     )
     if user_id is not None:
@@ -484,9 +495,10 @@ def plan_torum_v1_bot_exposure(
     ath = get_or_update_symbol_ath(db, normalized_symbol)
     zone = ath_zone_for_price_config(ath, current_price, strategy_params)
     configured_max_equivalents = int(_float_or_none((strategy_params or {}).get("max_equivalent_positions")) or 3)
-    max_equivalents = min(zone.max_lot_equivalents if zone is not None else 1, configured_max_equivalents)
-    if zone is not None and zone.max_lot_equivalents <= 0:
-        return _blocked("ath_red_zone", ath, zone, max_equivalents, 0.0)
+    # ATH zones remain part of the visual/diagnostic context, but no longer
+    # reduce or block Torum's operative capacity.  The only sizing ceiling is
+    # the configured equivalent-position maximum.
+    max_equivalents = max(1, configured_max_equivalents)
 
     execution_mode = str(getattr(trading_settings, "trading_mode", "")).upper() or None
     open_positions = bot_open_positions(
@@ -524,7 +536,6 @@ def plan_torum_v1_bot_exposure(
         reserved_equiv += (max(0.0, volume) / base_lot) if volume is not None else max(0.0, _float_or_none(metadata.get("accepted_multiplier")) or _float_or_none(metadata.get("desired_multiplier")) or 1.0)
     used_equiv = open_equiv + pending_equiv + reserved_equiv
     max_multiplier = min(max(1, int(desired_multiplier)), configured_max_equivalents)
-    allow_degrade = bool((strategy_params or {}).get("support_degrade_enabled", True))
 
     if balance is None or balance <= 0:
         return _blocked("missing_account_balance", ath, zone, max_equivalents, open_equiv)
@@ -548,72 +559,74 @@ def plan_torum_v1_bot_exposure(
     contract_size = float(snapshot.contract_size) if snapshot.valid and snapshot.contract_size > 0 else mapped_contract_size * mapped_conversion
     stress_drop_pct = _float_or_none((strategy_params or {}).get("risk_stress_drop_from_ath_pct")) or (ATH_ADVERSE_MOVE_RATIO * 100.0)
     stress_price = ath * (1.0 - stress_drop_pct / 100.0) if ath is not None else None
-    if stress_price is None or stress_price <= 0:
-        return _blocked("missing_ath_for_risk", ath, zone, max_equivalents, used_equiv)
-    risk_limit_pct = _float_or_none((strategy_params or {}).get("risk_max_balance_pct")) or (ATH_RISK_LIMIT_RATIO * 100.0)
-    risk_limit = balance * risk_limit_pct / 100.0
-    current_loss = round(
-        sum(
-            candidate_loss(
-                side=position.side,
-                volume=float(position.volume),
-                price=float(position.open_price),
+    current_loss: float | None = None
+    if stress_price is not None and stress_price > 0:
+        current_loss = round(
+            sum(
+                candidate_loss(
+                    side=position.side,
+                    volume=float(position.volume),
+                    price=float(position.open_price),
+                    stress_price=stress_price,
+                    contract_size=contract_size,
+                )
+                for position in open_positions
+            ),
+            2,
+        )
+        reserved_loss = bot_reserved_potential_loss(
+            db,
+            normalized_symbol,
+            user_id,
+            stress_price=stress_price,
+            contract_size=contract_size,
+            fallback_price=current_price,
+            exclude_order_id=exclude_order_id,
+            exclude_signal_id=exclude_signal_id,
+            pending_orders=pending_orders,
+            reserved_signals=reserved_signals,
+        )
+        current_loss = round(current_loss + reserved_loss, 2)
+
+    # Degradation is deterministic and *only* capacity-based.  ATH colour and
+    # stress loss stay diagnostic: they never reduce x3/x2/x1.  Convert the
+    # remaining equivalent capacity to an integer slot count and fit the
+    # multiplier requested by the support/Torum rectangle into that capacity.
+    remaining_equiv = max(0.0, float(max_equivalents) - float(used_equiv))
+    available_integer_slots = max(0, int(math.floor(remaining_equiv + 1e-9)))
+    multiplier = min(max_multiplier, available_integer_slots)
+    if multiplier >= 1:
+        volume = round(base_lot * multiplier, 8)
+        potential_loss: float | None = None
+        projected_balance: float | None = None
+        if current_loss is not None and stress_price is not None and stress_price > 0:
+            added_loss = candidate_loss(
+                side="BUY",
+                volume=volume,
+                price=current_price,
                 stress_price=stress_price,
                 contract_size=contract_size,
             )
-            for position in open_positions
-        ),
-        2,
-    )
-    reserved_loss = bot_reserved_potential_loss(
-        db,
-        normalized_symbol,
-        user_id,
-        stress_price=stress_price,
-        contract_size=contract_size,
-        fallback_price=current_price,
-        exclude_order_id=exclude_order_id,
-        exclude_signal_id=exclude_signal_id,
-        pending_orders=pending_orders,
-        reserved_signals=reserved_signals,
-    )
-    current_loss = round(current_loss + reserved_loss, 2)
-    if not allow_degrade and used_equiv + max_multiplier > max_equivalents + 1e-9:
-        return _blocked("requested_multiplier_does_not_fit", ath, zone, max_equivalents, used_equiv)
-
-    multipliers = range(max_multiplier, 0, -1) if allow_degrade else (max_multiplier,)
-    for multiplier in multipliers:
-        if used_equiv + multiplier > max_equivalents + 1e-9:
-            continue
-        volume = round(base_lot * multiplier, 8)
-        added_loss = candidate_loss(
-            side="BUY",
+            potential_loss = round(current_loss + added_loss, 2)
+            projected_balance = round(balance - potential_loss, 2)
+        return BotExposurePlan(
+            allowed=True,
+            multiplier=multiplier,
             volume=volume,
-            price=current_price,
-            stress_price=stress_price,
-            contract_size=contract_size,
+            reason="allowed_capacity_only",
+            ath_price=ath,
+            ath_zone=zone.key if zone is not None else None,
+            max_lot_equivalents=max_equivalents,
+            open_lot_equivalents=used_equiv,
+            potential_loss=potential_loss,
+            projected_balance=projected_balance,
         )
-        potential_loss = round(current_loss + added_loss, 2)
-        projected_balance = balance - potential_loss
-        if potential_loss <= risk_limit:
-            return BotExposurePlan(
-                allowed=True,
-                multiplier=multiplier,
-                volume=volume,
-                reason="allowed",
-                ath_price=ath,
-                ath_zone=zone.key if zone is not None else None,
-                max_lot_equivalents=max_equivalents,
-                open_lot_equivalents=used_equiv,
-                potential_loss=potential_loss,
-                projected_balance=projected_balance,
-            )
 
     return BotExposurePlan(
         allowed=False,
         multiplier=0,
         volume=0.0,
-        reason="risk_or_ath_capacity_exceeded" if allow_degrade else "risk_limit_exceeded",
+        reason="equivalent_capacity_exceeded",
         ath_price=ath,
         ath_zone=zone.key if zone is not None else None,
         max_lot_equivalents=max_equivalents,

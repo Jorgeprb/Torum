@@ -79,7 +79,7 @@ export function TradeLinesOverlay({
           key={line.id}
           style={{ top: line.y }}
           onPointerDown={(event) => {
-            if (line.tone === "tp") {
+            if (line.editable && (line.tone === "tp" || line.tone === "entry")) {
               onTpDragStart(event, line);
             } else if (line.positionId) {
               event.stopPropagation();

@@ -44,6 +44,7 @@ export interface ManualOrderPayload {
   side: OrderSide;
   order_type: "MARKET";
   volume: number;
+  multiplier?: number | null;
   sl?: number | null;
   tp?: number | null;
   tp_percent?: number | null;
@@ -99,6 +100,8 @@ export interface AthLevel {
 
 export interface OrderRead {
   id: number;
+  account_login?: number | null;
+  account_server?: string | null;
   internal_symbol: string;
   broker_symbol: string;
   mode: TradingMode;
@@ -232,11 +235,20 @@ export function patchAthLevel(symbol: string, payload: { mode: AthLevel["mode"];
   });
 }
 
-export function getOrders(): Promise<OrderRead[]> {
-  return apiRequest<OrderRead[]>("/api/orders?limit=50");
+export function getOrders(params: { accountLogin?: number | null; accountServer?: string | null; limit?: number } = {}): Promise<OrderRead[]> {
+  const query = new URLSearchParams({ limit: String(params.limit ?? 50) });
+  if (typeof params.accountLogin === "number") query.set("account_login", String(params.accountLogin));
+  if (params.accountServer) query.set("account_server", params.accountServer);
+  return apiRequest<OrderRead[]>(`/api/orders?${query.toString()}`);
 }
 
-export function getPositions(params: { status?: "OPEN" | "CLOSED"; symbol?: string; limit?: number } = {}): Promise<PositionRead[]> {
+export function getPositions(params: {
+  status?: "OPEN" | "CLOSED";
+  symbol?: string;
+  limit?: number;
+  accountLogin?: number | null;
+  accountServer?: string | null;
+} = {}): Promise<PositionRead[]> {
   const query = new URLSearchParams();
 
   query.set("limit", String(params.limit ?? 100));
@@ -247,6 +259,14 @@ export function getPositions(params: { status?: "OPEN" | "CLOSED"; symbol?: stri
 
   if (params.symbol) {
     query.set("symbol", params.symbol);
+  }
+
+  if (typeof params.accountLogin === "number") {
+    query.set("account_login", String(params.accountLogin));
+  }
+
+  if (params.accountServer) {
+    query.set("account_server", params.accountServer);
   }
 
   return apiRequest<PositionRead[]>(`/api/positions?${query.toString()}`);

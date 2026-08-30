@@ -22,6 +22,7 @@ class PositionSyncer:
         self.mt5_client = mt5_client
         self.backend_client = backend_client
         self._stop = Event()
+        self._wake = Event()
         self._thread: Thread | None = None
         self._last_deals_sync_monotonic = 0.0
         self._cursor_loaded_for: str | None = None
@@ -37,10 +38,14 @@ class PositionSyncer:
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             if self._thread.is_alive():
                 logger.error("Position syncer did not stop within %.1fs", timeout)
+
+    def request_sync(self) -> None:
+        self._wake.set()
 
     def run(self) -> None:
         while not self._stop.is_set():
@@ -48,7 +53,8 @@ class PositionSyncer:
                 self.sync_once()
             except Exception:  # noqa: BLE001 - keep sync loop alive
                 logger.exception("Unexpected MT5 position sync error")
-            self._stop.wait(max(0.1, self.settings.mt5_position_sync_interval_seconds))
+            self._wake.wait(max(0.1, self.settings.mt5_position_sync_interval_seconds))
+            self._wake.clear()
 
     def sync_once(self) -> dict[str, Any] | None:
         # Do not hold one giant MT5 lock around positions + up to a year of
@@ -56,6 +62,7 @@ class PositionSyncer:
         # orders priority between calls, so a buy can pre-empt reconciliation.
         try:
             self.mt5_client.initialize()
+            start_generation = self.mt5_client.account_generation
             account_state = self.mt5_client.get_account_state()
             account = account_state.to_payload()
         except MT5ClientError as exc:
@@ -93,6 +100,26 @@ class PositionSyncer:
 
         closed_deals = [event for event in history_events if event.get("history_category") != "cash_flow"]
         capital_flows = [event for event in history_events if event.get("history_category") == "cash_flow"]
+
+        # An account switch has order priority and may happen between the
+        # serialized vendor calls above. Never post a mixed positions/history
+        # snapshot under the wrong account.
+        try:
+            end_account_state = self.mt5_client.get_account_state()
+        except MT5ClientError:
+            return None
+        if (
+            self.mt5_client.account_generation != start_generation
+            or _account_identity(end_account_state.to_payload()) != _account_identity(account)
+        ):
+            logger.warning(
+                "Discarding MT5 position sync because the active account changed mid-cycle: start=%s end=%s",
+                _account_identity(account),
+                _account_identity(end_account_state.to_payload()),
+            )
+            self.request_sync()
+            return None
+
         response = self.backend_client.post_positions_sync(
             payload,
             account,
@@ -199,6 +226,8 @@ class PositionSyncer:
         self._cursor_loaded_for = account_key
         self._cursor_time_msc = 0
         self._cursor_ticket = 0
+        # Force an immediate history pass for the newly selected account.
+        self._last_deals_sync_monotonic = 0.0
         path = self._cursor_path()
         try:
             payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -237,6 +266,14 @@ class PositionSyncer:
 
 def _account_key(account: dict[str, Any]) -> str:
     return f"{account.get('login') or 'unknown'}::{account.get('server') or 'unknown'}"
+
+def _account_identity(account: dict[str, Any]) -> tuple[int | None, str]:
+    login = account.get("login")
+    try:
+        parsed_login = int(login) if login is not None else None
+    except (TypeError, ValueError):
+        parsed_login = None
+    return parsed_login, str(account.get("server") or "").strip().casefold()
 
 
 def _position_to_payload(position: Any, mt5: Any) -> dict[str, Any]:

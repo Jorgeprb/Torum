@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import logging
+from pathlib import Path
 from typing import Any, Iterator
 
 from bridge.account_state import AccountState, account_state_from_mt5
@@ -32,6 +33,7 @@ class MT5Client:
         self.mt5 = mt5 if mt5 is not None else mt5_module
         self._initialized = False
         self._coordinator = coordinator or MT5AccessCoordinator()
+        self._account_generation = 0
 
     @contextmanager
     def operation(self, priority: AccessPriority = "market", name: str = "mt5") -> Iterator[None]:
@@ -66,6 +68,52 @@ class MT5Client:
                 f" login={self.settings.mt5_login}" if self.settings.mt5_login is not None else "",
             )
 
+
+    @property
+    def account_generation(self) -> int:
+        return self._account_generation
+
+    def switch_account(self, login: int, server: str) -> tuple[AccountState, AccountState]:
+        server = server.strip()
+        if not server:
+            raise MT5ClientError("MT5 server is required")
+        with self.operation("order", f"switch_account:{login}"):
+            self.initialize()
+            previous = account_state_from_mt5(self._account_info_locked())
+            # Login is positional on the official MetaTrader5 Python binding.
+            # Password is intentionally omitted so the terminal can use the
+            # credentials previously saved for this account.
+            switched = bool(
+                self.mt5.login(
+                    int(login),
+                    server=server,
+                    timeout=self.settings.mt5_timeout_ms,
+                )
+            )
+            if not switched:
+                raise MT5ClientError(f"MT5 login failed for {login} @ {server}: {self.mt5.last_error()}")
+            current = account_state_from_mt5(self._account_info_locked())
+            if current.login != int(login):
+                raise MT5ClientError(f"MT5 switched to unexpected login {current.login}; requested {login}")
+            if (current.server or "").strip().casefold() != server.casefold():
+                raise MT5ClientError(
+                    f"MT5 switched to unexpected server {current.server!r}; requested {server!r}"
+                )
+            if (previous.login, (previous.server or "").casefold()) != (current.login, (current.server or "").casefold()):
+                self._account_generation += 1
+            logger.warning(
+                "MT5 account switched: previous_login=%s previous_server=%s login=%s server=%s generation=%s",
+                previous.login, previous.server, current.login, current.server, self._account_generation,
+            )
+            return previous, current
+
+    def _account_info_locked(self) -> Any:
+        self._require_module()
+        account_info = self.mt5.account_info()
+        if account_info is None:
+            raise MT5ClientError(f"MT5 account_info failed: {self.mt5.last_error()}")
+        return account_info
+
     def shutdown(self) -> None:
         with self.operation("order", "shutdown"):
             if self.mt5 is not None and self._initialized:
@@ -75,11 +123,7 @@ class MT5Client:
 
     def get_account_info(self) -> Any:
         with self.operation("sync", "account_info"):
-            self._require_module()
-            account_info = self.mt5.account_info()
-            if account_info is None:
-                raise MT5ClientError(f"MT5 account_info failed: {self.mt5.last_error()}")
-            return account_info
+            return self._account_info_locked()
 
     def get_account_state(self) -> AccountState:
         return account_state_from_mt5(self.get_account_info())
@@ -91,6 +135,72 @@ class MT5Client:
             if terminal_info is None:
                 raise MT5ClientError(f"MT5 terminal_info failed: {self.mt5.last_error()}")
             return terminal_info
+
+    def discover_terminal_accounts(self) -> list[dict[str, object]]:
+        """Return accounts already used by this MT5 terminal without reading credentials.
+
+        The official Python binding exposes only the currently connected account.
+        MT5's documented data-folder layout, however, stores per-account trade
+        databases under ``Bases/<server>/Trades/<login>``.  Reading those folder
+        names gives us a safe, credential-free list of accounts that have been
+        opened in this terminal.  ``accounts.dat`` is deliberately not parsed or
+        modified.
+        """
+        self.initialize()
+        active = self.get_account_state()
+        terminal_info = self.get_terminal_info()
+        candidates: dict[tuple[int, str], dict[str, object]] = {}
+
+        def add(login: int | None, server: str | None, *, active_account: bool, source: str) -> None:
+            if login is None or int(login) <= 0:
+                return
+            normalized_server = (server or "").strip()
+            if not normalized_server:
+                return
+            key = (int(login), normalized_server.casefold())
+            existing = candidates.get(key)
+            if existing is None or (active_account and not bool(existing.get("active"))):
+                candidates[key] = {
+                    "login": int(login),
+                    "server": normalized_server,
+                    "active": active_account,
+                    "source": source,
+                }
+
+        add(active.login, active.server, active_account=True, source="CURRENT")
+
+        data_path_value = str(getattr(terminal_info, "data_path", "") or "").strip()
+        if data_path_value:
+            bases_dir = Path(data_path_value) / "Bases"
+            try:
+                server_dirs = list(bases_dir.iterdir()) if bases_dir.is_dir() else []
+            except OSError as exc:
+                logger.warning("Unable to inspect MT5 Bases directory %s: %s", bases_dir, exc)
+                server_dirs = []
+
+            for server_dir in server_dirs:
+                if not server_dir.is_dir() or server_dir.name.casefold() == "default":
+                    continue
+                trades_dir = server_dir / "Trades"
+                try:
+                    account_dirs = list(trades_dir.iterdir()) if trades_dir.is_dir() else []
+                except OSError as exc:
+                    logger.debug("Unable to inspect MT5 Trades directory %s: %s", trades_dir, exc)
+                    continue
+                for account_dir in account_dirs:
+                    if not account_dir.is_dir() or not account_dir.name.isdigit():
+                        continue
+                    login = int(account_dir.name)
+                    is_active = (
+                        active.login == login
+                        and (active.server or "").strip().casefold() == server_dir.name.strip().casefold()
+                    )
+                    add(login, server_dir.name, active_account=is_active, source="TERMINAL_DATA")
+
+        return sorted(
+            candidates.values(),
+            key=lambda item: (not bool(item["active"]), str(item["server"]).casefold(), int(item["login"])),
+        )
 
     def is_connected(self) -> bool:
         try:

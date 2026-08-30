@@ -5,8 +5,8 @@ interface ChartActionButtonsProps {
   selectedObject: { kind: "drawing" | "alert"; id: string } | null;
   canToggleTorumZone: boolean;
   isTorumZoneActive: boolean;
-  canToggleTorumDouble: boolean;
-  isTorumDoubleActive: boolean;
+  canCycleTorumMultiplier: boolean;
+  torumMultiplier: 1 | 2 | 3;
   canStyleSelectedObject: boolean;
   canDeleteSelectedObject: boolean;
   pullbackDebugVisible: boolean;
@@ -14,7 +14,7 @@ interface ChartActionButtonsProps {
   onCenterChart: () => void;
   onPullbackDebugToggle: () => void;
   onToggleTorumZone: (event: PointerEvent<HTMLButtonElement>) => void;
-  onToggleTorumDouble: (event: PointerEvent<HTMLButtonElement>) => void;
+  onCycleTorumMultiplier: (event: PointerEvent<HTMLButtonElement>) => void;
   onStyleButton: (event: PointerEvent<HTMLButtonElement>) => void;
   onDeleteButton: (event: PointerEvent<HTMLButtonElement>) => void;
 }
@@ -28,15 +28,15 @@ export function ChartActionButtons({
   selectedObject,
   canToggleTorumZone,
   isTorumZoneActive,
-  canToggleTorumDouble,
-  isTorumDoubleActive,
+  canCycleTorumMultiplier,
+  torumMultiplier,
   canStyleSelectedObject,
   canDeleteSelectedObject,
   pullbackDebugVisible,
   onCenterChart,
   onPullbackDebugToggle,
   onToggleTorumZone,
-  onToggleTorumDouble,
+  onCycleTorumMultiplier,
   onStyleButton,
   onDeleteButton
 }: ChartActionButtonsProps) {
@@ -59,22 +59,27 @@ export function ChartActionButtons({
         </button>
       ) : null}
 
-      {canToggleTorumDouble ? (
+      {canCycleTorumMultiplier ? (
         <button
-          aria-label={isTorumDoubleActive ? "Desactivar entradas dobles en esta zona Torum" : "Activar entradas dobles en esta zona Torum"}
-          aria-pressed={isTorumDoubleActive}
+          aria-label={`Multiplicador Torum x${torumMultiplier}. Pulsar para cambiar a x${torumMultiplier === 3 ? 1 : torumMultiplier + 1}`}
           className={
-            isTorumDoubleActive
+            torumMultiplier > 1
               ? "chart-hard-reset-button chart-object-torum-double-button chart-object-torum-double-button--active"
               : "chart-hard-reset-button chart-object-torum-double-button"
           }
-          title="Entradas dobles por defecto en esta zona Torum"
+          title={`Multiplicador operativo x${torumMultiplier}. Pulsa para cambiar.`}
           type="button"
-          onClick={onToggleTorumDouble}
-          onPointerDown={stopBubble}
+          onPointerDown={(event) => {
+            // On touch devices the chart owns a long-press/pointer gesture. A
+            // synthetic click can therefore be swallowed after pointerdown.
+            // Cycle on the real pointer event so every deliberate tap reaches
+            // the Torum control before lightweight-charts starts a gesture.
+            stopBubble(event);
+            onCycleTorumMultiplier(event);
+          }}
           onPointerUp={stopBubble}
         >
-          x2
+          x{torumMultiplier}
         </button>
       ) : null}
 

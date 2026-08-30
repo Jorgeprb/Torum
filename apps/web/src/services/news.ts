@@ -23,7 +23,7 @@ export interface NewsSettings {
   affected_symbols: string[];
   provider_enabled: boolean;
   provider_name: string;
-  provider: "FINNHUB" | "MANUAL";
+  provider: "TORUM" | "MANUAL";
   auto_sync_enabled: boolean;
   sync_interval_minutes: number;
   days_ahead: number;
@@ -66,7 +66,7 @@ export interface NoTradeZone {
 export interface NewsImportResponse { received: number; saved: number; zones_generated: number; errors: string[] }
 export interface NewsProviderSyncResponse extends NewsImportResponse { provider: string; started_at: string; finished_at: string; status: string }
 export interface NewsProviderStatus {
-  provider: "FINNHUB" | "MANUAL";
+  provider: "TORUM" | "MANUAL";
   provider_enabled: boolean;
   auto_sync_enabled: boolean;
   sync_interval_minutes: number;
@@ -115,4 +115,4 @@ export function getNoTradeZones(symbol: string | null | undefined, from: string,
 }
 export function regenerateNoTradeZones(): Promise<{ regenerated: number }> { return apiRequest<{ regenerated: number }>("/api/no-trade-zones/regenerate", { method: "POST" }); }
 export function getNewsProviderStatus(): Promise<NewsProviderStatus> { return apiRequest<NewsProviderStatus>("/api/news/providers/status"); }
-export function syncNewsProvider(): Promise<NewsProviderSyncResponse> { return apiRequest<NewsProviderSyncResponse>("/api/news/providers/sync", { method: "POST", timeoutMs: 60_000 }); }
+export function syncNewsProvider(): Promise<NewsProviderSyncResponse> { return apiRequest<NewsProviderSyncResponse>("/api/news/providers/sync", { method: "POST", timeoutMs: 90_000 }); }

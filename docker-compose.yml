@@ -94,6 +94,13 @@ services:
       NEWS_BLOCK_ENABLED: ${NEWS_BLOCK_ENABLED:-false}
       NEWS_BLOCK_MINUTES_BEFORE: ${NEWS_BLOCK_MINUTES_BEFORE:-60}
       NEWS_BLOCK_MINUTES_AFTER: ${NEWS_BLOCK_MINUTES_AFTER:-60}
+      FMP_ECONOMIC_CALENDAR_URL: ${FMP_ECONOMIC_CALENDAR_URL:-https://financialmodelingprep.com/stable/economic-calendar}
+      FMP_API_KEY: ${FMP_API_KEY:-}
+      NEWS_BLS_ICS_URL: ${NEWS_BLS_ICS_URL:-https://www.bls.gov/schedule/news_release/bls.ics}
+      NEWS_BEA_RELEASE_DATES_URL: ${NEWS_BEA_RELEASE_DATES_URL:-https://apps.bea.gov/API/signup/release_dates.json}
+      NEWS_CENSUS_CALENDAR_URL: ${NEWS_CENSUS_CALENDAR_URL:-https://www.census.gov/economic-indicators/calendar-listview.html}
+      NEWS_FED_CALENDAR_BASE_URL: ${NEWS_FED_CALENDAR_BASE_URL:-https://www.federalreserve.gov/newsevents}
+      # Legacy only: old .env files can keep these values; TORUM no longer calls Finnhub.
       FINNHUB_CALENDAR_URL: ${FINNHUB_CALENDAR_URL:-https://finnhub.io/api/v1/calendar/economic}
       FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
       NEWS_PROVIDER_TIMEOUT_SECONDS: ${NEWS_PROVIDER_TIMEOUT_SECONDS:-10}

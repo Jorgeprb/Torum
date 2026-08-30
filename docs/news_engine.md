@@ -55,10 +55,10 @@ Campos principales:
 
 ```json
 {
-  "provider": "FINNHUB",
+  "provider": "TORUM",
   "provider_enabled": true,
   "auto_sync_enabled": true,
-  "sync_interval_minutes": 1440,
+  "sync_interval_minutes": 360,
   "days_ahead": 14,
   "draw_news_zones_enabled": true,
   "block_trading_during_news": false,
@@ -80,18 +80,39 @@ Campos principales:
 
 Torum soporta:
 
-- `FINNHUB`
-- `MANUAL`
+- `TORUM`: calendario automatico resiliente;
+- `MANUAL`: solo importacion manual.
 
-La opcion automatica es `FINNHUB`. Torum descarga el calendario economico, filtra localmente EEUU/USD + noticias de alto impacto y guarda solo noticias reales importadas desde el provider.
+`TORUM` no depende de una cuenta externa. Consulta en paralelo cuatro fuentes
+primarias oficiales de EEUU:
+
+- BLS (iCal oficial): empleo, CPI, PPI, JOLTS y otros releases laborales;
+- BEA (JSON oficial): GDP, Personal Income and Outlays/PCE y otros releases;
+- Federal Reserve (calendario oficial): FOMC decision/statement, rueda de prensa y minutes;
+- Census (calendario oficial): retail sales, durable goods y otros indicadores.
+
+FMP es una quinta fuente **opcional**. Solo requiere una API key y se usa para
+enriquecer el calendario con `previous`, `forecast`, `actual` y eventos macro
+adicionales (por ejemplo ISM/ADP) cuando estan disponibles. Si FMP devuelve
+403, agota cuota o falla, las fuentes oficiales siguen funcionando y la sync
+queda `DEGRADED`, no inutilizable.
 
 Variables:
 
 ```text
-FINNHUB_CALENDAR_URL=https://finnhub.io/api/v1/calendar/economic
-FINNHUB_API_KEY=
+FMP_ECONOMIC_CALENDAR_URL=https://financialmodelingprep.com/stable/economic-calendar
+FMP_API_KEY=
+NEWS_BLS_ICS_URL=https://www.bls.gov/schedule/news_release/bls.ics
+NEWS_BEA_RELEASE_DATES_URL=https://apps.bea.gov/API/signup/release_dates.json
+NEWS_CENSUS_CALENDAR_URL=https://www.census.gov/economic-indicators/calendar-listview.html
+NEWS_FED_CALENDAR_BASE_URL=https://www.federalreserve.gov/newsevents
 NEWS_PROVIDER_TIMEOUT_SECONDS=10
 ```
+
+No hace falta definir `FMP_API_KEY` para cubrir los principales releases
+oficiales de alto impacto. Si se quiere enriquecimiento adicional, esa es la
+unica clave que hay que crear. Finnhub queda solo como compatibilidad de
+configuraciones antiguas y ya no se consulta.
 
 Endpoints:
 
@@ -106,29 +127,28 @@ El sync automatico corre al arrancar y cada `sync_interval_minutes`, si:
 - `auto_sync_enabled=true`;
 - `provider` no es `MANUAL`.
 
-El sync usa el mismo filtrado de `proba.py`:
+Las fuentes se consultan en paralelo. Un fallo aislado no hace perder los
+eventos de las demas fuentes. Solo si todas las fuentes oficiales fallan se
+considera un error total.
 
-- EEUU por `country`, `countryName`, `region` o `currency=USD`;
-- alto impacto por patrones como NFP, CPI, PPI, PCE, FOMC, tipos, GDP, retail sales, ISM, JOLTS, ADP y similares;
-- excluye eventos como permisos de construccion, ventas de casas y PMI final.
+La clasificacion de impacto sigue controlada por Torum. Para eventos conocidos,
+las reglas locales tienen prioridad (NFP/Employment Situation, CPI, PPI, PCE,
+FOMC, GDP, retail sales, JOLTS, durable goods, ISM, ADP, etc.). Los eventos de
+vivienda y PMI final continúan excluidos de HIGH. Si FMP proporciona `impact`,
+se usa como pista solo cuando no existe una regla explicita de Torum.
 
-Luego crea o actualiza `news_events` y regenera `no_trade_zones` para:
-
-```text
-XAUUSD, XAUEUR
-```
-
-La deduplicacion usa primero:
-
-```text
-source + external_id
-```
-
-Si no existe `external_id`, usa fingerprint:
+Antes de guardar, Torum normaliza todas las fuentes a un formato comun, agrupa
+eventos equivalentes por familia + minuto y da prioridad al horario de la
+fuente oficial. FMP puede completar previous/forecast/actual sin mover el
+horario oficial. Los eventos automaticos se guardan como:
 
 ```text
-source + currency + title + event_time
+source = TORUM_CALENDAR
 ```
+
+Si una fecha oficial cambia, una sincronizacion completa elimina la fecha
+automatica antigua de la ventana y regenera las zonas. Una sync parcial nunca
+elimina eventos, evitando falsos borrados por una caida temporal de una fuente.
 
 ## Pagina Noticias
 
@@ -136,7 +156,7 @@ En el burger menu movil hay pagina `Noticias`.
 
 Permite:
 
-- elegir `FINNHUB` o `MANUAL`;
+- elegir `TORUM` o `MANUAL`;
 - activar provider y sync automatico;
 - cambiar intervalo y dias hacia delante;
 - activar bloqueo operativo;

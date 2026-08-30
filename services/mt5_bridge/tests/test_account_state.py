@@ -23,8 +23,12 @@ def test_account_state_from_mt5_object() -> None:
             currency="USD",
             balance=1000.0,
             equity=1001.0,
-            margin=0.0,
-            margin_free=1001.0,
+            margin=125.0,
+            margin_free=876.0,
+            margin_level=800.8,
+            margin_so_mode=0,
+            margin_so_call=100.0,
+            margin_so_so=50.0,
             leverage=100,
             trade_mode=0,
         )
@@ -32,3 +36,7 @@ def test_account_state_from_mt5_object() -> None:
 
     assert state.login == 123
     assert state.trade_mode == "DEMO"
+    assert state.margin_level == 800.8
+    assert state.margin_so_mode == 0
+    assert state.margin_so_call == 100.0
+    assert state.margin_so_so == 50.0

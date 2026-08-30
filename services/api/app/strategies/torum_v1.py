@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -157,6 +157,7 @@ class TorumV1AssetStatus:
     unlocked_at: datetime | None
     blocked_by_news: bool
     active_config_id: int | None
+    manual_override: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -667,12 +668,12 @@ def is_candle_inside_operation_zone(
     price_tolerance_pct: float = 0.0,
     time_tolerance_minutes: int = 0,
 ) -> bool:
-    """Return whether the executable confirmation point is inside the rectangle.
+    """Return whether the executable confirmation point is inside the Torum zone.
 
     The strategy acts only after the M5 candle has closed, so the temporal point
     is the candle close and the vertical point is the executable price when it
-    is available (otherwise the candle close). Keeping both coordinates in the
-    same helper prevents a rectangle from being treated as a time-only filter.
+    is available (otherwise the candle close). For BUY zones the upper rectangle
+    edge is the price ceiling and there is intentionally no lower price bound.
     """
 
     candle_close_time = _as_utc(candle.time) + timedelta(seconds=max(0, int(timeframe_seconds)))
@@ -725,12 +726,21 @@ def is_price_inside_operation_zone(
     zone: TorumV1OperationZone,
     price_tolerance_pct: float = 0.0,
 ) -> bool:
-    """Validate only the vertical/price coordinate of a point."""
+    """Validate the vertical coordinate of a Torum operation zone.
+
+    A BUY rectangle is a ceiling, not a vertically bounded box: once price is
+    at or below the rectangle's upper edge it remains inside the Torum zone,
+    even if it continues below the lower edge.  The lower edge is therefore
+    visual only for BUY zones.  The horizontal/time interval is still enforced
+    independently by :func:`is_time_inside_operation_zone`.
+    """
 
     checked_price = float(price)
     price_tolerance = max(0.0, float(price_tolerance_pct)) / 100.0
     center = (zone.price_min + zone.price_max) / 2.0
     absolute_price_tolerance = abs(center) * price_tolerance
+    if str(zone.direction or "BUY").upper() == "BUY":
+        return checked_price <= zone.price_max + absolute_price_tolerance
     return zone.price_min - absolute_price_tolerance <= checked_price <= zone.price_max + absolute_price_tolerance
 
 
@@ -1706,8 +1716,7 @@ def desired_multiplier_for_support(
     """Return the setup multiplier before capacity/risk degradation.
 
     Visual support bands always take precedence. Outside every support the
-    strategy requests one simple entry, except when the selected Torum
-    rectangle explicitly enables its x2 flag.
+    strategy uses the selected Torum rectangle multiplier (x1/x2/x3).
     """
 
     del open_positions
@@ -1718,7 +1727,7 @@ def desired_multiplier_for_support(
         return max(1, min(3, _int_param(config.get("support_s2_multiplier"), 2)))
     if level == 3:
         return max(1, min(3, _int_param(config.get("support_s3_multiplier"), 3)))
-    return max(1, min(2, _int_param(zone_default_multiplier, 1)))
+    return max(1, min(3, _int_param(zone_default_multiplier, 1)))
 
 
 def _matching_support_for_entry(
@@ -1893,6 +1902,7 @@ class TorumV1StatusService:
         timeframe = "H2/H3" if unlock_mode == "BOTH" else unlock_mode
         session_start = _hhmm(params.get("session_start"), _default_session_start(symbol))
         session_end = _hhmm(params.get("session_end"), _default_session_end(symbol))
+        manual_override = _manual_unlock_override(params, madrid_now.date())
         base = {
             "symbol": symbol,
             "enabled": bot_enabled,
@@ -1900,6 +1910,7 @@ class TorumV1StatusService:
             "session_start": session_start,
             "session_end": session_end,
             "active_config_id": config.id if config is not None else None,
+            "manual_override": manual_override,
         }
 
         session_days = params.get("session_days")
@@ -1915,6 +1926,18 @@ class TorumV1StatusService:
         session_end_dt = _local_dt(madrid_now.date(), session_end)
         if madrid_now < session_start_dt or madrid_now >= session_end_dt:
             return TorumV1AssetStatus(**base, status="LOCKED", reason="outside_session", unlocked_at=None, blocked_by_news=False)
+
+        # Manual control intentionally overrides only the H2/H3 unlock
+        # prerequisite. Session/day/news rules above remain authoritative, so
+        # a manual unlock behaves like having received a valid bullish H2/H3
+        # confirmation rather than disabling the rest of Torum's protections.
+        # Overrides are scoped to the current Madrid trading day; stale values
+        # are ignored automatically on the next day and the normal candle logic
+        # resumes without any cleanup job.
+        if manual_override == "LOCKED":
+            return TorumV1AssetStatus(**base, status="LOCKED", reason="manual_lock", unlocked_at=None, blocked_by_news=False)
+        if manual_override == "UNLOCKED":
+            return TorumV1AssetStatus(**base, status="UNLOCKED", reason="manual_unlock", unlocked_at=checked_at, blocked_by_news=False)
 
         unlocked_at, reason = self._unlocked_at(symbol, madrid_now, session_start, session_end, params)
         if unlocked_at is None:
@@ -2281,16 +2304,22 @@ def _operation_zone_from_payload(
     if direction != "BUY":
         return None
 
-    double_entries = (
-        drawing_type == "rectangle"
-        and _bool(
+    raw_multiplier = metadata.get(
+        "torum_v1_default_multiplier",
+        payload.get("torum_v1_default_multiplier"),
+    )
+    parsed_multiplier = _int_or_none(raw_multiplier)
+    if parsed_multiplier is None:
+        # Backward compatibility with rectangles created before x3 existed.
+        legacy_double = _bool(
             metadata.get(
                 "torum_v1_default_double_enabled",
                 payload.get("torum_v1_default_double_enabled"),
             ),
             False,
         )
-    )
+        parsed_multiplier = 2 if legacy_double else 1
+    default_multiplier = max(1, min(3, parsed_multiplier))
     return TorumV1OperationZone(
         drawing_id=drawing_id,
         drawing_type=drawing_type,
@@ -2299,7 +2328,7 @@ def _operation_zone_from_payload(
         price_min=min(price_a, price_b),
         price_max=max(price_a, price_b),
         direction="BUY",
-        default_multiplier=2 if double_entries else 1,
+        default_multiplier=default_multiplier,
     )
 
 
@@ -2355,6 +2384,16 @@ def _timeframe(value: object) -> str:
 def _unlock_timeframe_mode(value: object) -> str:
     candidate = str(value or "BOTH").upper()
     return candidate if candidate in {"BOTH", "H2", "H3"} else "BOTH"
+
+
+def _manual_unlock_override(params: dict[str, object], madrid_date: date) -> str | None:
+    """Return today's explicit H2/H3 override, ignoring stale prior days."""
+
+    override_day = str(params.get("manual_unlock_override_day") or "").strip()
+    if override_day != madrid_date.isoformat():
+        return None
+    candidate = str(params.get("manual_unlock_override") or "").strip().upper()
+    return candidate if candidate in {"LOCKED", "UNLOCKED"} else None
 
 
 def _aggregate_timeframe_order(preferred_timeframe: str | None) -> tuple[str, ...]:

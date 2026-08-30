@@ -10,6 +10,8 @@ class BridgeHealth:
     connected_to_backend: bool = False
     account_trade_mode: str = "UNKNOWN"
     account: AccountState | None = None
+    terminal_trade_allowed: bool | None = None
+    terminal_tradeapi_disabled: bool | None = None
     active_symbols: list[str] = field(default_factory=list)
     last_tick_time_by_symbol: dict[str, datetime] = field(default_factory=dict)
     ticks_sent_total: int = 0
@@ -23,6 +25,8 @@ class BridgeHealth:
             "connected_to_backend": self.connected_to_backend,
             "account_trade_mode": self.account_trade_mode,
             "account": self.account.to_payload() if self.account else None,
+            "terminal_trade_allowed": self.terminal_trade_allowed,
+            "terminal_tradeapi_disabled": self.terminal_tradeapi_disabled,
             "active_symbols": self.active_symbols,
             "last_tick_time_by_symbol": self.last_tick_time_by_symbol,
             "ticks_sent_total": self.ticks_sent_total,

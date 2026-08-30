@@ -1,4 +1,8 @@
-import { getAuthToken } from "../stores/authStore";
+import {
+  getAuthToken,
+  getPersistentSessionToken,
+  refreshStoredAccessToken,
+} from "./authSession";
 import { createRequestId } from "./requestId";
 import { resolveApiBaseUrl } from "./runtime";
 
@@ -36,18 +40,33 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
   const headers = new Headers(options.headers);
   headers.set("X-Request-ID", requestId);
   if (!(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  const token = options.token === undefined ? getAuthToken() : options.token;
+  const useStoredAuth = options.token === undefined;
+  let token = useStoredAuth ? getAuthToken() : options.token;
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
   const attempts = Math.max(1, (options.retry ?? 0) + 1);
+  let attempt = 1;
+  let authRefreshRetried = false;
+
   try {
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    while (attempt <= attempts) {
       try {
         const response = await fetch(`${API_BASE_URL}${path}`, {
           ...options,
           headers,
           signal: controller.signal,
         });
+
+        if (response.status === 401 && useStoredAuth && !authRefreshRetried && getPersistentSessionToken()) {
+          authRefreshRetried = true;
+          const refreshedToken = await refreshStoredAccessToken();
+          if (refreshedToken) {
+            token = refreshedToken;
+            headers.set("Authorization", `Bearer ${token}`);
+            continue;
+          }
+        }
+
         if (!response.ok) {
           const detail = await response.json().catch(() => null);
           const message =
@@ -61,6 +80,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
       } catch (error) {
         if (attempt >= attempts || error instanceof ApiError || controller.signal.aborted) throw error;
         await new Promise((resolve) => window.setTimeout(resolve, 200 * attempt));
+        attempt += 1;
       }
     }
     throw new Error("Unreachable API retry state");

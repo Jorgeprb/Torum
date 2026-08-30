@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from threading import Thread
 from time import perf_counter
 from uuid import uuid4
-from typing import Annotated
+from typing import Annotated, Callable
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -15,6 +15,8 @@ from bridge.config import BridgeSettings
 from bridge.mt5_client import MT5Client
 from bridge.order_executor import OrderExecutor
 from bridge.order_models import (
+    AccountSwitchRequest,
+    AccountSwitchResponse,
     BridgeOrderResponse,
     ClosePositionRequest,
     MarketOrderRequest,
@@ -40,7 +42,11 @@ class OrderServerHandle:
             logger.error("MT5 order server did not stop within %.1fs", timeout)
 
 
-def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI:
+def create_order_app(
+    settings: BridgeSettings,
+    mt5_client: MT5Client,
+    account_switch_handler: Callable[[int, str], tuple[object, object]] | None = None,
+) -> FastAPI:
     app = FastAPI(title="Torum MT5 Bridge", version="0.5.0")
     executor = OrderExecutor(settings, mt5_client)
 
@@ -106,6 +112,36 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
     def account() -> dict[str, object]:
         return mt5_client.get_account_state().to_payload()
 
+    @app.get("/accounts/discover", dependencies=[protected])
+    def discover_accounts() -> list[dict[str, object]]:
+        try:
+            return mt5_client.discover_terminal_accounts()
+        except Exception as exc:  # noqa: BLE001 - terminal filesystem/vendor boundary
+            logger.warning("MT5 account discovery failed: %s", exc)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    @app.post("/accounts/switch", response_model=AccountSwitchResponse, dependencies=[protected])
+    def switch_account(payload: AccountSwitchRequest) -> AccountSwitchResponse:
+        try:
+            handler = account_switch_handler or mt5_client.switch_account
+            previous, current = handler(payload.login, payload.server)
+            # Broker-specific symbol/filling metadata must never survive an
+            # account switch, even when both accounts use similar symbols.
+            executor.reset_account_caches()
+            previous_payload = previous.to_payload() if hasattr(previous, "to_payload") else None
+            current_payload = current.to_payload() if hasattr(current, "to_payload") else None
+            if not isinstance(current_payload, dict):
+                raise RuntimeError("MT5 switch handler did not return an account state")
+            return AccountSwitchResponse(
+                previous_account=previous_payload,
+                account=current_payload,
+                generation=mt5_client.account_generation,
+                message="MT5 account switched",
+            )
+        except Exception as exc:  # noqa: BLE001 - vendor/login boundary
+            logger.warning("MT5 account switch failed login=%s server=%s error=%s", payload.login, payload.server, exc)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
     @app.get("/positions", dependencies=[protected])
     def positions() -> list[dict[str, object]]:
         mt5_positions = mt5_client.get_positions()
@@ -161,8 +197,18 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
         return executor.close_position(ticket, payload)
 
     @app.get("/positions/{ticket}/close-deal", dependencies=[protected])
-    def close_deal(ticket: int, deal: int | None = Query(default=None)) -> dict[str, object]:
-        return executor.close_deal(ticket, deal)
+    def close_deal(
+        ticket: int,
+        deal: int | None = Query(default=None),
+        expected_account_login: int | None = Query(default=None),
+        expected_account_server: str | None = Query(default=None),
+    ) -> dict[str, object]:
+        return executor.close_deal(
+            ticket,
+            deal,
+            expected_account_login=expected_account_login,
+            expected_account_server=expected_account_server,
+        )
 
     @app.patch("/positions/{ticket}/tp", response_model=BridgeOrderResponse, dependencies=[protected])
     def modify_position_tp(ticket: int, payload: ModifyPositionTpRequest) -> BridgeOrderResponse:
@@ -175,8 +221,12 @@ def create_order_app(settings: BridgeSettings, mt5_client: MT5Client) -> FastAPI
     return app
 
 
-def start_order_server(settings: BridgeSettings, mt5_client: MT5Client) -> OrderServerHandle:
-    app = create_order_app(settings, mt5_client)
+def start_order_server(
+    settings: BridgeSettings,
+    mt5_client: MT5Client,
+    account_switch_handler: Callable[[int, str], tuple[object, object]] | None = None,
+) -> OrderServerHandle:
+    app = create_order_app(settings, mt5_client, account_switch_handler=account_switch_handler)
     config = uvicorn.Config(
         app,
         host=settings.mt5_bridge_host,

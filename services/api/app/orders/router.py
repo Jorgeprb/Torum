@@ -29,6 +29,8 @@ def get_orders(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     limit: int = Query(default=100, ge=1, le=500),
+    account_login: int | None = Query(default=None),
+    account_server: str | None = Query(default=None),
 ) -> list[OrderRead]:
     return [
         OrderRead.model_validate(order)
@@ -37,6 +39,8 @@ def get_orders(
             limit=limit,
             user_id=current_user.id,
             include_all_users=current_user.role == UserRole.admin,
+            account_login=account_login,
+            account_server=account_server,
         )
     ]
 

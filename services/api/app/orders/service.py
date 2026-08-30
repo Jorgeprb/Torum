@@ -534,6 +534,8 @@ class OrderManager:
             "deviation_points": deviation_points,
             "magic_number": magic_number,
             "comment": order.comment,
+            "expected_account_login": order.account_login,
+            "expected_account_server": order.account_server,
         }
         order.status = "SENT"
         self.db.flush()

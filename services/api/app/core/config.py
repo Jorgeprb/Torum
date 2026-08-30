@@ -74,6 +74,17 @@ class Settings(BaseSettings):
     news_block_enabled: bool = False
     news_block_minutes_before: int = 60
     news_block_minutes_after: int = 60
+    # News: Torum uses official US primary-source calendars without credentials.
+    # FMP is the only optional API key and enriches the official schedule with
+    # forecasts/previous/actual values and events not published by those feeds.
+    fmp_economic_calendar_url: str = "https://financialmodelingprep.com/stable/economic-calendar"
+    fmp_api_key: SecretStr | None = None
+    news_bls_ics_url: str = "https://www.bls.gov/schedule/news_release/bls.ics"
+    news_bea_release_dates_url: str = "https://apps.bea.gov/API/signup/release_dates.json"
+    news_census_calendar_url: str = "https://www.census.gov/economic-indicators/calendar-listview.html"
+    news_fed_calendar_base_url: str = "https://www.federalreserve.gov/newsevents"
+    # Legacy Finnhub settings are intentionally retained so old .env files do
+    # not fail validation, but the automatic provider no longer depends on them.
     finnhub_calendar_url: str = "https://finnhub.io/api/v1/calendar/economic"
     finnhub_api_key: SecretStr | None = None
     news_provider_timeout_seconds: float = 10.0

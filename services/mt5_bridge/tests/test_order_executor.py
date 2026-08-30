@@ -194,13 +194,36 @@ def test_order_executor_logs_last_error_when_order_send_returns_none() -> None:
     assert len(client.mt5.sent_requests) == 1
 
 
-def test_order_executor_attempts_order_send_when_terminal_reports_trading_disabled() -> None:
-    client = FakeMT5Client(terminal_trade_allowed=False, tradeapi_disabled=True, account_trade_allowed=False)
+def test_order_executor_preflights_client_autotrading_disabled_without_sending() -> None:
+    client = FakeMT5Client(terminal_trade_allowed=False, tradeapi_disabled=True, account_trade_allowed=True)
 
     response = OrderExecutor(_settings(enabled=True), client).execute_market_order(_order("BUY"))
 
-    assert response.ok is True
-    assert len(client.mt5.sent_requests) == 1
+    assert response.ok is False
+    assert response.retcode == 10027
+    assert response.raw["client_autotrading_disabled"] is True
+    assert "AutoTrading" in response.comment
+    assert client.mt5.sent_requests == []
+
+
+def test_order_executor_preflights_client_autotrading_disabled_for_tp_changes() -> None:
+    client = FakeMT5Client(terminal_trade_allowed=False, tradeapi_disabled=False, account_trade_allowed=True)
+    payload = ModifyPositionTpRequest(
+        internal_symbol="XAUUSD",
+        broker_symbol="XAUUSD",
+        side="BUY",
+        mode="DEMO",
+        tp=2330.55,
+        sl=0,
+        magic_number=260426,
+    )
+
+    response = OrderExecutor(_settings(enabled=True), client).modify_position_tp(789, payload)
+
+    assert response.ok is False
+    assert response.retcode == 10027
+    assert response.raw["client_autotrading_disabled"] is True
+    assert client.mt5.sent_requests == []
 
 
 def test_order_executor_sanitizes_long_mt5_comment() -> None:
@@ -305,3 +328,16 @@ def test_order_executor_retries_only_after_explicit_invalid_filling_mode() -> No
     assert response.ok is True
     assert len(client.mt5.sent_requests) == 2
     assert client.mt5.sent_requests[0]["type_filling"] != client.mt5.sent_requests[1]["type_filling"]
+
+
+def test_order_executor_rejects_order_prepared_for_previous_mt5_account() -> None:
+    client = FakeMT5Client()
+    order = _order("BUY").model_copy(
+        update={"expected_account_login": 999999, "expected_account_server": "Broker-Other"}
+    )
+
+    response = OrderExecutor(_settings(enabled=True), client).execute_market_order(order)
+
+    assert response.ok is False
+    assert response.raw.get("account_mismatch") is True
+    assert client.mt5.sent_requests == []

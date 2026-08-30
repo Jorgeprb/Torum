@@ -1,5 +1,6 @@
 import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
+  CrosshairMode,
   type IChartApi,
   type ISeriesApi,
   type LineData,
@@ -86,6 +87,7 @@ import { PriceAlertsOverlay } from "./overlays/PriceAlertsOverlay";
 import { ChartActionButtons } from "./overlays/ChartActionButtons";
 import { DrawingStyleEditor, type TorumZoneVisualStyle } from "./overlays/DrawingStyleEditor";
 import { AthPriceZonesOverlay } from "./overlays/AthPriceZonesOverlay";
+import { AccountStopOutLineOverlay } from "./overlays/AccountStopOutLineOverlay";
 import { useBidAskPriceLines } from "./hooks/useBidAskPriceLines";
 
 // ── Alert style persistence ──────────────────────────────────────────────────
@@ -170,10 +172,13 @@ function canBeTorumV1OperationZone(drawing: ChartDrawingRead | null): drawing is
   return Boolean(drawing && drawing.drawing_type === "rectangle");
 }
 
-function isTorumV1DoubleZone(drawing: ChartDrawingRead | null): boolean {
-  if (!drawing || drawing.drawing_type !== "rectangle" || !isTorumV1OperationZone(drawing)) return false;
+function torumV1ZoneMultiplier(drawing: ChartDrawingRead | null): 1 | 2 | 3 {
+  if (!drawing || drawing.drawing_type !== "rectangle" || !isTorumV1OperationZone(drawing)) return 1;
   const metadata = drawing.metadata ?? {};
-  return metadata.torum_v1_default_double_enabled === true;
+  const payload = drawing.payload ?? {};
+  const parsed = Number(metadata.torum_v1_default_multiplier ?? payload.torum_v1_default_multiplier);
+  if (parsed === 1 || parsed === 2 || parsed === 3) return parsed;
+  return metadata.torum_v1_default_double_enabled === true || payload.torum_v1_default_double_enabled === true ? 2 : 1;
 }
 
 function supportMetadata(drawing: ChartDrawingRead): Record<string, unknown> {
@@ -254,6 +259,7 @@ export function MarketChart({
   tradeLines = [],
   tradeMarkers = [],
   tradeExecutionMarkers = [],
+  accountStopOutLine = null,
   onSelectPosition,
   onUpdatePositionTp,
   alertToolActive = false,
@@ -301,7 +307,9 @@ export function MarketChart({
   const suppressNextChartPointerUpRef = useRef(false);
   const suppressNextChartClickRef = useRef(false);
   const suppressNextChartPointRef = useRef(false);
+  const torumMultiplierUpdatePendingRef = useRef(false);
   const draftDrawingPayloadsRef = useRef<Record<string, Record<string, unknown>>>({});
+  const draftDrawingBaseRevisionsRef = useRef<Record<string, number>>({});
   const draggingDrawingShapeRef = useRef<DrawingShape | null>(null);
   const alertDragStateRef = useRef<{ id: string; startClientY: number; startY: number } | null>(null);
   const chartPointerDownStartedOnDrawingRef = useRef(false);
@@ -318,12 +326,13 @@ export function MarketChart({
   const [priceAlertOverlays, setPriceAlertOverlays] = useState<PriceAlertOverlay[]>([]);
   const [pullbackDebugOverlays, setPullbackDebugOverlays] = useState<PullbackDebugOverlay[]>([]);
   const [athZoneOverlays, setAthZoneOverlays] = useState<AthPriceZoneOverlay[]>([]);
+  const [accountStopOutLineY, setAccountStopOutLineY] = useState<number | null>(null);
   const [draggingAlertId, setDraggingAlertId] = useState<string | null>(null);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   const [draftAlertPrices, setDraftAlertPrices] = useState<Record<string, number>>({});
   const [alertVisualStyles, setAlertVisualStyles] = useState<Record<string, PriceAlertVisualStyle>>(() => loadAlertVisualStyles());
-  const [draggingTpLineId, setDraggingTpLineId] = useState<string | null>(null);
   const [draftTradeLinePrices, setDraftTradeLinePrices] = useState<Record<string, number>>({});
+  const [draftPositionTpPrices, setDraftPositionTpPrices] = useState<Record<string, number>>({});
   const [drawingShapes, setDrawingShapes] = useState<DrawingShape[]>([]);
   const [torumZoneVisualStyle, setTorumZoneVisualStyle] = useState<TorumZoneVisualStyle>(() => loadTorumZoneVisualStyle());
   const [draggingDrawingId, setDraggingDrawingId] = useState<string | null>(null);
@@ -458,6 +467,18 @@ export function MarketChart({
     if (!chart || !series) return;
     priceScaleManuallyAdjustedRef.current = true;
     disablePriceAutoScale(chart, series);
+  }
+
+  function setDrawingDragChartInteractionLocked(locked: boolean) {
+    chartPointerActiveRef.current = false;
+    chartRef.current?.applyOptions({
+      handleScroll: {
+        horzTouchDrag: !locked,
+        vertTouchDrag: !locked,
+        mouseWheel: true,
+        pressedMouseMove: !locked
+      }
+    });
   }
 
   function priceFromPointer(event: PointerEvent | globalThis.PointerEvent): number | null {
@@ -642,7 +663,6 @@ export function MarketChart({
     setMeasureCursorPoint(cursor);
     setPendingPoint(null);
     setPendingCoordinate(null);
-    setDraggingTpLineId(null);
     setDraggingAlertId(null);
     onSelectDrawing?.(null);
     setSelectedAlertId(null);
@@ -718,7 +738,7 @@ export function MarketChart({
     if (!chart || !series || !container) {
       setOverlays([]); setDrawingShapes([]); setTradeLineOverlays([]);
       setTradeMarkerOverlays([]); setPriceAlertOverlays([]); setPullbackDebugOverlays([]);
-      setTradeExecutionMarkerOverlays([]);
+      setTradeExecutionMarkerOverlays([]); setAccountStopOutLineY(null);
       return;
     }
     syncPriceScaleWidth(container);
@@ -761,11 +781,11 @@ export function MarketChart({
       const bgColor = drawing.drawing_type === "rectangle" || drawing.drawing_type === "manual_zone" ? hexToRgba(color, opacity) : styleValue(drawing.style, "backgroundColor", "rgba(245,197,66,0.15)");
       const textColor = styleValue(drawing.style, "textColor", "#edf2ef");
       const fontSize = clampedNumericStyleValue(drawing.style, "fontSize", 14, 8, 48);
-      const doubleZone = isTorumV1DoubleZone(drawing);
+      const torumMultiplier = torumV1ZoneMultiplier(drawing);
       const label = denseChartView && !operationZone
         ? ""
         : operationZone
-          ? `TORUM V1 BUY ZONE${doubleZone ? " · x2" : ""}`
+          ? `TORUM V1 BUY ZONE · x${torumMultiplier}`
           : drawingLabel(drawing);
       const base = { id: drawing.id, drawing, color, lineWidth, lineStyle: ls, glow, label };
       const payload = draftDrawingPayloadsRef.current[drawing.id] ?? drawing.payload;
@@ -846,14 +866,38 @@ export function MarketChart({
     const draggingShape = draggingDrawingShapeRef.current;
     setDrawingShapes(draggingShape ? shapes.map(s => s.id === draggingShape.id ? draggingShape : s) : shapes);
 
-    setTradeLineOverlays(
-      tradeLines.filter(l => (l.tone === "entry" || l.tone === "tp") && Number.isFinite(l.price))
-        .map(line => {
-          const price = draftTradeLinePrices[line.id] ?? line.price;
-          const y = series.priceToCoordinate(price);
-          return y === null ? null : { ...line, price, y: Number(y), label: tradeLineLabel(line, price) };
-        }).filter((l): l is TradeLineOverlay => l !== null)
-    );
+    const renderedTradeLines = tradeLines
+      .filter(l => (l.tone === "entry" || l.tone === "tp") && Number.isFinite(l.price))
+      .map(line => {
+        const price = draftTradeLinePrices[line.id] ?? line.price;
+        const y = series.priceToCoordinate(price);
+        return y === null ? null : { ...line, price, y: Number(y), label: tradeLineLabel(line, price) };
+      })
+      .filter((l): l is TradeLineOverlay => l !== null);
+
+    const draftTpLines = tradeLines
+      .filter(line => line.tone === "entry" && line.positionId && Number.isFinite(draftPositionTpPrices[String(line.positionId)]))
+      .map((line): TradeLineOverlay | null => {
+        const price = draftPositionTpPrices[String(line.positionId)];
+        const y = series.priceToCoordinate(price);
+        if (y === null) return null;
+        const previewLine = {
+          ...line,
+          id: `tp-preview-${line.positionId}`,
+          price,
+          tone: "tp" as const,
+          label: "TP",
+          profit: undefined,
+          profitEstimated: undefined,
+          editable: false,
+          muted: false,
+          selected: true
+        };
+        return { ...previewLine, y: Number(y), label: tradeLineLabel(previewLine, price) } satisfies TradeLineOverlay;
+      })
+      .filter((line): line is TradeLineOverlay => line !== null);
+
+    setTradeLineOverlays([...renderedTradeLines, ...draftTpLines]);
 
     setTradeMarkerOverlays(
       tradeMarkers.map((marker): TradeMarkerOverlay | null => {
@@ -932,6 +976,13 @@ export function MarketChart({
       }).filter((o): o is AthPriceZoneOverlay => o !== null)
     );
 
+    if (accountStopOutLine?.visible && typeof accountStopOutLine.price === "number" && Number.isFinite(accountStopOutLine.price)) {
+      const y = series.priceToCoordinate(accountStopOutLine.price);
+      setAccountStopOutLineY(y === null ? null : Number(y));
+    } else {
+      setAccountStopOutLineY(null);
+    }
+
     if (pendingPoint) {
       const x = timeToChartX(chart, sortedCandles, pendingPoint.time, Number.NaN);
       const y = series.priceToCoordinate(pendingPoint.price);
@@ -939,7 +990,7 @@ export function MarketChart({
     } else {
       setPendingCoordinate(null);
     }
-  }, [athZones, candles, drawings, draftAlertPrices, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, pullbackDebugVisible, showFutureNewsZones, strategyDebugPullbacks, timeframe, torumZoneVisualStyle, tradeExecutionMarkers, tradeLines, tradeMarkers]);
+  }, [accountStopOutLine, athZones, candles, drawings, draftAlertPrices, draftPositionTpPrices, draftTradeLinePrices, noTradeZones, pendingPoint, priceAlerts, pullbackDebugVisible, showFutureNewsZones, strategyDebugPullbacks, timeframe, torumZoneVisualStyle, tradeExecutionMarkers, tradeLines, tradeMarkers]);
 
   // Many chart events can fire in the same frame (tick, zoom, pan, drawing drag,
   // resize). Coalesce them so the expensive coordinate pass runs at most once
@@ -965,7 +1016,14 @@ export function MarketChart({
       timeScale: { borderColor: "#293033", barSpacing: preferredBarSpacing, minBarSpacing: minimumBarSpacing, timeVisible: true, secondsVisible: false, tickMarkFormatter: formatChartTickMark },
       handleScale: { axisPressedMouseMove: { time: true, price: true }, mouseWheel: true, pinch: true },
       handleScroll: { horzTouchDrag: true, vertTouchDrag: true, mouseWheel: true, pressedMouseMove: true },
-      crosshair: { mode: 1 }
+      // Torum already has its own blue long-press measurement overlay. Keep
+      // the native lightweight-charts crosshair fully disabled so a second
+      // grey dotted crosshair never appears underneath it.
+      crosshair: {
+        mode: CrosshairMode.Hidden,
+        vertLine: { visible: false, labelVisible: false },
+        horzLine: { visible: false, labelVisible: false }
+      }
     });
     const series = chart.addCandlestickSeries({ upColor: "#20c9bd", downColor: "#f45d5d", borderUpColor: "#20c9bd", borderDownColor: "#f45d5d", wickUpColor: "#20c9bd", wickDownColor: "#f45d5d", lastValueVisible: false, priceLineVisible: false });
     const fp = chart.addLineSeries({ color: "rgba(0,0,0,0)", lineWidth: 1, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
@@ -1060,14 +1118,26 @@ export function MarketChart({
   useEffect(() => {
     let changed = false;
     const nextDrafts = { ...draftDrawingPayloadsRef.current };
+    const nextBaseRevisions = { ...draftDrawingBaseRevisionsRef.current };
     for (const [drawingId, payload] of Object.entries(draftDrawingPayloadsRef.current)) {
       const drawing = drawings.find(d => d.id === drawingId);
-      if (!drawing || payloadsEqual(drawing.payload, payload)) {
-        delete nextDrafts[drawingId]; changed = true;
+      const baseRevision = draftDrawingBaseRevisionsRef.current[drawingId];
+      const serverConfirmed =
+        Boolean(drawing)
+        && payloadsEqual(drawing!.payload, payload)
+        && (baseRevision === undefined || drawing!.revision > baseRevision);
+      if (!drawing || serverConfirmed) {
+        delete nextDrafts[drawingId];
+        delete nextBaseRevisions[drawingId];
+        changed = true;
         if (draggingDrawingShapeRef.current?.id === drawingId) draggingDrawingShapeRef.current = null;
       }
     }
-    if (changed) { draftDrawingPayloadsRef.current = nextDrafts; scheduleOverlayRecalculate(); }
+    if (changed) {
+      draftDrawingPayloadsRef.current = nextDrafts;
+      draftDrawingBaseRevisionsRef.current = nextBaseRevisions;
+      scheduleOverlayRecalculate();
+    }
   }, [drawings]);
   useEffect(() => { const id = window.setInterval(recalculateOverlays, 30_000); return () => window.clearInterval(id); }, [recalculateOverlays]);
   useEffect(() => { recalculateOverlays(); }, [priceAlerts, recalculateOverlays]);
@@ -1086,18 +1156,6 @@ export function MarketChart({
     leaveMeasureMode();
     measureCrosshairRef.current = null;
   }, [drawingTool, symbol, timeframe]);
-
-  useEffect(() => {
-    const chart = chartRef.current;
-    if (!chart) return;
-    chart.applyOptions({
-      crosshair: {
-        mode: 1,
-        vertLine: { visible: !measureMode, labelVisible: !measureMode },
-        horzLine: { visible: !measureMode, labelVisible: !measureMode }
-      }
-    });
-  }, [measureMode]);
 
   useEffect(() => () => clearMeasureLongPressTimer(), []);
 
@@ -1278,23 +1336,7 @@ export function MarketChart({
     };
   }, [alertToolActive, drawingTool, onAutoFollowChange, recalculateOverlays]);
 
-  useEffect(() => {
-    if (!draggingTpLineId) return;
-    const id = draggingTpLineId;
-    function onMove(e: globalThis.PointerEvent) { const p = priceFromPointer(e); if (p !== null) setDraftTradeLinePrices(cur => ({ ...cur, [id]: p })); }
-    async function onUp(e: globalThis.PointerEvent) {
-      const line = tradeLines.find(l => l.id === id); const p = priceFromPointer(e);
-      if (line?.positionId && p !== null) {
-        const closePrice = line.side === "SELL" ? askPrice : bidPrice;
-        setDraftTradeLinePrices(cur => ({ ...cur, [id]: p }));
-        await onUpdatePositionTp?.(line.positionId, p, closePrice ?? null);
-      }
-      setDraggingTpLineId(null);
-      window.setTimeout(() => { setDraftTradeLinePrices(cur => { if (cur[id] !== p) return cur; const n = { ...cur }; delete n[id]; return n; }); }, 10_000);
-    }
-    window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp, { once: true });
-    return () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); };
-  }, [askPrice, bidPrice, draggingTpLineId, onUpdatePositionTp, tradeLines]);
+
 
   // â”€â”€ Drawing handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   function moveDrawingShape(shape: DrawingShape, dx: number, dy: number, action: DrawingDragAction): DrawingShape {
@@ -1387,26 +1429,58 @@ export function MarketChart({
       drawing.drawing_type === "horizontal_line" && finalShape.kind === "horizontal_line" && finalShape.supportLevel
         ? supportMetadataFromShape(drawing, finalShape)
         : null;
+    const nextDraftPayload = nextPayload ?? drawing.payload;
+    let updateSucceeded = false;
+
     try {
       if (nextPayload || supportPatch) {
         const patch: ChartDrawingUpdate = {};
         if (nextPayload) patch.payload = nextPayload;
         if (supportPatch) patch.metadata = supportPatch;
-        draftDrawingPayloadsRef.current = { ...draftDrawingPayloadsRef.current, [finalShape.id]: nextPayload ?? drawing.payload };
-        draggingDrawingShapeRef.current = finalShape;
+
+        // From pointer-up onward the payload, not a frozen pixel rectangle, is
+        // the optimistic source of truth. This makes the drawing follow chart
+        // pan/zoom immediately and prevents it from snapping between its old
+        // and new screen positions while the backend confirms the update.
+        draftDrawingPayloadsRef.current = {
+          ...draftDrawingPayloadsRef.current,
+          [finalShape.id]: nextDraftPayload
+        };
+        draftDrawingBaseRevisionsRef.current = {
+          ...draftDrawingBaseRevisionsRef.current,
+          [finalShape.id]: drawing.revision
+        };
+        draggingDrawingShapeRef.current = null;
         setDrawingShapes(cur => cur.map(item => item.id === finalShape.id ? finalShape : item));
+        window.requestAnimationFrame(recalculateOverlays);
+
         await onUpdateDrawing(drawing, patch);
+        updateSucceeded = true;
       }
-    } catch { /* parent shows error */ } finally {
+    } catch {
+      // If persistence fails, remove the optimistic payload so the next
+      // coordinate pass returns cleanly to the server-backed drawing.
+      const drafts = { ...draftDrawingPayloadsRef.current };
+      const baseRevisions = { ...draftDrawingBaseRevisionsRef.current };
+      if (payloadsEqual(drafts[finalShape.id], nextDraftPayload)) {
+        delete drafts[finalShape.id];
+        delete baseRevisions[finalShape.id];
+        draftDrawingPayloadsRef.current = drafts;
+        draftDrawingBaseRevisionsRef.current = baseRevisions;
+      }
+      draggingDrawingShapeRef.current = null;
+      window.requestAnimationFrame(recalculateOverlays);
+      // Parent owns the user-facing error.
+    } finally {
       onSelectDrawing?.(drawing.id);
       setDraggingDrawingId(null);
-      window.setTimeout(() => {
-        const nd = { ...draftDrawingPayloadsRef.current };
-        if (payloadsEqual(nd[finalShape.id], nextPayload ?? undefined)) {
-          delete nd[finalShape.id]; draftDrawingPayloadsRef.current = nd;
-          if (draggingDrawingShapeRef.current?.id === finalShape.id) { draggingDrawingShapeRef.current = null; window.requestAnimationFrame(recalculateOverlays); }
-        }
-      }, 10_000);
+
+      // On success keep the optimistic payload until the parent delivers the
+      // exact persisted payload. The drawings effect removes it only after the
+      // two payloads match, so a slow refresh can no longer flash the old box.
+      if (!updateSucceeded && !(nextPayload || supportPatch)) {
+        draggingDrawingShapeRef.current = null;
+      }
       window.requestAnimationFrame(recalculateOverlays);
       window.setTimeout(() => { suppressNextChartPointRef.current = false; }, 0);
     }
@@ -1417,107 +1491,266 @@ export function MarketChart({
     event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation?.();
     event.currentTarget.setPointerCapture?.(event.pointerId);
     suppressNextChartPointRef.current = true;
+    setDrawingDragChartInteractionLocked(true);
     setDraggingDrawingId(shape.id); setSelectedAlertId(null); onSelectDrawing?.(shape.id);
     const startX = event.clientX; const startY = event.clientY;
     let lastShape = shape; let af: number | null = null;
+
     function render(ns: DrawingShape) {
-      lastShape = ns; if (af !== null) return;
-      af = window.requestAnimationFrame(() => { af = null; draggingDrawingShapeRef.current = lastShape; setDrawingShapes(cur => cur.map(i => i.id === shape.id ? lastShape : i)); });
+      lastShape = ns;
+      if (af !== null) return;
+      af = window.requestAnimationFrame(() => {
+        af = null;
+        draggingDrawingShapeRef.current = lastShape;
+        setDrawingShapes(cur => cur.map(i => i.id === shape.id ? lastShape : i));
+      });
     }
-    function onMove(e: globalThis.PointerEvent) { e.preventDefault(); e.stopPropagation(); render(moveDrawingShape(shape, e.clientX - startX, e.clientY - startY, action)); }
-    function cleanup() { document.removeEventListener("pointermove", onMove, true); document.removeEventListener("pointerup", onUp, true); document.removeEventListener("pointercancel", onCancel, true); if (af !== null) { window.cancelAnimationFrame(af); af = null; } }
-    function onUp(e: globalThis.PointerEvent) { e.preventDefault(); e.stopPropagation(); cleanup(); const fs = moveDrawingShape(shape, e.clientX - startX, e.clientY - startY, action); draggingDrawingShapeRef.current = fs; setDrawingShapes(cur => cur.map(i => i.id === shape.id ? fs : i)); void handleDrawingDragEnd(fs); }
-    function onCancel() { cleanup(); draggingDrawingShapeRef.current = null; setDrawingShapes(cur => cur.map(i => i.id === shape.id ? shape : i)); setDraggingDrawingId(null); window.setTimeout(() => { suppressNextChartPointRef.current = false; }, 0); }
+
+    function onMove(e: globalThis.PointerEvent) {
+      e.preventDefault();
+      e.stopPropagation();
+      render(moveDrawingShape(shape, e.clientX - startX, e.clientY - startY, action));
+    }
+
+    function cleanup() {
+      document.removeEventListener("pointermove", onMove, true);
+      document.removeEventListener("pointerup", onUp, true);
+      document.removeEventListener("pointercancel", onCancel, true);
+      if (af !== null) {
+        window.cancelAnimationFrame(af);
+        af = null;
+      }
+      setDrawingDragChartInteractionLocked(false);
+    }
+
+    function onUp(e: globalThis.PointerEvent) {
+      e.preventDefault();
+      e.stopPropagation();
+      const finalShape = moveDrawingShape(shape, e.clientX - startX, e.clientY - startY, action);
+      cleanup();
+      draggingDrawingShapeRef.current = finalShape;
+      setDrawingShapes(cur => cur.map(i => i.id === shape.id ? finalShape : i));
+      void handleDrawingDragEnd(finalShape);
+    }
+
+    function onCancel() {
+      cleanup();
+      draggingDrawingShapeRef.current = null;
+      setDrawingShapes(cur => cur.map(i => i.id === shape.id ? shape : i));
+      setDraggingDrawingId(null);
+      window.setTimeout(() => { suppressNextChartPointRef.current = false; }, 0);
+    }
+
     document.addEventListener("pointermove", onMove, { capture: true, passive: false });
     document.addEventListener("pointerup", onUp, true);
     document.addEventListener("pointercancel", onCancel, true);
   }
 
   function handleChartPointerDownCapture(event: PointerEvent<HTMLDivElement>) {
-  chartPointerDownStartedOnDrawingRef.current = false;
+    chartPointerDownStartedOnDrawingRef.current = false;
 
-  if (measureMode) { return; }
-  if (event.button !== 0) {return;}
-  const container = containerRef.current;
-  if (!container) { return;}
-  const bounds = container.getBoundingClientRect();
-  const x = event.clientX - bounds.left;
-  const y = event.clientY - bounds.top;
+    const eventTarget = event.target;
+    if (
+      eventTarget instanceof Element
+      && eventTarget.closest("button, input, select, textarea, a, [role='button']")
+    ) {
+      return;
+    }
 
-  const shape = [...drawingShapes]
-    .reverse()
-    .find((candidate) => {
-      return !candidate.drawing.locked && isPointInsideDrawingShape(candidate, x, y);
-    });
+    if (measureMode) return;
+    if (event.button !== 0) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-  if (!shape) {
-    if (drawingTool !== "select" || alertToolActive) { return; }
+    const bounds = container.getBoundingClientRect();
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    const shape = [...drawingShapes]
+      .reverse()
+      .find(candidate => !candidate.drawing.locked && isPointInsideDrawingShape(candidate, x, y));
+
+    if (!shape) {
+      if (drawingTool !== "select" || alertToolActive) return;
+      const startX = event.clientX;
+      const startY = event.clientY;
+      measureLongPressTriggeredRef.current = false;
+      clearMeasureLongPressTimer();
+      measureLongPressTimerRef.current = window.setTimeout(() => {
+        const point = measurePointFromClient(startX, startY) ?? initialMeasurePoint();
+        measureLongPressTriggeredRef.current = true;
+        suppressNextChartPointerUpRef.current = true;
+        suppressNextChartClickRef.current = true;
+        suppressNextChartPointRef.current = true;
+        vibrateMeasure();
+        enterMeasureMode(point);
+        measureDragStartRef.current = point
+          ? { pointerX: startX, pointerY: startY, crosshairX: point.x, crosshairY: point.y }
+          : null;
+      }, DRAWING_LONG_PRESS_MS);
+
+      function cleanupMeasureLongPress() {
+        clearMeasureLongPressTimer();
+        measureDragStartRef.current = null;
+        document.removeEventListener("pointermove", onMeasureMove, true);
+        document.removeEventListener("pointerup", onMeasureUp, true);
+        document.removeEventListener("pointercancel", onMeasureCancel, true);
+      }
+
+      function onMeasureMove(e: globalThis.PointerEvent) {
+        if (measureLongPressTriggeredRef.current) {
+          e.preventDefault();
+          e.stopPropagation();
+          updateMeasureCrosshairRelative(e.clientX, e.clientY);
+          return;
+        }
+        if (Math.hypot(e.clientX - startX, e.clientY - startY) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX) {
+          cleanupMeasureLongPress();
+        }
+      }
+
+      function onMeasureUp() { cleanupMeasureLongPress(); }
+      function onMeasureCancel() { cleanupMeasureLongPress(); }
+      document.addEventListener("pointermove", onMeasureMove, { capture: true, passive: false });
+      document.addEventListener("pointerup", onMeasureUp, true);
+      document.addEventListener("pointercancel", onMeasureCancel, true);
+      return;
+    }
+
+    const activeShape = shape;
+    chartPointerDownStartedOnDrawingRef.current = true;
     const startX = event.clientX;
     const startY = event.clientY;
-    measureLongPressTriggeredRef.current = false;
-    clearMeasureLongPressTimer();
-    measureLongPressTimerRef.current = window.setTimeout(() => {
-      const point = measurePointFromClient(startX, startY) ?? initialMeasurePoint();
-      measureLongPressTriggeredRef.current = true;
+    const moveFromBody =
+      activeShape.kind === "rectangle"
+      && isTorumV1OperationZone(activeShape.drawing)
+      && Boolean(onUpdateDrawing);
+    const alreadyEditing = moveFromBody && selectedDrawingId === activeShape.id;
+
+    // While the previous movement is still being persisted, keep the current
+    // optimistic rectangle fixed and do not let a second gesture reuse the old
+    // revision. This avoids a 409/rollback flash to the previous position.
+    if (moveFromBody && draggingDrawingId === activeShape.id) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    let longPress = alreadyEditing;
+    let movedAfterLongPress = false;
+    let lastShape = activeShape;
+    let af: number | null = null;
+    let timer: number | null = null;
+
+    function render(nextShape: DrawingShape) {
+      lastShape = nextShape;
+      if (af !== null) return;
+      af = window.requestAnimationFrame(() => {
+        af = null;
+        draggingDrawingShapeRef.current = lastShape;
+        setDrawingShapes(current => current.map(item => item.id === activeShape.id ? lastShape : item));
+      });
+    }
+
+    function enterEditingMode(vibrate: boolean) {
+      longPress = true;
       suppressNextChartPointerUpRef.current = true;
       suppressNextChartClickRef.current = true;
       suppressNextChartPointRef.current = true;
-      vibrateMeasure();
-      enterMeasureMode(point);
-      measureDragStartRef.current = point
-        ? { pointerX: startX, pointerY: startY, crosshairX: point.x, crosshairY: point.y }
-        : null;
-    }, DRAWING_LONG_PRESS_MS);
+      setSelectedAlertId(null);
+      onSelectDrawing?.(activeShape.id);
 
-    function cleanupMeasureLongPress() {
-      clearMeasureLongPressTimer();
-      measureDragStartRef.current = null;
-      document.removeEventListener("pointermove", onMeasureMove, true);
-      document.removeEventListener("pointerup", onMeasureUp, true);
-      document.removeEventListener("pointercancel", onMeasureCancel, true);
+      if (moveFromBody) {
+        setDrawingDragChartInteractionLocked(true);
+        setDraggingDrawingId(activeShape.id);
+        draggingDrawingShapeRef.current = activeShape;
+      }
+
+      if (vibrate && navigator.vibrate) navigator.vibrate(20);
     }
-    function onMeasureMove(e: globalThis.PointerEvent) {
-      if (measureLongPressTriggeredRef.current) {
-        e.preventDefault();
-        e.stopPropagation();
-        updateMeasureCrosshairRelative(e.clientX, e.clientY);
+
+    if (alreadyEditing) {
+      // Once selected/editing, the rectangle behaves like a normal draggable
+      // object: pointer down + drag anywhere inside moves it immediately.
+      event.preventDefault();
+      event.stopPropagation();
+      enterEditingMode(false);
+    } else {
+      timer = window.setTimeout(() => enterEditingMode(true), DRAWING_LONG_PRESS_MS);
+    }
+
+    function cleanup() {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      document.removeEventListener("pointermove", onMove, true);
+      document.removeEventListener("pointerup", onUp, true);
+      document.removeEventListener("pointercancel", onCancel, true);
+      if (af !== null) {
+        window.cancelAnimationFrame(af);
+        af = null;
+      }
+      if (moveFromBody && longPress) setDrawingDragChartInteractionLocked(false);
+    }
+
+    function onMove(e: globalThis.PointerEvent) {
+      if (!longPress) {
+        if (Math.hypot(e.clientX - startX, e.clientY - startY) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX) {
+          cleanup();
+        }
         return;
       }
-      if (Math.hypot(e.clientX - startX, e.clientY - startY) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX) cleanupMeasureLongPress();
-    }
-    function onMeasureUp() { cleanupMeasureLongPress(); }
-    function onMeasureCancel() { cleanupMeasureLongPress(); }
-    document.addEventListener("pointermove", onMeasureMove, { capture: true, passive: false });
-    document.addEventListener("pointerup", onMeasureUp, true);
-    document.addEventListener("pointercancel", onMeasureCancel, true);
-    return;
-  }
-  chartPointerDownStartedOnDrawingRef.current = true;
-  const startX = event.clientX;const startY = event.clientY;let longPress = false;
-  const tid = window.setTimeout(() => {
-    longPress = true;
-    suppressNextChartPointerUpRef.current = true;
-    suppressNextChartClickRef.current = true;
-    suppressNextChartPointRef.current = true;
-    setSelectedAlertId(null);
-    onSelectDrawing?.(shape.id);
-    if (navigator.vibrate) {navigator.vibrate(20);}
-  }, DRAWING_LONG_PRESS_MS);
 
-  function cleanup() {
-    window.clearTimeout(tid);
-    document.removeEventListener("pointermove", onMove, true);
-    document.removeEventListener("pointerup", onUp, true);
-    document.removeEventListener("pointercancel", onCancel, true);
+      if (!moveFromBody) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      movedAfterLongPress ||= Math.hypot(dx, dy) > 0.5;
+      render(moveDrawingShape(activeShape, dx, dy, "move"));
+    }
+
+    function onUp(e: globalThis.PointerEvent) {
+      if (!longPress || !moveFromBody) {
+        cleanup();
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+      const finalShape = moveDrawingShape(activeShape, e.clientX - startX, e.clientY - startY, "move");
+      cleanup();
+      suppressNextChartPointerUpRef.current = false;
+
+      if (!movedAfterLongPress) {
+        draggingDrawingShapeRef.current = null;
+        setDraggingDrawingId(null);
+        window.requestAnimationFrame(recalculateOverlays);
+        window.setTimeout(() => { suppressNextChartPointRef.current = false; }, 0);
+        return;
+      }
+
+      draggingDrawingShapeRef.current = finalShape;
+      setDrawingShapes(current => current.map(item => item.id === activeShape.id ? finalShape : item));
+      void handleDrawingDragEnd(finalShape);
+    }
+
+    function onCancel() {
+      cleanup();
+      if (longPress && moveFromBody) {
+        suppressNextChartPointerUpRef.current = false;
+        draggingDrawingShapeRef.current = null;
+        setDrawingShapes(current => current.map(item => item.id === activeShape.id ? activeShape : item));
+        setDraggingDrawingId(null);
+        window.requestAnimationFrame(recalculateOverlays);
+        window.setTimeout(() => { suppressNextChartPointRef.current = false; }, 0);
+      }
+    }
+
+    document.addEventListener("pointermove", onMove, { capture: true, passive: false });
+    document.addEventListener("pointerup", onUp, true);
+    document.addEventListener("pointercancel", onCancel, true);
   }
-  function onMove(e: globalThis.PointerEvent) {
-    if (
-      !longPress &&
-      Math.hypot(e.clientX - startX, e.clientY - startY) > DRAWING_LONG_PRESS_MOVE_TOLERANCE_PX
-    ) {cleanup();}}
-  function onUp() {cleanup();}
-  function onCancel() {cleanup();}
-  document.addEventListener("pointermove", onMove, { capture: true, passive: true });document.addEventListener("pointerup", onUp, true);document.addEventListener("pointercancel", onCancel, true);}
 
   function handleChartPointerUp(event: PointerEvent<HTMLDivElement>) {
   if (measureMode) {
@@ -1687,10 +1920,102 @@ export function MarketChart({
   }
 
   function startTpDrag(event: PointerEvent<HTMLDivElement>, line: TradeLineOverlay) {
-    if (line.tone !== "tp" || !line.positionId || !line.editable || !onUpdatePositionTp) return;
-    event.preventDefault(); event.stopPropagation(); setDraggingTpLineId(line.id);
-    const price = priceFromPointer(event);
-    if (price !== null) setDraftTradeLinePrices(cur => ({ ...cur, [line.id]: price }));
+    if (!line.positionId || !line.editable || !onUpdatePositionTp || (line.tone !== "tp" && line.tone !== "entry")) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startPrice = line.price;
+    const positionKey = String(line.positionId);
+    const creatingTp = line.tone === "entry";
+    let moved = false;
+    let lastPrice = startPrice;
+    const movementThresholdPx = 4;
+
+    const clearDraft = () => {
+      if (creatingTp) {
+        setDraftPositionTpPrices(current => {
+          if (!(positionKey in current)) return current;
+          const next = { ...current };
+          delete next[positionKey];
+          return next;
+        });
+        return;
+      }
+      setDraftTradeLinePrices(current => {
+        if (!(line.id in current)) return current;
+        const next = { ...current };
+        delete next[line.id];
+        return next;
+      });
+    };
+    const cleanup = () => {
+      document.removeEventListener("pointermove", onMove, true);
+      document.removeEventListener("pointerup", onUp, true);
+      document.removeEventListener("pointercancel", onCancel, true);
+    };
+    const isValidTpDirection = (candidate: number) => line.side === "SELL"
+      ? candidate < (line.openPrice ?? startPrice)
+      : candidate > (line.openPrice ?? startPrice);
+    const updateDraft = (rawEvent: globalThis.PointerEvent) => {
+      const candidate = priceFromPointer(rawEvent);
+      if (candidate === null) return;
+      lastPrice = candidate;
+      if (creatingTp) {
+        if (isValidTpDirection(candidate)) {
+          setDraftPositionTpPrices(current => ({ ...current, [positionKey]: candidate }));
+        } else {
+          setDraftPositionTpPrices(current => {
+            if (!(positionKey in current)) return current;
+            const next = { ...current };
+            delete next[positionKey];
+            return next;
+          });
+        }
+        return;
+      }
+      setDraftTradeLinePrices(current => ({ ...current, [line.id]: candidate }));
+    };
+    const onMove = (rawEvent: globalThis.PointerEvent) => {
+      if (rawEvent.pointerId !== pointerId) return;
+      if (!moved && Math.hypot(rawEvent.clientX - startX, rawEvent.clientY - startY) >= movementThresholdPx) {
+        moved = true;
+      }
+      if (moved) updateDraft(rawEvent);
+    };
+    const onUp = (rawEvent: globalThis.PointerEvent) => {
+      if (rawEvent.pointerId !== pointerId) return;
+      cleanup();
+      if (!moved) {
+        clearDraft();
+        return;
+      }
+      const candidate = priceFromPointer(rawEvent);
+      if (candidate !== null) lastPrice = candidate;
+      if (!isValidTpDirection(lastPrice)) {
+        clearDraft();
+        return;
+      }
+      const closePrice = line.side === "SELL" ? askPrice : bidPrice;
+      if (creatingTp) {
+        setDraftPositionTpPrices(current => ({ ...current, [positionKey]: lastPrice }));
+      } else {
+        setDraftTradeLinePrices(current => ({ ...current, [line.id]: lastPrice }));
+      }
+      void Promise.resolve(onUpdatePositionTp(line.positionId!, lastPrice, closePrice ?? null))
+        .finally(clearDraft);
+    };
+    const onCancel = (rawEvent: globalThis.PointerEvent) => {
+      if (rawEvent.pointerId !== pointerId) return;
+      cleanup();
+      clearDraft();
+    };
+
+    document.addEventListener("pointermove", onMove, { capture: true, passive: true });
+    document.addEventListener("pointerup", onUp, true);
+    document.addEventListener("pointercancel", onCancel, true);
   }
 
   // â”€â”€ Derived state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1701,7 +2026,7 @@ export function MarketChart({
     ? { kind: "drawing" as const, id: selectedDrawing.id }
     : selectedAlert ? { kind: "alert" as const, id: selectedAlert.id } : null;
   const canToggleTorumZone = canBeTorumV1OperationZone(selectedDrawing) && Boolean(onUpdateDrawing && !selectedDrawing.locked);
-  const canToggleTorumDouble = Boolean(
+  const canCycleTorumMultiplier = Boolean(
     selectedDrawing
     && selectedDrawing.drawing_type === "rectangle"
     && isTorumV1OperationZone(selectedDrawing)
@@ -1738,31 +2063,53 @@ export function MarketChart({
     event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation?.();
     if (!selectedDrawing || !onUpdateDrawing || selectedDrawing.locked || !canBeTorumV1OperationZone(selectedDrawing)) return;
     const enabled = !isTorumV1OperationZone(selectedDrawing);
-    void onUpdateDrawing(selectedDrawing, { metadata: { ...selectedDrawing.metadata, torum_v1_zone_enabled: enabled, zone_type: enabled ? "OPERATION_ZONE" : null, direction: "BUY" } });
+    void onUpdateDrawing(selectedDrawing, {
+      metadata: {
+        ...selectedDrawing.metadata,
+        torum_v1_zone_enabled: enabled,
+        zone_type: enabled ? "OPERATION_ZONE" : null,
+        direction: "BUY",
+        ...(enabled ? {
+          torum_v1_default_multiplier: 1,
+          torum_v1_default_double_enabled: false,
+        } : {}),
+      },
+    });
   }
 
-  function handleTorumDoubleToggle(event: PointerEvent<HTMLButtonElement>) {
+  async function handleTorumMultiplierCycle(event: PointerEvent<HTMLButtonElement>) {
     event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation?.();
     if (
-      !selectedDrawing
+      torumMultiplierUpdatePendingRef.current
+      || !selectedDrawing
       || selectedDrawing.drawing_type !== "rectangle"
       || !isTorumV1OperationZone(selectedDrawing)
       || !onUpdateDrawing
       || selectedDrawing.locked
     ) return;
-    const enabled = !isTorumV1DoubleZone(selectedDrawing);
-    void onUpdateDrawing(selectedDrawing, {
-      metadata: {
-        ...selectedDrawing.metadata,
-        torum_v1_default_double_enabled: enabled,
-      },
-    });
+    const current = torumV1ZoneMultiplier(selectedDrawing);
+    const next: 1 | 2 | 3 = current === 1 ? 2 : current === 2 ? 3 : 1;
+    torumMultiplierUpdatePendingRef.current = true;
+    try {
+      await onUpdateDrawing(selectedDrawing, {
+        metadata: {
+          ...selectedDrawing.metadata,
+          torum_v1_default_multiplier: next,
+          // Keep the legacy x2 bit synchronized so old stored rectangles remain
+          // readable across mixed-version clients. The new integer is canonical.
+          torum_v1_default_double_enabled: next === 2,
+        },
+      });
+    } finally {
+      torumMultiplierUpdatePendingRef.current = false;
+    }
   }
 
   function handleSelectedDeleteButton(event: PointerEvent<HTMLButtonElement>) {
     event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation?.();
     if (selectedDrawing && onDeleteDrawing) {
       const nd = { ...draftDrawingPayloadsRef.current }; delete nd[selectedDrawing.id]; draftDrawingPayloadsRef.current = nd;
+      const nr = { ...draftDrawingBaseRevisionsRef.current }; delete nr[selectedDrawing.id]; draftDrawingBaseRevisionsRef.current = nr;
       if (draggingDrawingShapeRef.current?.id === selectedDrawing.id) draggingDrawingShapeRef.current = null;
       setStyleEditorTarget(null); setDraggingDrawingId(null); onSelectDrawing?.(null); onDeleteDrawing(selectedDrawing.id); return;
     }
@@ -1807,6 +2154,7 @@ export function MarketChart({
     >
       <AthPriceZonesOverlay overlays={athZoneOverlays} />
       <NewsZoneOverlay overlays={overlays} />
+      <AccountStopOutLineOverlay line={accountStopOutLine} symbol={symbol} y={accountStopOutLineY} />
       {torumBackLayerShapes.length > 0 ? (
         <DrawingLayer
           className="drawing-layer--torum-back"
@@ -1834,8 +2182,8 @@ export function MarketChart({
         selectedObject={selectedObject}
         canToggleTorumZone={canToggleTorumZone}
         isTorumZoneActive={selectedDrawing ? isTorumV1OperationZone(selectedDrawing) : false}
-        canToggleTorumDouble={canToggleTorumDouble}
-        isTorumDoubleActive={isTorumV1DoubleZone(selectedDrawing)}
+        canCycleTorumMultiplier={canCycleTorumMultiplier}
+        torumMultiplier={torumV1ZoneMultiplier(selectedDrawing)}
         canStyleSelectedObject={canStyleSelectedObject}
         canDeleteSelectedObject={canDeleteSelectedObject}
         pullbackDebugVisible={pullbackDebugVisible}
@@ -1843,7 +2191,7 @@ export function MarketChart({
         onCenterChart={() => { onAutoFollowChange?.(true); setLocalHardResetToken(c => c + 1); setLocalRecenterToken(c => c + 1); }}
         onPullbackDebugToggle={() => onPullbackDebugToggle?.(!pullbackDebugVisible)}
         onToggleTorumZone={handleTorumZoneToggle}
-        onToggleTorumDouble={handleTorumDoubleToggle}
+        onCycleTorumMultiplier={handleTorumMultiplierCycle}
         onStyleButton={handleSelectedStyleButton}
         onDeleteButton={handleSelectedDeleteButton}
       />

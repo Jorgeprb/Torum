@@ -7,7 +7,7 @@ from app.core.config import get_settings
 from app.news.models import NewsEvent, NewsSettings
 from app.news.normalizer import ensure_utc_datetime, normalize_country, normalize_currency, normalize_impact
 from app.news.providers.csv_provider import CsvNewsProvider
-from app.news.providers.finnhub_provider import FinnhubProvider
+from app.news.providers.torum_calendar_provider import TorumCalendarProvider
 from app.news.providers.json_provider import JsonNewsProvider
 from app.news.repository import get_news_settings, list_news_events
 from app.news.schemas import (
@@ -29,8 +29,8 @@ DEFAULT_CURRENCIES = ["USD"]
 DEFAULT_COUNTRIES = ["US", "United States"]
 DEFAULT_IMPACTS = ["HIGH"]
 DEFAULT_AFFECTED_SYMBOLS = ["XAUUSD", "XAUEUR"]
-DEFAULT_PROVIDER = "FINNHUB"
-DEFAULT_SYNC_INTERVAL_MINUTES = 1440
+DEFAULT_PROVIDER = "TORUM"
+DEFAULT_SYNC_INTERVAL_MINUTES = 360
 DEFAULT_DAYS_AHEAD = 14
 DEFAULT_IMPACT_RULES = {
     "HIGH": {"enabled": True, "minutes_before": 60, "minutes_after": 60, "action": "BLOCK_BOT"},
@@ -190,8 +190,11 @@ class NewsService:
             data["provider_name"] = data["provider"]
         elif "provider_name" in data:
             provider = str(data["provider_name"]).strip().upper()
-            if provider in {"FINNHUB", "MANUAL"}:
+            if provider == "FINNHUB":
+                provider = "TORUM"
+            if provider in {"TORUM", "MANUAL"}:
                 data["provider"] = provider
+                data["provider_name"] = provider
         for field, value in data.items():
             setattr(settings, field, value)
         settings.revision = int(settings.revision or 1) + 1
@@ -257,7 +260,12 @@ class NewsService:
         try:
             provider = self._build_provider(settings)
             end = started_at + timedelta(days=settings.days_ahead)
-            response = self._import_from_provider(provider.fetch_events(started_at, end), provider, filter_settings=settings)
+            raw_events = provider.fetch_events(started_at, end)
+            response = self._import_from_provider(raw_events, provider, filter_settings=settings)
+            warnings = list(getattr(provider, "warnings", []) or [])
+            if bool(getattr(provider, "safe_to_reconcile", False)):
+                self._reconcile_automatic_calendar(provider, raw_events, settings, started_at, end)
+            issues = [*warnings, *response.errors]
             return self._mark_sync_result(
                 settings,
                 provider_name,
@@ -265,7 +273,8 @@ class NewsService:
                 received=response.received,
                 saved=response.saved,
                 zones_generated=response.zones_generated,
-                errors=response.errors,
+                errors=issues,
+                degraded=bool(issues),
             )
         except Exception as exc:
             self.db.rollback()
@@ -323,13 +332,76 @@ class NewsService:
     def _build_provider(self, settings: NewsSettings) -> object:
         app_settings = get_settings()
         provider = settings.provider.upper()
-        if provider == "FINNHUB":
-            return FinnhubProvider(
-                api_key=app_settings.finnhub_api_key.get_secret_value() if app_settings.finnhub_api_key else None,
-                url=app_settings.finnhub_calendar_url,
+        if provider == "FINNHUB":  # legacy setting: migrate in-memory as well
+            provider = "TORUM"
+        if provider == "TORUM":
+            return TorumCalendarProvider(
                 timeout_seconds=app_settings.news_provider_timeout_seconds,
+                bls_ics_url=app_settings.news_bls_ics_url,
+                bea_release_dates_url=app_settings.news_bea_release_dates_url,
+                census_calendar_url=app_settings.news_census_calendar_url,
+                fed_calendar_base_url=app_settings.news_fed_calendar_base_url,
+                fmp_api_key=app_settings.fmp_api_key.get_secret_value() if app_settings.fmp_api_key else None,
+                fmp_url=app_settings.fmp_economic_calendar_url,
             )
         raise ValueError(f"Unsupported provider: {settings.provider}")
+
+    def _reconcile_automatic_calendar(
+        self,
+        provider: object,
+        raw_events: list[dict[str, object]],
+        settings: NewsSettings,
+        start: datetime,
+        end: datetime,
+    ) -> None:
+        """Remove stale automatic events only after all primary sources succeeded.
+
+        Government release schedules can be moved. Keeping a previous event at
+        its old timestamp would create a false trading block. We therefore
+        reconcile the successfully fetched window, while never touching manual
+        imports or deleting data after a partial upstream failure.
+        """
+        expected_ids: set[str] = set()
+        for raw in raw_events:
+            try:
+                normalized = provider.normalize(raw)  # type: ignore[attr-defined]
+                if _event_payload_matches_settings(normalized, settings) and normalized.external_id:
+                    expected_ids.add(normalized.external_id)
+            except Exception:
+                continue
+
+        automatic = list(
+            self.db.scalars(
+                select(NewsEvent).where(
+                    NewsEvent.source == "TORUM_CALENDAR",
+                    NewsEvent.event_time >= start,
+                    NewsEvent.event_time <= end,
+                )
+            )
+        )
+        changed = False
+        for event in automatic:
+            if event.external_id and event.external_id not in expected_ids:
+                self.db.delete(event)
+                changed = True
+
+        # Once TORUM replaces Finnhub, old future Finnhub rows must not keep
+        # duplicate/stale no-trade zones alive. Historical rows are preserved.
+        legacy = list(
+            self.db.scalars(
+                select(NewsEvent).where(
+                    NewsEvent.source == "FINNHUB",
+                    NewsEvent.event_time >= start,
+                    NewsEvent.event_time <= end,
+                )
+            )
+        )
+        for event in legacy:
+            self.db.delete(event)
+            changed = True
+        if changed:
+            self.db.commit()
+            NoTradeZoneService(self.db).regenerate_zones(settings)
 
     def _mark_sync_result(
         self,
@@ -341,10 +413,11 @@ class NewsService:
         saved: int,
         zones_generated: int,
         errors: list[str],
+        degraded: bool = False,
     ) -> NewsProviderSyncResponse:
         finished_at = datetime.now(UTC)
         settings.last_sync_at = finished_at
-        settings.last_sync_status = "ERROR" if errors else "OK"
+        settings.last_sync_status = "DEGRADED" if degraded else ("ERROR" if errors else "OK")
         settings.last_sync_error = "; ".join(errors) if errors else None
         self.db.commit()
         return NewsProviderSyncResponse(

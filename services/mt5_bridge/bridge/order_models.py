@@ -20,6 +20,8 @@ class MarketOrderRequest(BaseModel):
     deviation_points: int = Field(default=20, ge=0)
     magic_number: int = 260426
     comment: str | None = None
+    expected_account_login: int | None = None
+    expected_account_server: str | None = None
 
 
 class BridgeOrderResponse(BaseModel):
@@ -43,6 +45,8 @@ class ClosePositionRequest(BaseModel):
     mode: TradingMode
     magic_number: int | None = None
     fetch_close_deal: bool = False
+    expected_account_login: int | None = None
+    expected_account_server: str | None = None
 
 
 class ModifyPositionTpRequest(BaseModel):
@@ -54,6 +58,8 @@ class ModifyPositionTpRequest(BaseModel):
     sl: float | None = Field(default=None, ge=0)
     magic_number: int | None = None
     comment: str | None = None
+    expected_account_login: int | None = None
+    expected_account_server: str | None = None
 
 
 class ProfitPreviewRequest(BaseModel):
@@ -80,4 +86,17 @@ class OrderExecutionSettingsResponse(BaseModel):
     enabled: bool
     allowed_account_modes: list[str]
     enable_real_trading: bool
+    message: str
+
+
+class AccountSwitchRequest(BaseModel):
+    login: int = Field(gt=0)
+    server: str = Field(min_length=1, max_length=160)
+
+
+class AccountSwitchResponse(BaseModel):
+    ok: bool = True
+    previous_account: dict[str, Any] | None = None
+    account: dict[str, Any]
+    generation: int
     message: str

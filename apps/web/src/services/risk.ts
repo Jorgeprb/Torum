@@ -90,3 +90,37 @@ export function projectRiskCandidate(snapshot: RiskSnapshot | null, volume: numb
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
 }
+
+
+export interface GoldCorrelation {
+  timeframe: string;
+  samples: number;
+  pearson: number | null;
+  beta_xaueur_from_xauusd: number;
+  beta_xauusd_from_xaueur: number;
+  source: string;
+}
+
+export interface StopOutLine {
+  symbol: string;
+  visible: boolean;
+  price: number | null;
+  account_currency: string | null;
+  current_equity: number | null;
+  current_margin: number | null;
+  threshold_equity: number | null;
+  stop_out_mode: "PERCENT" | "MONEY" | null;
+  stop_out_value: number | null;
+  positions_on_symbol: number;
+  gold_positions_total: number;
+  correlated_other_symbol: string | null;
+  projected_other_price: number | null;
+  correlation: GoldCorrelation;
+  estimated: boolean;
+  message: string | null;
+}
+
+export function getStopOutLine(symbol: string): Promise<StopOutLine> {
+  const params = new URLSearchParams({ symbol: symbol.toUpperCase() });
+  return apiRequest<StopOutLine>(`/api/risk/stopout-line?${params.toString()}`);
+}

@@ -82,6 +82,7 @@ export interface TorumV1AssetStatus {
   unlocked_at: string | null;
   blocked_by_news: boolean;
   active_config_id: number | null;
+  manual_override: "LOCKED" | "UNLOCKED" | null;
 }
 
 export interface TorumV1Status {
@@ -429,6 +430,19 @@ export function getStrategyRuns(): Promise<StrategyRun[]> {
 }
 export function getTorumV1Status(): Promise<TorumV1Status> {
   return apiRequest<TorumV1Status>("/api/strategies/torum-v1/status");
+}
+
+export type TorumV1ManualControlAction = "AUTO" | "UNLOCKED" | "LOCKED";
+
+export function setTorumV1ManualLockState(
+  symbol: "XAUUSD" | "XAUEUR",
+  action: TorumV1ManualControlAction
+): Promise<TorumV1Status> {
+  const unlocked = action === "AUTO" ? null : action === "UNLOCKED";
+  return apiRequest<TorumV1Status>("/api/strategies/torum-v1/manual-lock-state", {
+    method: "POST",
+    body: JSON.stringify({ symbol, unlocked })
+  });
 }
 export function getTorumV1Configuration(): Promise<TorumV1Configuration> {
   return apiRequest<TorumV1Configuration>("/api/strategies/torum-v1/configuration");

@@ -1,10 +1,11 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import type { Time } from "lightweight-charts";
-import { AlertTriangle, ArrowDownUp, Bell, CalendarDays, Database, Menu, Minus, MousePointer, Pause, Play, RadioTower, RefreshCw, SeparatorVertical, ShieldAlert, Square, TrendingUp, Type, X } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, Bell, CalendarDays, Database, LockKeyhole, Menu, Minus, MousePointer, Pause, Play, RadioTower, RefreshCw, SeparatorVertical, ShieldAlert, Square, TrendingUp, Type, Unlock, X } from "lucide-react";
 
 import { StatusPill } from "../../components/ui/StatusPill";
 import { MarketChart, type TradeExecutionMarker, type TradeLine, type TradeMarker } from "../chart/MarketChart";
 import { chartDensityChangedEvent, readChartDensity, type ChartDensityOptions } from "../chart/chartDensitySettings";
+import { brokerChartTimeToUtc } from "../chart/chartTime";
 import { DrawingPanel } from "../drawings/DrawingPanel";
 import { DrawingToolbar } from "../drawings/DrawingToolbar";
 import { IndicatorsPanel } from "../indicators/IndicatorsPanel";
@@ -15,6 +16,7 @@ import { SystemStatusModal } from "../admin/SystemStatusModal";
 import { DollarStrengthBadge } from "../marketContext/DollarStrengthBadge";
 import { AccountDrawer, type MobileView } from "../mobile/AccountDrawer";
 import { MobileTopBar } from "../mobile/MobileTopBar";
+import { MobilePageHeader } from "../mobile/MobilePageHeader";
 import { BuyOnlyOrderPanel } from "./BuyOnlyOrderPanel";
 import { OrdersPositionsPanel } from "./OrdersPositionsPanel";
 import { TradingWorkspacePanels } from "./TradingWorkspacePanels";
@@ -83,7 +85,8 @@ import {
 } from "../../services/trading";
 import { type AthPriceZone, type IndicatorLineOutput, type StrategyPullbackDebug, getChartOverlays, getTorumV1Pullbacks, isLineOutput } from "../../services/indicators";
 import { type NoTradeZone } from "../../services/news";
-import { type TorumV1Status, getTorumV1Status } from "../../services/strategies";
+import { type TorumV1ManualControlAction, type TorumV1Status, getTorumV1Status, setTorumV1ManualLockState } from "../../services/strategies";
+import { getStopOutLine, type StopOutLine } from "../../services/risk";
 import {
   type PriceAlertRead,
   cancelPriceAlert,
@@ -657,22 +660,41 @@ function isAbortError(error: unknown): boolean {
     : error instanceof Error && error.name === "AbortError";
 }
 
-function formatHistoryDate(value: string | null): string {
-  if (!value) {
+function formatHistoryDate(value: string | null, timeMsc: number | null | undefined, mode: string): string {
+  if (!value && !timeMsc) {
     return "--";
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  const rawMs = typeof timeMsc === "number" && Number.isFinite(timeMsc)
+    ? timeMsc
+    : value ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(rawMs)) {
     return "--";
   }
 
-  const pad = (part: number) => String(part).padStart(2, "0");
-  return `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  // Live MT5 timestamps are stored in Torum's broker-chart clock domain so
+  // markers line up with the broker candles. History is a human-facing view,
+  // therefore convert that wall clock back to a real instant and display it in
+  // the app's Europe/Madrid timezone. PAPER timestamps are already canonical.
+  const realMs = mode === "PAPER"
+    ? rawMs
+    : brokerChartTimeToUtc(Math.floor(rawMs / 1000)) * 1000;
+  const date = new Date(realMs);
+  return new Intl.DateTimeFormat("es-ES", {
+    day: "2-digit",
+    hour: "2-digit",
+    hour12: false,
+    minute: "2-digit",
+    month: "2-digit",
+    second: "2-digit",
+    timeZone: "Europe/Madrid",
+    year: "numeric"
+  }).format(date).replace(",", "");
 }
 
 interface SplitMarketChartProps {
   accountCurrency: string;
+  accountStopOutLine?: StopOutLine | null;
   alertToolActive: boolean;
   chartSymbols: string[];
   drawingTool: DrawingTool;
@@ -700,6 +722,7 @@ interface SplitMarketChartProps {
 
 function SplitMarketChart({
   accountCurrency,
+  accountStopOutLine = null,
   alertToolActive,
   chartSymbols,
   drawingTool,
@@ -1120,6 +1143,7 @@ function SplitMarketChart({
       </div>
       <div className="chart-split-pane__chart">
         <MarketChart
+          accountStopOutLine={accountStopOutLine}
           alertToolActive={alertToolActive}
           askPrice={latestTick?.ask ?? null}
           autoFollowEnabled
@@ -1187,6 +1211,9 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [tradeExecutionMarkerSettings, setTradeExecutionMarkerSettings] = useState<TradeExecutionMarkerSettings>(() => readTradeExecutionMarkerSettings());
   const [chartDensity, setChartDensity] = useState<ChartDensityOptions>(() => readChartDensity());
   const [torumV1Status, setTorumV1Status] = useState<TorumV1Status | null>(null);
+  const [torumManualControlOpen, setTorumManualControlOpen] = useState(false);
+  const [torumManualConfirmation, setTorumManualConfirmation] = useState<{ symbol: "XAUUSD" | "XAUEUR"; action: TorumV1ManualControlAction } | null>(null);
+  const [torumManualControlBusy, setTorumManualControlBusy] = useState(false);
   const [loadingCandles, setLoadingCandles] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
@@ -1195,6 +1222,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const [resumeGraceUntil, setResumeGraceUntil] = useState(0);
   const [orders, setOrders] = useState<OrderRead[]>([]);
   const [positions, setPositions] = useState<PositionRead[]>([]);
+  const [accountStopOutLines, setAccountStopOutLines] = useState<Record<string, StopOutLine | null>>({ XAUUSD: null, XAUEUR: null });
   const [tradeHistory, setTradeHistory] = useState<TradeHistoryItem[]>([]);
   const [selectedPositionId, setSelectedPositionId] = useState<number | null>(null);
   const [closePositionId, setClosePositionId] = useState<number | null>(null);
@@ -1235,6 +1263,7 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const previousSymbolRef = useRef(selectedSymbol);
   const pendingClosingPositionIdsRef = useRef<Set<number>>(new Set());
   const latestTickBySymbolRef = useRef<Map<string, Tick>>(new Map());
+  const activeMt5AccountRef = useRef<MT5Status["account"]>(null);
   const pendingTickRef = useRef<Tick | null>(null);
   const tickFrameRef = useRef<number | null>(null);
   const tickCounterRef = useRef(0);
@@ -1251,6 +1280,19 @@ export function TradingDashboard({ activeView: controlledActiveView, onActiveVie
   const pullbackOverlayRefreshAtRef = useRef(0);
   const [ticksPerSecond, setTicksPerSecond] = useState(0);
   const activeMobileView = controlledActiveView ?? internalActiveView;
+  const goldOpenExposureKey = useMemo(
+    () =>
+      positions
+        .filter((position) => isReallyOpenPosition(position) && (position.internal_symbol === "XAUUSD" || position.internal_symbol === "XAUEUR"))
+        .map((position) => `${position.id}:${position.internal_symbol}:${position.side}:${position.volume}`)
+        .sort()
+        .join("|"),
+    [positions]
+  );
+
+  useEffect(() => {
+    activeMt5AccountRef.current = mt5Status?.account ?? null;
+  }, [mt5Status?.account?.login, mt5Status?.account?.server]);
 
   function setPendingClosing(positionId: number, pending: boolean) {
     const next = new Set(pendingClosingPositionIdsRef.current);
@@ -1669,6 +1711,58 @@ const tradeExecutionMarkers = useMemo(
   }, [selectedSymbol, mt5Status?.account?.login, mt5Status?.account?.server]);
 
   useEffect(() => {
+    const openSymbols = new Set(
+      positions
+        .filter((position) => isReallyOpenPosition(position))
+        .map((position) => position.internal_symbol)
+        .filter((symbol) => symbol === "XAUUSD" || symbol === "XAUEUR")
+    );
+
+    setAccountStopOutLines((current) => ({
+      XAUUSD: openSymbols.has("XAUUSD") ? current.XAUUSD ?? null : null,
+      XAUEUR: openSymbols.has("XAUEUR") ? current.XAUEUR ?? null : null
+    }));
+
+    if (!appVisible || !mt5Status?.connected_to_mt5 || openSymbols.size === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    let timerId: number | null = null;
+
+    async function refreshStopOutLines() {
+      const symbols = Array.from(openSymbols) as Array<"XAUUSD" | "XAUEUR">;
+      const results = await Promise.allSettled(symbols.map((symbol) => getStopOutLine(symbol)));
+      if (cancelled) {
+        return;
+      }
+      setAccountStopOutLines((current) => {
+        const next = { ...current };
+        results.forEach((result, index) => {
+          const symbol = symbols[index];
+          if (result.status === "fulfilled") {
+            next[symbol] = result.value;
+          }
+        });
+        if (!openSymbols.has("XAUUSD")) next.XAUUSD = null;
+        if (!openSymbols.has("XAUEUR")) next.XAUEUR = null;
+        return next;
+      });
+      if (!cancelled) {
+        timerId = window.setTimeout(() => void refreshStopOutLines(), 5000);
+      }
+    }
+
+    void refreshStopOutLines();
+    return () => {
+      cancelled = true;
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, [appVisible, goldOpenExposureKey, mt5Status?.account?.login, mt5Status?.account?.server, mt5Status?.connected_to_mt5]);
+
+  useEffect(() => {
     void refreshTradingSettings();
     const intervalId = window.setInterval(() => void refreshTradingSettings(), 30000);
     return () => window.clearInterval(intervalId);
@@ -1909,6 +2003,16 @@ useEffect(() => {
     if (message.type === "position_opened" || message.type === "position_closed" || message.type === "position_updated") {
       const eventPosition = message.position;
       if (eventPosition) {
+        const activeAccount = activeMt5AccountRef.current;
+        const eventServer = (eventPosition.account_server ?? "").trim().toLowerCase();
+        const activeServer = (activeAccount?.server ?? "").trim().toLowerCase();
+        const belongsToActiveAccount =
+          eventPosition.mode === "PAPER" ||
+          !activeAccount?.login ||
+          (eventPosition.account_login === activeAccount.login && (!eventServer || eventServer === activeServer));
+        if (!belongsToActiveAccount) {
+          return;
+        }
         tradingMutationVersionRef.current += 1;
         if (message.type === "position_closed" || eventPosition.status === "CLOSED") {
           setPendingClosing(eventPosition.id, false);
@@ -2053,7 +2157,7 @@ useEffect(() => {
     })
   ]);
 }
-  async function refreshTradingData(): Promise<void> {
+  async function refreshTradingData(accountOverride: MT5Status["account"] = mt5Status?.account ?? null): Promise<void> {
     if (tradingRefreshPromiseRef.current) {
       tradingRefreshQueuedRef.current = true;
       return tradingRefreshPromiseRef.current;
@@ -2063,11 +2167,20 @@ useEffect(() => {
     const request = (async () => {
       try {
         const [ordersResponse, openPositionsResponse, historyResponse] = await Promise.all([
-          getOrders(),
-          getPositions({ status: "OPEN", limit: 100 }),
+          getOrders({
+            accountLogin: accountOverride?.login ?? null,
+            accountServer: accountOverride?.server ?? null,
+            limit: 50
+          }),
+          getPositions({
+            status: "OPEN",
+            limit: 100,
+            accountLogin: accountOverride?.login ?? null,
+            accountServer: accountOverride?.server ?? null
+          }),
           getTradeHistory({
-            accountLogin: mt5Status?.account?.login ?? null,
-            accountServer: mt5Status?.account?.server ?? null
+            accountLogin: accountOverride?.login ?? null,
+            accountServer: accountOverride?.server ?? null
           })
         ]);
         if (
@@ -2090,7 +2203,7 @@ useEffect(() => {
         tradingRefreshPromiseRef.current = null;
         if (tradingRefreshQueuedRef.current) {
           tradingRefreshQueuedRef.current = false;
-          void refreshTradingData();
+          void refreshTradingData(accountOverride);
         }
       }
     });
@@ -2109,6 +2222,40 @@ useEffect(() => {
       setTorumV1Status(await getTorumV1Status());
     } catch {
       setTorumV1Status(null);
+    }
+  }
+
+  function openTorumManualControl() {
+    setTorumManualConfirmation(null);
+    setTorumManualControlOpen(true);
+  }
+
+  function closeTorumManualControl() {
+    if (torumManualControlBusy) return;
+    setTorumManualConfirmation(null);
+    setTorumManualControlOpen(false);
+  }
+
+  async function confirmTorumManualControl() {
+    if (!torumManualConfirmation || torumManualControlBusy) return;
+    setTorumManualControlBusy(true);
+    try {
+      const nextStatus = await setTorumV1ManualLockState(
+        torumManualConfirmation.symbol,
+        torumManualConfirmation.action
+      );
+      setTorumV1Status(nextStatus);
+      const actionMessage = torumManualConfirmation.action === "AUTO"
+        ? "vuelve al desbloqueo automático H2/H3"
+        : torumManualConfirmation.action === "UNLOCKED"
+          ? "queda desbloqueado manualmente para la sesión de hoy"
+          : "queda bloqueado manualmente para la sesión de hoy";
+      setTradeMessage(`${torumManualConfirmation.symbol} ${actionMessage}.`);
+      setTorumManualConfirmation(null);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "No se pudo cambiar el bloqueo manual Torum");
+    } finally {
+      setTorumManualControlBusy(false);
     }
   }
 
@@ -2348,6 +2495,10 @@ useEffect(() => {
         );
         setError(requestError instanceof Error ? requestError.message : "No se pudo actualizar el dibujo");
       }
+      // Geometry drags are awaited by MarketChart. Propagate those failures so
+      // it can discard the unconfirmed optimistic coordinates immediately;
+      // style-only mutations keep the existing dashboard-level error handling.
+      if (patch.payload) throw requestError;
     }
   }
 
@@ -2792,7 +2943,7 @@ useEffect(() => {
                         <p>{item.open_price.toFixed(2)} -&gt; {item.current_price?.toFixed(2) ?? valuation.closePrice?.toFixed(2) ?? "--"}</p>
                       </div>
                       <div>
-                        <time>{formatHistoryDate(item.opened_at)}</time>
+                        <time>{formatHistoryDate(item.opened_at, item.open_time_msc, item.mode)}</time>
                         <strong className={isProfit ? "history-money history-money--positive" : "history-money history-money--negative"}>
                           {valuation.estimated ? "≈" : ""}{profit.toFixed(2)}
                         </strong>
@@ -2813,7 +2964,7 @@ useEffect(() => {
                       <dl className="trade-history-row__details">
                         <div>
                           <dt>#{item.mt5_position_ticket ?? item.id}</dt>
-                          <dd>Apertura: {formatHistoryDate(item.opened_at)}</dd>
+                          <dd>Apertura: {formatHistoryDate(item.opened_at, item.open_time_msc, item.mode)}</dd>
                           <dd>Modo: {item.mode}</dd>
                           <dd>Lado: {item.side}</dd>
                         </div>
@@ -2848,7 +2999,7 @@ useEffect(() => {
                         <p>{item.open_price.toFixed(2)} -&gt; {pendingMt5 ? "Sincronizando MT5" : item.close_price?.toFixed(2) ?? "--"}</p>
                       </div>
                       <div>
-                        <time>{formatHistoryDate(item.closed_at ?? item.opened_at)}</time>
+                        <time>{formatHistoryDate(item.closed_at ?? item.opened_at, item.close_time_msc ?? item.open_time_msc, item.mode)}</time>
                         <strong className={isProfit ? "history-money history-money--positive" : "history-money history-money--negative"}>
                           {pendingMt5 ? "--" : profit.toFixed(2)}
                         </strong>
@@ -2858,8 +3009,8 @@ useEffect(() => {
                       <dl className="trade-history-row__details">
                         <div>
                           <dt>#{item.mt5_position_ticket ?? item.position_id}</dt>
-                          <dd>Apertura: {formatHistoryDate(item.opened_at)}</dd>
-                          <dd>Cierre: {formatHistoryDate(item.closed_at)}</dd>
+                          <dd>Apertura: {formatHistoryDate(item.opened_at, item.open_time_msc, item.mode)}</dd>
+                          <dd>Cierre: {formatHistoryDate(item.closed_at, item.close_time_msc, item.mode)}</dd>
                           <dd>Modo: {item.mode}</dd>
                           <dd>Estado: {pendingMt5 ? "CLOSED_PENDING_MT5" : item.status}</dd>
                         </div>
@@ -2983,6 +3134,177 @@ useEffect(() => {
       </div>
     );
   }
+
+  function renderTorumManualControlModal() {
+    if (!torumManualControlOpen) return null;
+
+    if (torumManualConfirmation) {
+      const { action, symbol } = torumManualConfirmation;
+      const actionLabel = action === "AUTO" ? "No actuar" : action === "UNLOCKED" ? "Desbloquear" : "Bloquear";
+      const ActionIcon = action === "AUTO" ? RefreshCw : action === "UNLOCKED" ? Unlock : LockKeyhole;
+      const confirmationText = action === "AUTO"
+        ? "Se eliminará cualquier bloqueo o desbloqueo manual de hoy. Torum volverá a decidir este activo únicamente con su lógica H2/H3 habitual."
+        : action === "UNLOCKED"
+          ? "Se dará por cumplida manualmente la condición de desbloqueo H2/H3 durante la sesión de hoy. El horario y los bloqueos por noticias siguen aplicándose exactamente igual."
+          : "El activo quedará bloqueado manualmente para Torum durante la sesión de hoy, aunque aparezca una vela H2/H3 que lo desbloquearía automáticamente.";
+      return (
+        <div className="modal-backdrop system-modal-backdrop" role="presentation">
+          <div className={`confirm-modal torum-manual-confirm torum-manual-confirm--${action.toLowerCase()}`} role="dialog" aria-modal="true" aria-label={`Confirmar ${actionLabel.toLowerCase()} en ${symbol}`}>
+            <div className="position-close-modal__title">
+              <div className="modal-title-row">
+                <span className="torum-manual-confirm__icon"><ActionIcon size={20} /></span>
+                <div>
+                  <small>Control H2/H3 · {symbol}</small>
+                  <h2>{action === "AUTO" ? "Volver a automático" : `${actionLabel} activo`}</h2>
+                </div>
+              </div>
+              <button aria-label="Cancelar" className="mobile-icon-button" type="button" onClick={() => setTorumManualConfirmation(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p>{confirmationText}</p>
+            <div className="modal-actions">
+              <button className="toolbar-action" disabled={torumManualControlBusy} type="button" onClick={() => setTorumManualConfirmation(null)}>
+                Cancelar
+              </button>
+              <button
+                className={`primary-button torum-manual-confirm__submit torum-manual-confirm__submit--${action.toLowerCase()}`}
+                disabled={torumManualControlBusy}
+                type="button"
+                onClick={() => void confirmTorumManualControl()}
+              >
+                {torumManualControlBusy ? "Aplicando…" : action === "AUTO" ? "Usar automático" : `Confirmar ${actionLabel.toLowerCase()}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="modal-backdrop system-modal-backdrop" role="presentation">
+        <div className="confirm-modal torum-manual-modal" role="dialog" aria-modal="true" aria-label="Control manual de activos Torum">
+          <div className="position-close-modal__title torum-manual-modal__header">
+            <div className="modal-title-row">
+              <span className="torum-manual-modal__title-icon"><LockKeyhole size={20} /></span>
+              <div>
+                <small>Control de desbloqueo H2/H3</small>
+                <h2>Control manual Torum</h2>
+              </div>
+            </div>
+            <button aria-label="Cerrar" className="mobile-icon-button" type="button" onClick={closeTorumManualControl}>
+              <X size={18} />
+            </button>
+          </div>
+          <p className="torum-manual-modal__intro">
+            Elige qué debe hacer Torum con cada activo durante la sesión de hoy. <strong>No actuar</strong> deja que el desbloqueo H2/H3 funcione de forma automática.
+          </p>
+          <div className="torum-manual-assets">
+            {(["XAUUSD", "XAUEUR"] as const).map((symbol) => {
+              const asset = torumV1Status?.assets?.[symbol];
+              const selectedAction: TorumV1ManualControlAction = asset?.manual_override ?? "AUTO";
+              const effectiveUnlocked = asset?.status === "UNLOCKED";
+              return (
+                <section className="torum-manual-asset" key={symbol}>
+                  <div className="torum-manual-asset__head">
+                    <div>
+                      <strong>{symbol}</strong>
+                      <span className={`torum-manual-effective torum-manual-effective--${effectiveUnlocked ? "unlocked" : "locked"}`}>
+                        {effectiveUnlocked ? <Unlock size={13} /> : <LockKeyhole size={13} />}
+                        {effectiveUnlocked ? "Ahora desbloqueado" : "Ahora bloqueado"}
+                      </span>
+                    </div>
+                    <span className={`torum-manual-mode torum-manual-mode--${selectedAction.toLowerCase()}`}>
+                      {selectedAction === "AUTO" ? "Automático" : selectedAction === "UNLOCKED" ? "Manual · desbloqueado" : "Manual · bloqueado"}
+                    </span>
+                  </div>
+                  <div className="torum-manual-options" role="group" aria-label={`Control manual ${symbol}`}>
+                    <button
+                      className={selectedAction === "AUTO" ? "torum-manual-option torum-manual-option--auto is-active" : "torum-manual-option torum-manual-option--auto"}
+                      disabled={torumManualControlBusy}
+                      type="button"
+                      onClick={() => setTorumManualConfirmation({ symbol, action: "AUTO" })}
+                    >
+                      <RefreshCw size={18} />
+                      <span>No actuar</span>
+                      <small>Automático</small>
+                    </button>
+                    <button
+                      className={selectedAction === "UNLOCKED" ? "torum-manual-option torum-manual-option--unlock is-active" : "torum-manual-option torum-manual-option--unlock"}
+                      disabled={torumManualControlBusy}
+                      type="button"
+                      onClick={() => setTorumManualConfirmation({ symbol, action: "UNLOCKED" })}
+                    >
+                      <Unlock size={18} />
+                      <span>Desbloquear</span>
+                      <small>Forzar abierto</small>
+                    </button>
+                    <button
+                      className={selectedAction === "LOCKED" ? "torum-manual-option torum-manual-option--lock is-active" : "torum-manual-option torum-manual-option--lock"}
+                      disabled={torumManualControlBusy}
+                      type="button"
+                      onClick={() => setTorumManualConfirmation({ symbol, action: "LOCKED" })}
+                    >
+                      <LockKeyhole size={18} />
+                      <span>Bloquear</span>
+                      <small>Forzar cerrado</small>
+                    </button>
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+          <div className="modal-actions torum-manual-modal__actions">
+            <button className="toolbar-action" type="button" onClick={closeTorumManualControl}>Cerrar</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  async function handleMt5AccountChanged(status: MT5Status): Promise<void> {
+    // Invalidate in-flight market/trading responses from the previous account
+    // before exposing the new account to the rest of the dashboard.
+    tradingMutationVersionRef.current += 1;
+    tradingRefreshGenerationRef.current += 1;
+    // Detach any old-account refresh promise. Its generation/mutation token was
+    // invalidated above, so it can finish harmlessly without overwriting state.
+    tradingRefreshPromiseRef.current = null;
+    tradingRefreshQueuedRef.current = false;
+    marketGenerationRef.current += 1;
+    activeMarketKeyRef.current = `${selectedSymbol}:${selectedTimeframe}`;
+    candleAbortRef.current?.abort();
+    latestTickBySymbolRef.current.clear();
+    activeMt5AccountRef.current = status.account;
+    pendingTickRef.current = null;
+    pendingClosingPositionIdsRef.current.clear();
+
+    setMt5Status(status);
+    setOrders([]);
+    setPositions([]);
+    setTradeHistory([]);
+    setPendingClosingPositionIds(new Set());
+    setSelectedPositionId(null);
+    setClosePositionId(null);
+    setLatestTick(null);
+    setBackendLatestTick(null);
+    setLastTickTime(null);
+    setTradeMessage(`Cuenta MT5 activa: ${status.account?.login ?? "--"} · ${status.account?.server ?? "--"}`);
+    window.dispatchEvent(new CustomEvent("torum:mt5-account-changed", { detail: status.account }));
+
+    // PositionSyncer is explicitly awakened by the bridge switch. Refresh with
+    // the new account passed explicitly so no React closure can reuse the old
+    // login/server while the state update is being committed.
+    void refreshTradingData(status.account);
+    window.setTimeout(() => void refreshTradingData(status.account), 1200);
+    const generation = marketGenerationRef.current;
+    window.setTimeout(() => {
+      void refreshCandlesAndLatestTick(generation, selectedSymbol, selectedTimeframe);
+      void getMt5Status().then((freshStatus) => {
+        if (generation === marketGenerationRef.current) setMt5Status(freshStatus);
+      });
+    }, 350);
+  }
+
   function handleHardResetChartView() {
   setChartAutoFollowEnabled(true);
   setChartRecenterToken((current) => current + 1);
@@ -3043,39 +3365,42 @@ useEffect(() => {
     <section
       className={`trading-grid trading-grid--view-${activeMobileView} trading-grid--split-${chartSplitOrientation}${spyModeEnabled ? " trading-grid--spy" : ""}`}
     >
-      <MobileTopBar
-        alertToolActive={alertToolActive}
-        chartSplitCount={chartSplitCount}
-        chartSplitOrientation={chartSplitOrientation}
-        chartSymbols={chartSymbols}
-        connected={streamConnectedForUi}
-        connectionStatus={connectionStatusForUi}
-        drawingTool={drawingTool}
-        drawingMenuOpen={drawingMenuOpen}
-        marketClosed={marketClosedWarning}
-        onAlertClick={toggleAlertTool}
-        onChartSplitChange={handleChartSplitChange}
-        onDrawingMenuClick={() => setDrawingMenuOpen((current) => !current)}
-        onMenuClick={() => setDrawerOpen(true)}
-        onSystemStatusClick={() => setSystemStatusOpen(true)}
-        onSymbolChange={handleSymbolChange}
-        onTimeframeChange={handleTimeframeChange}
-        selectedSymbol={selectedSymbol}
-        selectedTimeframe={selectedTimeframe}
-        symbolLabels={strategySymbolLabels}
-        symbolStatusTones={topbarSymbolStatusTones}
-        timeframes={visibleTimeframes}
-      />
+      {activeMobileView === "chart" ? (
+        <MobileTopBar
+          alertToolActive={alertToolActive}
+          assetLockOpen={torumManualControlOpen}
+          chartSymbols={chartSymbols}
+          connected={streamConnectedForUi}
+          connectionStatus={connectionStatusForUi}
+          drawingTool={drawingTool}
+          drawingMenuOpen={drawingMenuOpen}
+          marketClosed={marketClosedWarning}
+          onAlertClick={toggleAlertTool}
+          onAssetLockClick={openTorumManualControl}
+          onDrawingMenuClick={() => setDrawingMenuOpen((current) => !current)}
+          onMenuClick={() => setDrawerOpen(true)}
+          onSystemStatusClick={() => setSystemStatusOpen(true)}
+          onSymbolChange={handleSymbolChange}
+          onTimeframeChange={handleTimeframeChange}
+          selectedSymbol={selectedSymbol}
+          selectedTimeframe={selectedTimeframe}
+          symbolLabels={strategySymbolLabels}
+          symbolStatusTones={topbarSymbolStatusTones}
+          timeframes={visibleTimeframes}
+        />
+      ) : (
+        <MobilePageHeader activeView={activeMobileView} onMenuClick={() => setDrawerOpen(true)} />
+      )}
       <AccountDrawer
         activeView={activeMobileView}
-        backendOk={!error}
-        marketSource={sourceLabel}
         mt5Status={mt5Status}
+        onAccountChanged={handleMt5AccountChanged}
         onClose={() => setDrawerOpen(false)}
         onNavigate={setActiveMobileView}
         open={drawerOpen}
       />
       <SystemStatusModal open={systemStatusOpen} onClose={() => setSystemStatusOpen(false)} />
+      {renderTorumManualControlModal()}
       <div className={drawingMenuOpen ? "mobile-drawing-menu mobile-drawing-menu--open" : "mobile-drawing-menu"}>
         {mobileDrawingTools.map((tool) => (
           <button
@@ -3133,6 +3458,15 @@ useEffect(() => {
             </button>
           ))}
         </div>
+
+        <button
+          className={torumManualControlOpen ? "toolbar-action toolbar-action--active" : "toolbar-action"}
+          type="button"
+          onClick={openTorumManualControl}
+        >
+          <LockKeyhole size={18} />
+          Bloqueo activos
+        </button>
 
         <button className="toolbar-action" type="button" onClick={handleMockToggle}>
           {mockStatus?.running ? <Pause size={18} /> : <Play size={18} />}
@@ -3212,6 +3546,7 @@ useEffect(() => {
             ) : null}
             <div className="chart-shell">
           <MarketChart
+            accountStopOutLine={accountStopOutLines[selectedSymbol] ?? null}
             candles={candles}
             loadingCandles={loadingCandles}
             preferredBarSpacing={chartDensity.barSpacing}
@@ -3276,6 +3611,7 @@ useEffect(() => {
           {secondaryCharts.slice(0, chartSplitCount - 1).map((chart, index) => (
             <SplitMarketChart
               accountCurrency={accountCurrency}
+              accountStopOutLine={accountStopOutLines[chart.symbol] ?? null}
               alertToolActive={alertToolActive}
               chartSymbols={chartSymbols}
               drawingTool={drawingTool}

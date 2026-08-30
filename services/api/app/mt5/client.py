@@ -84,6 +84,14 @@ class MT5BridgeClient:
         response = self._request("POST", "/orders/market", json=payload)
         return response if isinstance(response, dict) else {}
 
+    def switch_account(self, login: int, server: str) -> dict[str, Any]:
+        payload = self._request("POST", "/accounts/switch", json={"login": login, "server": server})
+        return payload if isinstance(payload, dict) else {}
+
+    def discover_accounts(self) -> list[dict[str, Any]]:
+        payload = self._request("GET", "/accounts/discover")
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
     def get_positions(self) -> list[dict[str, Any]]:
         response = self._request("GET", "/positions")
         return response if isinstance(response, list) else []
@@ -92,9 +100,22 @@ class MT5BridgeClient:
         response = self._request("POST", f"/positions/{ticket}/close", json=payload)
         return response if isinstance(response, dict) else {}
 
-    def get_close_deal(self, ticket: int, deal: int | None = None) -> dict[str, Any]:
-        params = {"deal": str(deal)} if deal is not None else None
-        response = self._request("GET", f"/positions/{ticket}/close-deal", params=params)
+    def get_close_deal(
+        self,
+        ticket: int,
+        deal: int | None = None,
+        *,
+        expected_account_login: int | None = None,
+        expected_account_server: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, str] = {}
+        if deal is not None:
+            params["deal"] = str(deal)
+        if expected_account_login is not None:
+            params["expected_account_login"] = str(expected_account_login)
+        if expected_account_server:
+            params["expected_account_server"] = expected_account_server
+        response = self._request("GET", f"/positions/{ticket}/close-deal", params=params or None)
         return response if isinstance(response, dict) else {}
 
     def modify_position_tp(self, ticket: int, payload: dict[str, Any]) -> dict[str, Any]:

@@ -145,8 +145,10 @@ class NewsSettingsUpdate(BaseModel):
             self.affected_symbols = [value.strip().upper() for value in self.affected_symbols if value.strip()]
         if self.provider is not None:
             self.provider = self.provider.strip().upper()
-            if self.provider not in {"FINNHUB", "MANUAL"}:
-                raise ValueError("provider must be FINNHUB or MANUAL")
+            if self.provider == "FINNHUB":
+                self.provider = "TORUM"
+            if self.provider not in {"TORUM", "MANUAL"}:
+                raise ValueError("provider must be TORUM or MANUAL")
         return self
 
 

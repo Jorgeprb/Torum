@@ -20,7 +20,7 @@ from app.strategies.ath import ath_price_zones, get_or_update_symbol_ath, set_sy
 from app.strategies.models import StrategyConfig, StrategySignal
 from app.strategies.notifications import send_torum_v1_unlock_notifications
 from app.strategies.repository import get_global_strategy_settings
-from app.strategies.runner import StrategyRunner, _record_torum_v1_executed_entry_cycle, _torum_v1_desired_multiplier_for_ath_zone
+from app.strategies.runner import StrategyRunner, _record_torum_v1_executed_entry_cycle, _release_torum_v1_signal_attempt, _torum_v1_desired_multiplier_for_ath_zone
 from app.strategies.schemas import StrategyConfigCreate, StrategyConfigUpdate
 from app.strategies.service import StrategyCatalogService
 from app.strategies.torum_v1_config import TorumV1Params
@@ -296,6 +296,74 @@ def test_xaueur_2h_bullish_unlocks() -> None:
     assert status.reason == "bullish_closed_candle"
 
 
+def test_manual_unlock_bypasses_only_h2_h3_requirement_for_current_session_day() -> None:
+    db = _session()
+    config = _config(db, "XAUEUR", "H2")
+    config.params_json = {
+        **config.params_json,
+        "manual_unlock_override": "UNLOCKED",
+        "manual_unlock_override_day": "2026-05-01",
+    }
+    db.commit()
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
+
+    assert status.status == "UNLOCKED"
+    assert status.reason == "manual_unlock"
+    assert status.manual_override == "UNLOCKED"
+
+
+def test_manual_lock_overrides_an_automatic_bullish_unlock_for_current_session_day() -> None:
+    db = _session()
+    config = _config(db, "XAUEUR", "H2")
+    config.params_json = {
+        **config.params_json,
+        "manual_unlock_override": "LOCKED",
+        "manual_unlock_override_day": "2026-05-01",
+    }
+    _two_hour_window(db, "XAUEUR", _madrid(1, 9), open_=100, close=110, low=99, previous_low=90)
+    db.commit()
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 11, 5)).assets["XAUEUR"]
+
+    assert status.status == "LOCKED"
+    assert status.reason == "manual_lock"
+    assert status.manual_override == "LOCKED"
+
+
+def test_manual_unlock_does_not_bypass_session_hours() -> None:
+    db = _session()
+    config = _config(db, "XAUEUR", "H2")
+    config.params_json = {
+        **config.params_json,
+        "manual_unlock_override": "UNLOCKED",
+        "manual_unlock_override_day": "2026-05-01",
+    }
+    db.commit()
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(1, 15, 0)).assets["XAUEUR"]
+
+    assert status.status == "LOCKED"
+    assert status.reason == "outside_session"
+    assert status.manual_override == "UNLOCKED"
+
+
+def test_manual_unlock_expires_automatically_on_the_next_madrid_day() -> None:
+    db = _session()
+    config = _config(db, "XAUEUR", "H2")
+    config.params_json = {
+        **config.params_json,
+        "manual_unlock_override": "UNLOCKED",
+        "manual_unlock_override_day": "2026-05-01",
+    }
+    db.commit()
+
+    status = TorumV1StatusService(db).status_for_user(1, _madrid(2, 11, 5)).assets["XAUEUR"]
+
+    assert status.status == "LOCKED"
+    assert status.manual_override is None
+
+
 
 
 def test_xaueur_2h_doji_unlocks_even_with_min_body_filter() -> None:
@@ -537,6 +605,54 @@ def test_news_active_blocks_bot_but_manual_can_open() -> None:
     assert manual.allowed is True
     assert bot.allowed is False
     assert "noticia" in "; ".join(bot.reasons).lower()
+
+
+
+def test_manual_order_ignores_torum_asset_lock() -> None:
+    db = _session()
+    config = _config(db, "XAUUSD", "H2")
+    # No valid H2/H3 unlock candle exists, so Torum automatic status is locked.
+    status = TorumV1StatusService(db).asset_status("XAUUSD", config, True, _madrid(1, 18, 0))
+    assert status.status == "LOCKED"
+
+    trading_settings = db.query(TradingSettings).one()
+    symbol_mapping = db.query(SymbolMapping).filter(SymbolMapping.internal_symbol == "XAUUSD").one()
+    order = ManualOrderRequest(internal_symbol="XAUUSD", side="BUY", volume=0.01)
+    mt5_status = SimpleNamespace(connected_to_mt5=False, updated_at=None, account_trade_mode="UNKNOWN")
+
+    # Manual execution deliberately does not call evaluate_strategy_order(), so
+    # H2/H3/manual-lock state cannot veto a user's BUY.
+    manual = RiskManager(db).evaluate(order, trading_settings, symbol_mapping, mt5_status, 120)
+    assert manual.allowed is True
+
+
+def test_definitive_failed_order_releases_torum_signal_attempt_for_retry() -> None:
+    db = _session()
+    config = _config(db, "XAUUSD", "H2")
+    confirmation = int(_madrid(1, 18, 30).timestamp())
+    config.params_json = {
+        **(config.params_json or {}),
+        "last_signal_candle_time": confirmation,
+        "last_signal_pullback_low_time": confirmation - 300,
+        "last_signal_operation_zone_id": "zone-1",
+    }
+    signal = StrategySignal(
+        strategy_config_id=config.id,
+        strategy_key="torum_v1",
+        user_id=1,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        signal_type="ENTRY",
+        side="BUY",
+        reason="test",
+        metadata_json={"confirmation_candle_time": confirmation},
+    )
+
+    _release_torum_v1_signal_attempt(config, signal)
+
+    assert "last_signal_candle_time" not in config.params_json
+    assert "last_signal_pullback_low_time" not in config.params_json
+    assert "last_signal_operation_zone_id" not in config.params_json
 
 
 def test_daily_reset_yesterday_unlock_does_not_unlock_today() -> None:
@@ -1036,6 +1152,39 @@ def test_pullback_detected_bullish_inside_zone_buy() -> None:
 
     assert decision.should_buy is True
     assert decision.zone is zone
+
+
+def test_torum_buy_zone_extends_below_rectangle_lower_edge() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    # The rectangle is visually 100.0-101.0, but for a BUY Torum zone the
+    # upper edge (101.0) is the only vertical boundary. Both the pullback low
+    # and the executable confirmation price are below the visual lower edge.
+    zone = TorumV1OperationZone(
+        "z1",
+        "rectangle",
+        int(_madrid(1, 9).timestamp()),
+        int(_madrid(1, 10).timestamp()),
+        100.0,
+        101.0,
+    )
+
+    decision = should_buy_torum_v1(
+        symbol="XAUUSD",
+        candles_m5=candles,
+        operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.2, "pullback_lookback_bars": 12},
+        now=_madrid(1, 9, 16),
+        current_price=99.9,
+    )
+
+    assert decision.should_buy is True
+    assert decision.zone is zone
+    assert decision.metadata is not None
+    assert decision.metadata["confirmation_price_inside_operation_zone"] is True
 
 
 def test_current_broker_clock_prevents_three_hour_old_confirmation_entry() -> None:
@@ -1560,6 +1709,12 @@ def test_no_support_is_simple_even_if_s1_multiplier_was_customized() -> None:
         params={"support_s1_multiplier": 3},
         zone_default_multiplier=2,
     ) == 2
+    assert desired_multiplier_for_support(
+        None,
+        [],
+        params={"support_s1_multiplier": 1},
+        zone_default_multiplier=3,
+    ) == 3
 
 
 def test_rectangle_not_activated_does_not_count() -> None:
@@ -1612,6 +1767,68 @@ def test_rectangle_torum_zone_can_request_x2_and_legacy_manual_zone_is_ignored()
 
     assert [zone.drawing_id for zone in zones] == ["rectangle-x2"]
     assert zones[0].default_multiplier == 2
+
+
+def test_rectangle_torum_zone_can_request_x3_with_new_multiplier_metadata() -> None:
+    drawing = ChartDrawing(
+        id="rectangle-x3",
+        user_id=1,
+        internal_symbol="XAUUSD",
+        timeframe="M5",
+        drawing_type="rectangle",
+        name=None,
+        payload_json={
+            "time1": int(_madrid(1, 9).timestamp()),
+            "time2": int(_madrid(1, 10).timestamp()),
+            "price1": 99.0,
+            "price2": 101.0,
+        },
+        style_json={},
+        metadata_json={
+            "torum_v1_zone_enabled": True,
+            "torum_v1_default_multiplier": 3,
+            "direction": "BUY",
+        },
+        locked=False,
+        visible=True,
+        source="MANUAL",
+    )
+
+    zones = operation_zones_from_drawings([drawing])
+
+    assert len(zones) == 1
+    assert zones[0].default_multiplier == 3
+
+
+def test_rectangle_torum_zone_x3_applies_without_support_and_support_keeps_precedence() -> None:
+    candles = [
+        _m5_candle(_madrid(1, 9), 100.0, 100.0, 99.9, 99.95),
+        _m5_candle(_madrid(1, 9, 5), 99.95, 99.96, 99.7, 99.8),
+        _m5_candle(_madrid(1, 9, 10), 99.8, 99.95, 99.75, 99.9),
+    ]
+    zone = TorumV1OperationZone(
+        "rectangle-x3", "rectangle",
+        int(_madrid(1, 9).timestamp()), int(_madrid(1, 10).timestamp()),
+        99.0, 101.0, default_multiplier=3,
+    )
+    no_support = should_buy_torum_v1(
+        symbol="XAUUSD", candles_m5=candles, operation_zones=[zone],
+        params={"pullback_entry_min_pct": 0.20},
+        now=_madrid(1, 9, 16), current_price=99.9,
+    )
+    s2 = TorumV1SupportZone(
+        drawing_id="s2", level=2, price=99.9, lower_price=99.7, upper_price=100.0, opacity=0.2,
+    )
+    with_support = should_buy_torum_v1(
+        symbol="XAUUSD", candles_m5=candles, operation_zones=[zone], support_zones=[s2],
+        params={"pullback_entry_min_pct": 0.20},
+        now=_madrid(1, 9, 16), current_price=99.9,
+    )
+
+    assert no_support.should_buy is True
+    assert no_support.metadata is not None and no_support.metadata["desired_multiplier"] == 3
+    assert with_support.should_buy is True
+    assert with_support.metadata is not None and with_support.metadata["desired_multiplier"] == 2
 
 
 def test_rectangle_torum_zone_x2_applies_only_without_visual_support() -> None:

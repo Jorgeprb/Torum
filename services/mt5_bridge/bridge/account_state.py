@@ -15,6 +15,10 @@ class AccountState:
     equity: float | None = None
     margin: float | None = None
     margin_free: float | None = None
+    margin_level: float | None = None
+    margin_so_mode: int | None = None
+    margin_so_call: float | None = None
+    margin_so_so: float | None = None
     leverage: int | None = None
     trade_mode: AccountTradeMode = "UNKNOWN"
 
@@ -64,6 +68,10 @@ def account_state_from_mt5(account_info: Any) -> AccountState:
         equity=data.get("equity"),
         margin=data.get("margin"),
         margin_free=data.get("margin_free"),
+        margin_level=data.get("margin_level"),
+        margin_so_mode=data.get("margin_so_mode"),
+        margin_so_call=data.get("margin_so_call"),
+        margin_so_so=data.get("margin_so_so"),
         leverage=data.get("leverage"),
         trade_mode=detect_trade_mode(data),
     )

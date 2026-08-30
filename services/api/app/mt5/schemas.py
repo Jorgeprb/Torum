@@ -16,6 +16,10 @@ class MT5AccountPayload(BaseModel):
     equity: float | None = None
     margin: float | None = None
     margin_free: float | None = None
+    margin_level: float | None = None
+    margin_so_mode: int | None = None
+    margin_so_call: float | None = None
+    margin_so_so: float | None = None
     leverage: int | None = None
     trade_mode: AccountTradeMode = "UNKNOWN"
 
@@ -25,6 +29,8 @@ class MT5StatusPayload(BaseModel):
     connected_to_backend: bool = True
     account_trade_mode: AccountTradeMode = "UNKNOWN"
     account: MT5AccountPayload | None = None
+    terminal_trade_allowed: bool | None = None
+    terminal_tradeapi_disabled: bool | None = None
     active_symbols: list[str] = Field(default_factory=list)
     last_tick_time_by_symbol: dict[str, datetime] = Field(default_factory=dict)
     ticks_sent_total: int = 0
@@ -77,3 +83,42 @@ class MT5PositionsSyncRead(BaseModel):
     capital_flows_received: int = 0
     capital_flows_created: int = 0
     changed_positions: list[dict] = Field(default_factory=list)
+
+
+class SavedMT5AccountCreate(BaseModel):
+    alias: str | None = Field(default=None, max_length=120)
+    login: int = Field(gt=0)
+    server: str = Field(min_length=1, max_length=160)
+
+
+class SavedMT5AccountUpdate(BaseModel):
+    alias: str = Field(min_length=1, max_length=120)
+
+
+class SavedMT5AccountRead(BaseModel):
+    id: int
+    alias: str
+    login: int
+    server: str
+    last_trade_mode: AccountTradeMode | None = None
+    last_company: str | None = None
+    last_currency: str | None = None
+    last_connected_at: datetime | None = None
+    active: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class MT5DiscoveredAccountRead(BaseModel):
+    login: int
+    server: str
+    active: bool = False
+    already_saved: bool = False
+    source: Literal["CURRENT", "TERMINAL_DATA"] = "TERMINAL_DATA"
+
+
+class MT5AccountSwitchRead(BaseModel):
+    ok: bool = True
+    account: SavedMT5AccountRead
+    mt5_status: MT5StatusRead
+    message: str

@@ -146,6 +146,14 @@ class TorumV1AssetStatusRead(BaseModel):
     unlocked_at: datetime | None
     blocked_by_news: bool
     active_config_id: int | None
+    manual_override: Literal["LOCKED", "UNLOCKED"] | None = None
+
+
+class TorumV1ManualLockStateUpdate(BaseModel):
+    symbol: Literal["XAUEUR", "XAUUSD"]
+    # True = force H2/H3 unlocked, False = force locked, None = remove the
+    # manual override and return to the normal automatic H2/H3 decision.
+    unlocked: bool | None
 
 
 class TorumV1StatusRead(BaseModel):

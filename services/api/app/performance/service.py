@@ -16,8 +16,20 @@ from app.mt5.schemas import MT5AccountPayload
 from app.mt5.status_store import mt5_status_store
 from app.orders.models import Order
 from app.performance.models import CapitalMovement
-from app.performance.schemas import CapitalMovementCreate, CapitalMovementRead, MonthlyPerformance, PerformancePoint, PerformanceSummary
+from app.performance.schemas import (
+    CapitalMovementCreate,
+    CapitalMovementRead,
+    DailyPerformance,
+    DailyTradePerformance,
+    MonthlyPerformance,
+    PerformanceBreakdown,
+    PerformancePoint,
+    PerformanceSummary,
+)
 from app.positions.models import Position
+from app.settings.trading_service import get_global_trading_settings
+from app.strategies.models import StrategySignal
+from app.trading.lot_sizing import calculate_lot_size
 from app.users.models import User, UserRole
 
 _MADRID = ZoneInfo("Europe/Madrid")
@@ -27,8 +39,15 @@ _EPSILON = 1e-9
 @dataclass(frozen=True)
 class _ProfitEvent:
     time: datetime
-    amount: float
+    amount: float | None
     position_id: int
+    symbol: str
+    multiplier: int
+    volume: float
+    side: str
+    opened_at: datetime
+    open_price: float
+    close_price: float | None
 
 
 @dataclass(frozen=True)
@@ -49,9 +68,9 @@ class _AccountScope:
 
 
 class PerformanceService:
-    """Torum-v1 realized performance with cash-flow-neutral percentage returns.
+    """Account realized performance with cash-flow-neutral percentage returns.
 
-    Percentage performance is time-weighted over realized strategy P/L events.
+    Percentage performance is time-weighted over finalized closed-trade P/L events.
     External deposits, withdrawals and MT5 balance adjustments change the
     capital base but contribute zero return, so adding money cannot inflate the
     displayed strategy percentage.
@@ -229,8 +248,9 @@ class PerformanceService:
             raise ValueError("to_time must be after from_time")
 
         scope = self._account_scope(user)
-        profits, pending = self._profit_events(user, scope)
         movements = self._movement_events(user, scope)
+        closed_events = self._profit_events(user, scope, movements)
+        profits = [event for event in closed_events if event.amount is not None]
         calculation = self._calculate_window(start, end, profits, movements, scope.current_balance)
 
         months: list[MonthlyPerformance] = []
@@ -242,9 +262,10 @@ class PerformanceService:
             month_end = min(end, next_local.astimezone(UTC) - timedelta(microseconds=1))
             if month_end >= month_start:
                 month_calc = self._calculate_window(month_start, month_end, profits, movements, scope.current_balance)
-                month_profit_events = [event for event in profits if month_start <= event.time <= month_end]
-                wins = sum(1 for event in month_profit_events if event.amount > 0)
-                losses = sum(1 for event in month_profit_events if event.amount < 0)
+                month_events = [event for event in closed_events if month_start <= event.time <= month_end]
+                month_profits = [event for event in month_events if event.amount is not None]
+                wins = sum(1 for event in month_profits if (event.amount or 0.0) > 0)
+                losses = sum(1 for event in month_profits if (event.amount or 0.0) < 0)
                 months.append(
                     MonthlyPerformance(
                         key=cursor_local.strftime("%Y-%m"),
@@ -254,19 +275,28 @@ class PerformanceService:
                         return_pct=month_calc["return_pct"],
                         net_profit=month_calc["net_profit"],
                         cash_flow=month_calc["cash_flow"],
-                        trades=len(month_profit_events),
+                        trades=len(month_events),
+                        pending=sum(1 for event in month_events if event.amount is None),
                         wins=wins,
                         losses=losses,
                     )
                 )
             cursor_local = next_local
 
-        period_profits = [event for event in profits if start <= event.time <= end]
-        gross_profit = sum(event.amount for event in period_profits if event.amount > 0)
-        gross_loss = sum(event.amount for event in period_profits if event.amount < 0)
-        wins = sum(1 for event in period_profits if event.amount > 0)
-        losses = sum(1 for event in period_profits if event.amount < 0)
+        period_events = [event for event in closed_events if start <= event.time <= end]
+        period_profits = [event for event in period_events if event.amount is not None]
+        gross_profit = sum(float(event.amount) for event in period_profits if float(event.amount) > 0)
+        gross_loss = sum(float(event.amount) for event in period_profits if float(event.amount) < 0)
+        wins = sum(1 for event in period_profits if float(event.amount) > 0)
+        losses = sum(1 for event in period_profits if float(event.amount) < 0)
+        finalized_count = len(period_profits)
         best_month = max((month for month in months if month.return_pct is not None), key=lambda item: item.return_pct or -math.inf, default=None)
+
+        days = self._daily_performance(start, end, period_events, profits, movements, scope.current_balance)
+        active_days = [day for day in days if day.trades > day.pending]
+        best_day = max((day for day in active_days if day.return_pct is not None), key=lambda item: item.return_pct or -math.inf, default=None)
+        worst_day = min((day for day in active_days if day.return_pct is not None), key=lambda item: item.return_pct or math.inf, default=None)
+        max_win_streak, max_loss_streak, current_streak_type, current_streak = _streaks(period_profits)
 
         movement_rows = [
             self._movement_read(movement, user)
@@ -287,20 +317,97 @@ class PerformanceService:
             capital_end=calculation["capital_end"],
             current_balance=scope.current_balance,
             reconciliation_difference=calculation["reconciliation_difference"],
-            trades=len(period_profits),
+            trades=len(period_events),
             wins=wins,
             losses=losses,
-            win_rate_pct=(wins / len(period_profits) * 100.0) if period_profits else None,
+            win_rate_pct=(wins / finalized_count * 100.0) if finalized_count else None,
             max_drawdown_pct=calculation["max_drawdown_pct"],
+            profit_factor=(gross_profit / abs(gross_loss)) if gross_loss < -_EPSILON else None,
+            expectancy=(calculation["net_profit"] / finalized_count) if finalized_count else None,
+            average_win=(gross_profit / wins) if wins else None,
+            average_loss=(gross_loss / losses) if losses else None,
+            best_trade=max((float(event.amount) for event in period_profits), default=None),
+            worst_trade=min((float(event.amount) for event in period_profits), default=None),
+            profitable_days=sum(1 for day in active_days if day.net_profit > _EPSILON),
+            losing_days=sum(1 for day in active_days if day.net_profit < -_EPSILON),
+            best_day_pct=best_day.return_pct if best_day else None,
+            worst_day_pct=worst_day.return_pct if worst_day else None,
+            best_day_profit=max((day.net_profit for day in active_days), default=None),
+            worst_day_profit=min((day.net_profit for day in active_days), default=None),
+            max_win_streak=max_win_streak,
+            max_loss_streak=max_loss_streak,
+            current_streak_type=current_streak_type,
+            current_streak=current_streak,
             best_month_key=best_month.key if best_month else None,
             best_month_return_pct=best_month.return_pct if best_month else None,
             basis_source=calculation["basis_source"],
             basis_note=calculation["basis_note"],
-            pending_trades=pending,
+            pending_trades=sum(1 for event in period_events if event.amount is None),
             points=calculation["points"],
+            days=days,
             months=months,
+            multiplier_breakdown=_breakdown(period_events, key=lambda event: f"x{event.multiplier}", labels={"x1": "Simple · x1", "x2": "Doble · x2", "x3": "Triple · x3"}, order=("x1", "x2", "x3")),
+            symbol_breakdown=_breakdown(period_events, key=lambda event: event.symbol, labels={"XAUUSD": "XAUUSD", "XAUEUR": "XAUEUR"}, order=("XAUUSD", "XAUEUR")),
             capital_movements=movement_rows,
         )
+
+    def _daily_performance(
+        self,
+        start: datetime,
+        end: datetime,
+        period_events: list[_ProfitEvent],
+        all_profits: list[_ProfitEvent],
+        movements: list[_CashEvent],
+        current_balance: float | None,
+    ) -> list[DailyPerformance]:
+        grouped: dict[object, list[_ProfitEvent]] = defaultdict(list)
+        for event in period_events:
+            grouped[event.time.astimezone(_MADRID).date()].append(event)
+
+        rows: list[DailyPerformance] = []
+        for day_key in sorted(grouped):
+            local_start = datetime.combine(day_key, datetime.min.time(), tzinfo=_MADRID)
+            local_end = local_start + timedelta(days=1) - timedelta(microseconds=1)
+            day_start = max(start, local_start.astimezone(UTC))
+            day_end = min(end, local_end.astimezone(UTC))
+            day_events = sorted(grouped[day_key], key=lambda event: (event.time, event.position_id))
+            day_profits = [event for event in day_events if event.amount is not None]
+            day_calc = self._calculate_window(day_start, day_end, all_profits, movements, current_balance)
+            details = [
+                DailyTradePerformance(
+                    position_id=event.position_id,
+                    symbol=event.symbol,
+                    multiplier=event.multiplier,
+                    volume=event.volume,
+                    side=event.side,
+                    opened_at=event.opened_at,
+                    closed_at=event.time,
+                    open_price=event.open_price,
+                    close_price=event.close_price,
+                    net_profit=float(event.amount) if event.amount is not None else None,
+                    pending=event.amount is None,
+                    duration_minutes=max(0.0, (event.time - event.opened_at).total_seconds() / 60.0),
+                )
+                for event in day_events
+            ]
+            rows.append(
+                DailyPerformance(
+                    date=day_key,
+                    return_pct=day_calc["return_pct"],
+                    net_profit=sum(float(event.amount) for event in day_profits),
+                    trades=len(day_events),
+                    pending=sum(1 for event in day_events if event.amount is None),
+                    wins=sum(1 for event in day_profits if float(event.amount) > 0),
+                    losses=sum(1 for event in day_profits if float(event.amount) < 0),
+                    x1=sum(1 for event in day_events if event.multiplier == 1),
+                    x2=sum(1 for event in day_events if event.multiplier == 2),
+                    x3=sum(1 for event in day_events if event.multiplier == 3),
+                    xauusd=sum(1 for event in day_events if event.symbol == "XAUUSD"),
+                    xaueur=sum(1 for event in day_events if event.symbol == "XAUEUR"),
+                    trades_detail=details,
+                )
+            )
+        return rows
 
     def _account_scope(self, user: User) -> _AccountScope:
         status = mt5_status_store.get()
@@ -315,13 +422,10 @@ class PerformanceService:
                 mode=mode,
             )
 
-        stmt = (
-            select(Position)
-            .join(Order, Order.id == Position.order_id)
-            .where(Order.source == "STRATEGY", Order.strategy_key == "torum_v1")
-            .order_by(Position.closed_at.desc().nullslast(), Position.opened_at.desc())
-            .limit(1)
-        )
+        # When MT5 is temporarily disconnected, keep the last account scope
+        # based on the newest position regardless of whether it was opened by
+        # the bot, manually from Torum, or directly in MetaTrader.
+        stmt = select(Position).order_by(Position.closed_at.desc().nullslast(), Position.opened_at.desc()).limit(1)
         if user.role != UserRole.admin:
             stmt = stmt.where(Position.user_id == user.id)
         position = self.db.scalar(stmt)
@@ -335,39 +439,91 @@ class PerformanceService:
             mode=position.mode if position.mode in {"LIVE", "DEMO"} else None,
         )
 
-    def _profit_events(self, user: User, scope: _AccountScope) -> tuple[list[_ProfitEvent], int]:
+    def _profit_events(self, user: User, scope: _AccountScope, movements: list[_CashEvent]) -> list[_ProfitEvent]:
+        """Return every closed trade visible in History for the active account.
+
+        Strategy-only filtering used here previously caused Performance to omit
+        manual Torum orders and trades opened directly in MT5.  The account
+        history is the source of truth: every CLOSED position contributes to
+        the calendar, while only fully enriched rows contribute monetary P/L.
+        """
+
         stmt = (
-            select(Position)
-            .join(Order, Order.id == Position.order_id)
+            select(Position, Order, StrategySignal)
+            .outerjoin(Order, Order.id == Position.order_id)
+            .outerjoin(StrategySignal, StrategySignal.id == Order.strategy_signal_id)
             .where(
                 Position.status == "CLOSED",
                 Position.closed_at.is_not(None),
-                Order.source == "STRATEGY",
-                Order.strategy_key == "torum_v1",
             )
             .order_by(Position.closed_at, Position.id)
         )
         if user.role != UserRole.admin:
             stmt = stmt.where(Position.user_id == user.id)
-        if scope.login is not None:
-            stmt = stmt.where(or_(Position.account_login == scope.login, Position.account_login.is_(None)))
-        if scope.server:
-            stmt = stmt.where(or_(Position.account_server == scope.server, Position.account_server.is_(None)))
-        if scope.mode:
-            stmt = stmt.where(Position.mode == scope.mode)
 
-        events: list[_ProfitEvent] = []
-        pending = 0
-        for position in self.db.scalars(stmt):
-            if position.profit is None or "PENDING" in str(position.enrichment_status or "").upper():
-                pending += 1
+        # Match the History page exactly when an MT5 account is active.  Do not
+        # leak legacy/null-account rows from another account into percentages.
+        if scope.login is not None:
+            stmt = stmt.where(Position.account_login == scope.login)
+        if scope.server:
+            stmt = stmt.where(Position.account_server == scope.server)
+
+        trading_settings = get_global_trading_settings(self.db)
+        prepared: list[tuple[Position, Order | None, StrategySignal | None, datetime, datetime, float | None]] = []
+        for position, order, signal in self.db.execute(stmt):
+            closed_at = _position_real_time(position.closed_at, position.mode)
+            opened_at = _position_real_time(position.opened_at, position.mode)
+            if closed_at is None or opened_at is None:
                 continue
             net = position.net_profit
-            if net is None:
-                pending += 1
-                continue
-            events.append(_ProfitEvent(_as_utc(position.closed_at), float(net), position.id))  # type: ignore[arg-type]
-        return events, pending
+            pending = (
+                position.profit is None
+                or net is None
+                or "PENDING" in str(position.enrichment_status or "").upper()
+            )
+            prepared.append((position, order, signal, opened_at, closed_at, None if pending else float(net)))
+
+        # Current MT5 balance is authoritative. Walk backwards to each opening
+        # instant so legacy/manual MT5 volumes are compared against the same
+        # base-lot rule that Torum used at that time rather than today's balance.
+        finalized_closes = [(closed_at, amount) for _, _, _, _, closed_at, amount in prepared if amount is not None]
+
+        events: list[_ProfitEvent] = []
+        for position, order, signal, opened_at, closed_at, net in prepared:
+            historical_balance = scope.current_balance
+            if historical_balance is not None:
+                historical_balance -= sum(amount for event_time, amount in finalized_closes if event_time >= opened_at)
+                historical_balance -= sum(movement.amount for movement in movements if movement.time > opened_at)
+
+            base_lot = calculate_lot_size(
+                available_equity=historical_balance,
+                equity_per_0_01_lot=trading_settings.equity_per_0_01_lot,
+                minimum_lot=trading_settings.minimum_lot,
+                multiplier=1,
+                enabled=trading_settings.lot_per_equity_enabled,
+            ).base_lot
+            multiplier = _trade_multiplier(
+                position=position,
+                order=order,
+                signal=signal,
+                base_lot=base_lot,
+            )
+
+            events.append(
+                _ProfitEvent(
+                    time=closed_at,
+                    amount=net,
+                    position_id=position.id,
+                    symbol=str(position.internal_symbol or (order.internal_symbol if order is not None else "")).upper(),
+                    multiplier=multiplier,
+                    volume=float(position.volume),
+                    side=str(position.side or "BUY").upper(),
+                    opened_at=opened_at,
+                    open_price=float(position.open_price),
+                    close_price=_float_or_none(position.close_price),
+                )
+            )
+        return events
 
     def _movement_stmt(self, user: User, scope: _AccountScope):
         # Manual ledgers are account-scoped when an MT5 account is known. This
@@ -537,6 +693,110 @@ def _merged_events(profits: Iterable[_ProfitEvent], movements: Iterable[_CashEve
     merged.extend((profit.time, 1, profit.amount) for profit in profits)
     merged.sort(key=lambda item: (item[0], item[1]))
     return merged
+
+
+def _breakdown(
+    events: list[_ProfitEvent],
+    *,
+    key: Any,
+    labels: dict[str, str],
+    order: tuple[str, ...],
+) -> list[PerformanceBreakdown]:
+    rows: list[PerformanceBreakdown] = []
+    for item_key in order:
+        grouped = [event for event in events if key(event) == item_key]
+        finalized = [event for event in grouped if event.amount is not None]
+        wins = sum(1 for event in finalized if float(event.amount) > 0)
+        losses = sum(1 for event in finalized if float(event.amount) < 0)
+        net = sum(float(event.amount) for event in finalized)
+        rows.append(
+            PerformanceBreakdown(
+                key=item_key,
+                label=labels.get(item_key, item_key),
+                trades=len(grouped),
+                pending=len(grouped) - len(finalized),
+                wins=wins,
+                losses=losses,
+                win_rate_pct=(wins / len(finalized) * 100.0) if finalized else None,
+                net_profit=net,
+                average_profit=(net / len(finalized)) if finalized else 0.0,
+            )
+        )
+    return rows
+
+
+def _streaks(events: list[_ProfitEvent]) -> tuple[int, int, str | None, int]:
+    max_wins = 0
+    max_losses = 0
+    current_type: str | None = None
+    current = 0
+    for event in events:
+        if event.amount is None:
+            continue
+        event_type = "WIN" if float(event.amount) > 0 else "LOSS" if float(event.amount) < 0 else None
+        if event_type is None:
+            continue
+        if event_type == current_type:
+            current += 1
+        else:
+            current_type = event_type
+            current = 1
+        if event_type == "WIN":
+            max_wins = max(max_wins, current)
+        else:
+            max_losses = max(max_losses, current)
+    return max_wins, max_losses, current_type, current
+
+
+def _trade_multiplier(
+    *,
+    position: Position,
+    order: Order | None,
+    signal: StrategySignal | None,
+    base_lot: float,
+) -> int:
+    """Resolve x1/x2/x3 without discarding non-strategy history.
+
+    Automatic Torum orders carry the exact accepted multiplier.  New manual
+    Torum orders persist the selected multiplier in their request payload.  Old
+    manual/external MT5 trades fall back to their volume relative to the
+    account's current base lot, which is the same lot-equivalent convention
+    used by the live capacity manager.
+    """
+
+    metadata = signal.metadata_json if signal is not None and isinstance(signal.metadata_json, dict) else {}
+    explicit = _int_or_none(metadata.get("accepted_multiplier")) or _int_or_none(metadata.get("desired_multiplier"))
+    if explicit is None and order is not None and isinstance(order.request_payload_json, dict):
+        explicit = _int_or_none(order.request_payload_json.get("multiplier"))
+    if explicit is not None:
+        return max(1, min(3, explicit))
+
+    safe_base = base_lot if base_lot > _EPSILON else 0.01
+    ratio = max(0.0, float(position.volume)) / safe_base
+    inferred = int(round(ratio)) if ratio > 0 else 1
+    return max(1, min(3, inferred))
+
+
+def _position_real_time(value: datetime | None, mode: str | None) -> datetime | None:
+    """Convert live MT5 broker wall-clock timestamps to a real UTC instant.
+
+    Torum intentionally stores MT5 chart/history timestamps as broker wall
+    clock with a UTC tag so chart markers line up with broker candles.  That
+    representation must not be used directly for calendar/TWR accounting.
+    PAPER positions already use canonical UTC and are left untouched.
+    """
+
+    if value is None:
+        return None
+    observed = _as_utc(value)
+    if str(mode or "").upper() == "PAPER":
+        return observed
+    try:
+        broker_zone = ZoneInfo(get_settings().chart_broker_time_zone)
+    except Exception:
+        broker_zone = ZoneInfo("Etc/GMT-3")
+    broker_wall = observed.replace(tzinfo=None).replace(tzinfo=broker_zone)
+    return broker_wall.astimezone(UTC)
 
 
 def _next_month(value: datetime) -> datetime:

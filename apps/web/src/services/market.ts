@@ -1,6 +1,6 @@
 import { apiRequest } from "./apiClient";
 import type { PositionRead } from "./trading";
-import { getAuthToken } from "../stores/authStore";
+import { getAuthToken } from "./authSession";
 import { resolveWsBaseUrl } from "./runtime";
 
 const WS_BASE_URL = resolveWsBaseUrl();
@@ -75,6 +75,10 @@ export interface MT5Account {
   equity: number | null;
   margin: number | null;
   margin_free: number | null;
+  margin_level: number | null;
+  margin_so_mode: number | null;
+  margin_so_call: number | null;
+  margin_so_so: number | null;
   leverage: number | null;
   trade_mode: "DEMO" | "REAL" | "UNKNOWN";
 }
@@ -84,6 +88,8 @@ export interface MT5Status {
   connected_to_backend: boolean;
   account_trade_mode: "DEMO" | "REAL" | "UNKNOWN";
   account: MT5Account | null;
+  terminal_trade_allowed: boolean | null;
+  terminal_tradeapi_disabled: boolean | null;
   active_symbols: string[];
   last_tick_time_by_symbol: Record<string, string>;
   ticks_sent_total: number;
@@ -91,6 +97,36 @@ export interface MT5Status {
   errors_count: number;
   message: string | null;
   updated_at: string | null;
+}
+
+
+export interface SavedMT5Account {
+  id: number;
+  alias: string;
+  login: number;
+  server: string;
+  last_trade_mode: "DEMO" | "REAL" | "UNKNOWN" | null;
+  last_company: string | null;
+  last_currency: string | null;
+  last_connected_at: string | null;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MT5DiscoveredAccount {
+  login: number;
+  server: string;
+  active: boolean;
+  already_saved: boolean;
+  source: "CURRENT" | "TERMINAL_DATA";
+}
+
+export interface MT5AccountSwitchResult {
+  ok: boolean;
+  account: SavedMT5Account;
+  mt5_status: MT5Status;
+  message: string;
 }
 
 export type MarketMessage =
@@ -184,6 +220,37 @@ export function getMockMarketStatus(): Promise<MockMarketStatus> {
 
 export function getMt5Status(): Promise<MT5Status> {
   return apiRequest<MT5Status>("/api/mt5/status");
+}
+
+
+export function getSavedMt5Accounts(): Promise<SavedMT5Account[]> {
+  return apiRequest<SavedMT5Account[]>("/api/mt5/accounts");
+}
+
+export function discoverMt5Accounts(): Promise<MT5DiscoveredAccount[]> {
+  return apiRequest<MT5DiscoveredAccount[]>("/api/mt5/accounts/discover");
+}
+
+export function saveMt5Account(payload: { alias?: string | null; login: number; server: string }): Promise<SavedMT5Account> {
+  return apiRequest<SavedMT5Account>("/api/mt5/accounts", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function renameSavedMt5Account(id: number, alias: string): Promise<SavedMT5Account> {
+  return apiRequest<SavedMT5Account>(`/api/mt5/accounts/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ alias })
+  });
+}
+
+export function deleteSavedMt5Account(id: number): Promise<void> {
+  return apiRequest<void>(`/api/mt5/accounts/${id}`, { method: "DELETE" });
+}
+
+export function switchMt5Account(id: number): Promise<MT5AccountSwitchResult> {
+  return apiRequest<MT5AccountSwitchResult>(`/api/mt5/accounts/${id}/switch`, { method: "POST" });
 }
 
 export function startMockMarket(): Promise<MockMarketStatus> {
